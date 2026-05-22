@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-05-22 03:31:10
+Generated on: 2026-05-22 06:39:53
 
 ```text
 biorxiv-mcp-server/
@@ -28,6 +28,7 @@ biorxiv-mcp-server/
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
+│   ├── list-skills.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -101,6 +102,8 @@ biorxiv-mcp-server/
 │   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
+│   ├── config/
+│   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
@@ -108,22 +111,45 @@ biorxiv-mcp-server/
 │   │   │   └── definitions/
 │   │   └── tools/
 │   │       └── definitions/
-│   │           └── echo.tool.ts
+│   │           ├── biorxiv-get-preprint.tool.ts
+│   │           ├── biorxiv-get-published-version.tool.ts
+│   │           ├── biorxiv-list-categories.tool.ts
+│   │           ├── biorxiv-list-recent.tool.ts
+│   │           ├── biorxiv-search-preprints.tool.ts
+│   │           └── index.ts
+│   ├── services/
+│   │   ├── biorxiv/
+│   │   │   ├── biorxiv-service.ts
+│   │   │   └── types.ts
+│   │   └── europe-pmc/
+│   │       ├── europe-pmc-service.ts
+│   │       └── types.ts
 │   └── index.ts
 ├── tests/
 │   ├── prompts/
 │   ├── resources/
+│   ├── services/
+│   │   ├── biorxiv/
+│   │   │   └── biorxiv-service.test.ts
+│   │   └── europe-pmc/
+│   │       └── europe-pmc-service.test.ts
 │   └── tools/
-│       └── echo.tool.test.ts
+│       ├── biorxiv-get-preprint.tool.test.ts
+│       ├── biorxiv-get-published-version.tool.test.ts
+│       ├── biorxiv-list-categories.tool.test.ts
+│       ├── biorxiv-list-recent.tool.test.ts
+│       └── biorxiv-search-preprints.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
 ├── biome.json
 ├── bun.lock
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json

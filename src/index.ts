@@ -1,17 +1,27 @@
 #!/usr/bin/env node
 /**
- * @fileoverview biorxiv-mcp-server MCP server entry point.
+ * @fileoverview biorxiv-mcp-server entry point. Initializes BiorxivApiService
+ * and EuropePmcService in setup(), then registers all tool definitions with
+ * createApp().
  * @module index
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
+import { allToolDefinitions } from './mcp-server/tools/definitions/index.js';
+import { initBiorxivApiService } from './services/biorxiv/biorxiv-service.js';
+import { initEuropePmcService } from './services/europe-pmc/europe-pmc-service.js';
 
 await createApp({
-  tools: [echoTool],
+  tools: [...allToolDefinitions],
   resources: [],
   prompts: [],
-  // instructions: 'Server-level orientation forwarded to the model on every initialize.\n' +
-  //   '- Use shortcut `X` for the most common case\n' +
-  //   '- Tools require auth via the `inventory:read` scope',
+  instructions:
+    'bioRxiv/medRxiv preprint server. Start with biorxiv_list_categories to see valid category strings for filtering. ' +
+    'Use biorxiv_list_recent for date-range browsing, biorxiv_get_preprint for DOI lookup, ' +
+    'biorxiv_search_preprints for keyword search (powered by EuropePMC), and ' +
+    'biorxiv_get_published_version for full crosswalk metadata when a preprint has been accepted to a journal.',
+  setup(core) {
+    initBiorxivApiService(core.config, core.storage);
+    initEuropePmcService(core.config, core.storage);
+  },
 });
