@@ -11,13 +11,6 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
-
-// Context is structurally assignable to RequestContext (per framework docs) but
-// lacks the index signature — cast once per service method for type safety.
-function asRc(ctx: Context): RequestContext {
-  return ctx as unknown as RequestContext;
-}
-
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   BiorxivServer,
@@ -29,6 +22,12 @@ import type {
   RawPreprintRevision,
   RawPublishedResponse,
 } from './types.js';
+
+// Context is structurally assignable to RequestContext but lacks the index
+// signature — cast once per call site.
+function asRc(ctx: Context): RequestContext {
+  return ctx as unknown as RequestContext;
+}
 
 const SERVER_VERSION = '0.1.0';
 

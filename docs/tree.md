@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-05-23 10:50:12
+Generated on: 2026-05-23 14:16:46
 
 ```text
 biorxiv-mcp-server/
@@ -146,6 +146,7 @@ biorxiv-mcp-server/
 ├── .mcpbignore
 ├── biome.json
 ├── bun.lock
+├── bunfig.toml
 ├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json

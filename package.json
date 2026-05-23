@@ -53,6 +53,7 @@
     "stdio",
     "streamable-http",
     "ai-agent",
+    "llm",
     "europepmc",
     "doi"
   ],

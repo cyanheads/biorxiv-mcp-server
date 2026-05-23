@@ -11,13 +11,14 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { getServerConfig } from '@/config/server-config.js';
+import type { EuropePmcResult, RawEuropePmcSearchResponse } from './types.js';
 
+// Context is structurally assignable to RequestContext but lacks the index
+// signature — cast once per call site.
 function asRc(ctx: Context): RequestContext {
   return ctx as unknown as RequestContext;
 }
-
-import { getServerConfig } from '@/config/server-config.js';
-import type { EuropePmcResult, RawEuropePmcSearchResponse } from './types.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -57,10 +58,8 @@ export class EuropePmcService {
   async search(options: SearchOptions, ctx: Context): Promise<EuropePmcResult[]> {
     const limit = Math.min(options.limit ?? 25, 100);
 
-    // Build the query string for EuropePMC
     let q = options.query;
 
-    // Add date filter if provided
     if (options.dateFrom || options.dateTo) {
       const from = options.dateFrom ?? '1900-01-01';
       const to = options.dateTo ?? '9999-12-31';
@@ -103,18 +102,17 @@ export class EuropePmcService {
           );
         }
         const data = JSON.parse(text) as RawEuropePmcSearchResponse;
-        const rawResults = data.resultList?.result ?? [];
-        const results: EuropePmcResult[] = [];
-        for (const raw of rawResults) {
-          if (!raw.doi) continue;
-          const r: EuropePmcResult = { doi: raw.doi };
-          if (raw.title) r.title = raw.title;
-          if (raw.authorString) r.authors = raw.authorString;
-          if (raw.firstPublicationDate) r.publishedDate = raw.firstPublicationDate;
-          if (raw.abstractText) r.abstract = raw.abstractText;
-          results.push(r);
-        }
-        return results;
+        return (data.resultList?.result ?? [])
+          .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
+          .map(
+            (raw): EuropePmcResult => ({
+              doi: raw.doi,
+              ...(raw.title && { title: raw.title }),
+              ...(raw.authorString && { authors: raw.authorString }),
+              ...(raw.firstPublicationDate && { publishedDate: raw.firstPublicationDate }),
+              ...(raw.abstractText && { abstract: raw.abstractText }),
+            }),
+          );
       },
       {
         operation: 'EuropePmcService.search',

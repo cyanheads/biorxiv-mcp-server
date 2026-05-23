@@ -17,7 +17,7 @@ import type { PreprintRevision } from '@/services/biorxiv/types.js';
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 type PreprintForFormat = {
-  [K in keyof PreprintRevision]: K extends 'doi' ? string : PreprintRevision[K] | undefined;
+  [K in keyof PreprintRevision]: PreprintRevision[K] | undefined;
 };
 
 function formatPreprint(p: PreprintForFormat): string {
@@ -122,7 +122,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .string()
       .optional()
       .describe(
-        'DataCanvas ID when result overflowed the inline preview budget. Use biorxiv_query_canvas to run SQL over the full result set.',
+        'DataCanvas ID when result overflowed the inline preview budget. Requires CANVAS_PROVIDER_TYPE=duckdb; run SQL against the full result set using the canvas ID.',
       ),
     message: z
       .string()
@@ -192,6 +192,17 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       medrxiv?: PaginationEntry;
     } = {};
 
+    function toPaginationEntry(r: {
+      pagination: { cursor: number; total: number };
+      preprints: PreprintRevision[];
+    }): PaginationEntry {
+      const nextCursor =
+        r.pagination.cursor + r.preprints.length < r.pagination.total
+          ? r.pagination.cursor + 30
+          : undefined;
+      return { ...r.pagination, ...(nextCursor !== undefined && { nextCursor }) };
+    }
+
     let allPreprints: PreprintRevision[] = [];
 
     if (input.server === 'both') {
@@ -215,25 +226,15 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       ]);
 
       if (bxResult.status === 'fulfilled') {
-        const r = bxResult.value;
-        const nextCursor =
-          r.pagination.cursor + r.preprints.length < r.pagination.total
-            ? r.pagination.cursor + 30
-            : undefined;
-        pagination.biorxiv = { ...r.pagination, ...(nextCursor !== undefined && { nextCursor }) };
-        allPreprints.push(...r.preprints);
+        pagination.biorxiv = toPaginationEntry(bxResult.value);
+        allPreprints.push(...bxResult.value.preprints);
       } else {
         ctx.log.warning('bioRxiv listing failed', { error: String(bxResult.reason) });
       }
 
       if (mxResult.status === 'fulfilled') {
-        const r = mxResult.value;
-        const nextCursor =
-          r.pagination.cursor + r.preprints.length < r.pagination.total
-            ? r.pagination.cursor + 30
-            : undefined;
-        pagination.medrxiv = { ...r.pagination, ...(nextCursor !== undefined && { nextCursor }) };
-        allPreprints.push(...r.preprints);
+        pagination.medrxiv = toPaginationEntry(mxResult.value);
+        allPreprints.push(...mxResult.value.preprints);
       } else {
         ctx.log.warning('medRxiv listing failed', { error: String(mxResult.reason) });
       }
@@ -246,14 +247,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         category,
         ctx,
       );
-      const nextCursor =
-        r.pagination.cursor + r.preprints.length < r.pagination.total
-          ? r.pagination.cursor + 30
-          : undefined;
-      pagination[input.server] = {
-        ...r.pagination,
-        ...(nextCursor !== undefined && { nextCursor }),
-      };
+      pagination[input.server] = toPaginationEntry(r);
       allPreprints = r.preprints;
     }
 
