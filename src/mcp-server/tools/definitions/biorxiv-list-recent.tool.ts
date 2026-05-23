@@ -169,7 +169,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     }
 
     // Validate category
-    if (input.category && input.category.trim()) {
+    if (input.category?.trim()) {
       const service = getBiorxivApiService();
       if (!service.isValidCategory(input.category)) {
         throw ctx.fail('invalid_category', `Category "${input.category}" is not in the taxonomy.`, {

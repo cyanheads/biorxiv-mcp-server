@@ -277,7 +277,7 @@ export class BiorxivApiService {
         }
         const data = JSON.parse(text) as RawPublishedResponse;
         const record = data.collection?.[0];
-        if (!record || !record.preprint_doi) return;
+        if (!record?.preprint_doi) return;
         const pv: PublishedVersion = { preprintDoi: record.preprint_doi };
         if (record.published_doi) pv.publishedDoi = record.published_doi;
         if (record.published_journal) pv.publishedJournal = record.published_journal;

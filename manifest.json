@@ -1,0 +1,34 @@
+{
+  "manifest_version": "0.3",
+  "name": "biorxiv-mcp-server",
+  "version": "0.1.2",
+  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP.",
+  "author": { "name": "cyanheads" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "BIORXIV_MAILTO": "${user_config.BIORXIV_MAILTO}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {
+    "BIORXIV_MAILTO": {
+      "title": "Contact Email",
+      "description": "Email address included in User-Agent header for polite API access (required by bioRxiv).",
+      "type": "string",
+      "required": true
+    }
+  }
+}
