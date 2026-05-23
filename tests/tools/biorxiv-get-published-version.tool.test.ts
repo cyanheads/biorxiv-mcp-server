@@ -42,7 +42,7 @@ describe('biorxivGetPublishedVersionTool', () => {
     const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
     const input = biorxivGetPublishedVersionTool.input.parse({ doi: 'bad-doi' });
     await expect(biorxivGetPublishedVersionTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_doi_format' },
     });
   });

@@ -123,7 +123,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     },
     {
       reason: 'invalid_doi_format',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'One or more input DOIs do not match the 10.NNNN/ pattern.',
       recovery:
         'Correct the DOI format — bioRxiv DOIs start with 10.1101/ followed by the manuscript ID.',

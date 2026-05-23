@@ -48,7 +48,7 @@ describe('biorxivGetPreprintTool', () => {
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({ dois: ['not-a-doi'] });
     await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_doi_format' },
     });
   });

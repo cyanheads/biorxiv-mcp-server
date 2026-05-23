@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-05-23 09:08:07
+Generated on: 2026-05-23 10:50:12
 
 ```text
 biorxiv-mcp-server/
@@ -150,6 +150,7 @@ biorxiv-mcp-server/
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
+├── LICENSE
 ├── manifest.json
 ├── package.json
 ├── README.md

@@ -56,7 +56,7 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-01',
     });
     await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_date_range' },
     });
   });
@@ -68,7 +68,7 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-31',
     });
     await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_date_range' },
     });
   });
@@ -82,7 +82,7 @@ describe('biorxivListRecentTool', () => {
       category: 'FakeCategory',
     });
     await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_category' },
     });
   });

@@ -53,7 +53,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     },
     {
       reason: 'invalid_doi_format',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The input DOI does not match the 10.NNNN/ pattern.',
       recovery:
         'Correct the DOI format — bioRxiv DOIs start with 10.1101/ followed by the manuscript ID.',

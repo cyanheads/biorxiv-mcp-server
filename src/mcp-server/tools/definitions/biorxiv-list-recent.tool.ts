@@ -133,13 +133,13 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   errors: [
     {
       reason: 'invalid_date_range',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'end_date is before start_date, or either date is malformed.',
       recovery: 'Provide valid YYYY-MM-DD dates where start_date is on or before end_date.',
     },
     {
       reason: 'invalid_category',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied category string is not in the taxonomy.',
       recovery: 'Call biorxiv_list_categories to get valid category strings and retry.',
     },
