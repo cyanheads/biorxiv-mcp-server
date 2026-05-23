@@ -49,6 +49,9 @@
     "mcp-server",
     "model-context-protocol",
     "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
     "ai-agent",
     "europepmc",
     "doi"
