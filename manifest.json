@@ -2,8 +2,10 @@
   "manifest_version": "0.3",
   "name": "biorxiv-mcp-server",
   "version": "0.1.2",
-  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP.",
-  "author": { "name": "cyanheads" },
+  "description": "Search and retrieve bioRxiv and medRxiv preprints \u2014 by DOI, date interval, or keyword \u2014 via MCP.",
+  "author": {
+    "name": "cyanheads"
+  },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -19,16 +21,18 @@
     }
   },
   "compatibility": {
-    "runtimes": { "node": ">=24.0.0" }
+    "runtimes": {
+      "node": ">=24.0.0"
+    }
   },
   "tools_generated": true,
   "prompts_generated": true,
   "user_config": {
     "BIORXIV_MAILTO": {
       "title": "Contact Email",
-      "description": "Email address included in User-Agent header for polite API access (required by bioRxiv).",
+      "description": "Contact email for User-Agent header \u2014 optional, for polite API access.",
       "type": "string",
-      "required": true
+      "required": false
     }
   }
 }

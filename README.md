@@ -166,7 +166,6 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 BIORXIV_MAILTO=your@email.com bun run
 ### Prerequisites
 
 - [Bun v1.3.2](https://bun.sh/) or higher (or Node.js v24+).
-- A contact email address for `BIORXIV_MAILTO` — included in the `User-Agent` header per Cold Spring Harbor Lab API guidelines.
 
 ### Installation
 
@@ -192,7 +191,7 @@ bun install
 
 ```sh
 cp .env.example .env
-# edit .env and set BIORXIV_MAILTO
+# optionally set BIORXIV_MAILTO for polite API access
 ```
 
 ## Configuration
@@ -201,7 +200,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `BIORXIV_MAILTO` | **Required.** Email address included in the `User-Agent` header for polite API access. | — |
+| `BIORXIV_MAILTO` | Email address included in the `User-Agent` header for polite API access per Cold Spring Harbor Lab guidelines. Optional, but recommended. | — |
 | `BIORXIV_API_BASE_URL` | Override the bioRxiv API base URL. | `https://api.biorxiv.org` |
 | `EUROPEPMC_API_BASE_URL` | Override the EuropePMC base URL. | `https://www.ebi.ac.uk/europepmc/webservices/rest` |
 | `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas spillover for large result sets (Node only). | — |

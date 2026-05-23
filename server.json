@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/biorxiv-mcp-server",
-  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP.",
+  "description": "Search and retrieve bioRxiv and medRxiv preprints \u2014 by DOI, date interval, or keyword \u2014 via MCP.",
   "repository": {
     "url": "https://github.com/cyanheads/biorxiv-mcp-server",
     "source": "github"
@@ -27,9 +27,9 @@
       "environmentVariables": [
         {
           "name": "BIORXIV_MAILTO",
-          "description": "Email address included in the User-Agent header for polite API access. Required.",
+          "description": "Contact email for User-Agent header \u2014 optional, for polite API access.",
           "format": "string",
-          "isRequired": true
+          "isRequired": false
         },
         {
           "name": "MCP_LOG_LEVEL",
@@ -62,9 +62,9 @@
       "environmentVariables": [
         {
           "name": "BIORXIV_MAILTO",
-          "description": "Email address included in the User-Agent header for polite API access. Required.",
+          "description": "Contact email for User-Agent header \u2014 optional, for polite API access.",
           "format": "string",
-          "isRequired": true
+          "isRequired": false
         },
         {
           "name": "MCP_HTTP_HOST",

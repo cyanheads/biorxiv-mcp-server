@@ -9,7 +9,11 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  mailto: z.string().email().describe('Contact email for User-Agent header'),
+  mailto: z
+    .string()
+    .email()
+    .optional()
+    .describe('Contact email for User-Agent header — optional, used for polite API access'),
   apiBaseUrl: z.string().url().default('https://api.biorxiv.org').describe('bioRxiv API base URL'),
   europePmcBaseUrl: z
     .string()

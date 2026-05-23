@@ -76,7 +76,7 @@ Pairs naturally with **pubmed-mcp-server** (post-publication side), **openalex-m
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `BIORXIV_MAILTO` | Yes | Email address included in the `User-Agent` header (e.g. `your@email.com`). Required for polite API access. |
+| `BIORXIV_MAILTO` | No | Email address included in the `User-Agent` header (e.g. `your@email.com`). Optional, but recommended for polite API access. |
 | `BIORXIV_API_BASE_URL` | No | Override the API base URL. Defaults to `https://api.biorxiv.org`. |
 | `EUROPEPMC_API_BASE_URL` | No | Override EuropePMC base URL. Defaults to `https://www.ebi.ac.uk/europepmc/webservices/rest`. |
 | `CANVAS_PROVIDER_TYPE` | No | Set to `duckdb` to enable DataCanvas spillover for large result sets. Node only. |

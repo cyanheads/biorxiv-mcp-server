@@ -159,7 +159,9 @@ export class BiorxivApiService {
   constructor(_config: AppConfig, _storage: StorageService) {
     const serverCfg = getServerConfig();
     this.baseUrl = serverCfg.apiBaseUrl;
-    this.userAgent = `biorxiv-mcp-server/${SERVER_VERSION} (mailto:${serverCfg.mailto})`;
+    this.userAgent = serverCfg.mailto
+      ? `biorxiv-mcp-server/${SERVER_VERSION} (mailto:${serverCfg.mailto})`
+      : `biorxiv-mcp-server/${SERVER_VERSION}`;
   }
 
   /** Returns the hardcoded subject category taxonomy. No API call. */

@@ -85,7 +85,7 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  mailto: z.email().describe('Contact email for User-Agent header'),
+  mailto: z.email().optional().describe('Contact email for User-Agent header — optional, for polite API access'),
   apiBaseUrl: z.url().default('https://api.biorxiv.org').describe('bioRxiv API base URL'),
   europePmcBaseUrl: z.url().default('https://www.ebi.ac.uk/europepmc/webservices/rest').describe('EuropePMC API base URL'),
 });
@@ -101,7 +101,7 @@ export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`BIORXIV_MAILTO` is required) rather than the internal path.
+`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable rather than the internal path.
 
 ---
 
@@ -199,7 +199,7 @@ src/
 - **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous.
 - **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. `10.1101/` prefix identifies bioRxiv; skip the parallel medRxiv enrichment call for those DOIs.
 - **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and abstracts must all appear in the rendered markdown, not just counts.
-- **Polite access:** include `BIORXIV_MAILTO` in every `User-Agent` header: `biorxiv-mcp-server/0.1.0 (mailto:${config.mailto})`.
+- **Polite access:** include `BIORXIV_MAILTO` in the `User-Agent` header when set: `biorxiv-mcp-server/0.1.0 (mailto:${config.mailto})`. The env var is optional — omit the mailto segment when not configured.
 
 ---
 
@@ -300,7 +300,7 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] bioRxiv API wrapping: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] bioRxiv API wrapping: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data (e.g., `published` field may be `"NA"` — surface it as absent, not empty)
 - [ ] bioRxiv API wrapping: tests include at least one sparse payload case with omitted upstream fields
-- [ ] `BIORXIV_MAILTO` included in every outbound User-Agent header
+- [ ] `BIORXIV_MAILTO` included in outbound User-Agent header when set (optional env var)
 - [ ] DOI format validated on input (`10.1101/` prefix check) before calling API
 - [ ] Two-server fan-out uses `Promise.allSettled`; partial failures reported per-DOI in `failed[]`
 - [ ] `biorxiv_list_recent` with `server="both"` surfaces per-server pagination state, not a merged cursor
