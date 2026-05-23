@@ -66,11 +66,14 @@ export class EuropePmcService {
       q += ` AND FIRST_PDATE:[${from} TO ${to}]`;
     }
 
-    // Scope to preprints; narrow to the specific server publisher when requested
+    // Scope to preprints; narrow to the specific server publisher when requested.
+    // 'both' requires an explicit OR constraint — source:PPR alone includes journals.
     if (options.server === 'biorxiv') {
       q += ' AND PUBLISHER:bioRxiv';
     } else if (options.server === 'medrxiv') {
       q += ' AND PUBLISHER:medRxiv';
+    } else {
+      q += ' AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)';
     }
     const filterParam = 'source:PPR';
 

@@ -138,7 +138,7 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   if (raw.category) rev.category = raw.category;
   if (raw.jatsxml) rev.jatsxmlUrl = raw.jatsxml;
   if (raw.abstract) rev.abstract = raw.abstract;
-  if (raw.funder) {
+  if (raw.funder && raw.funder !== 'NA') {
     if (Array.isArray(raw.funder)) {
       const names = raw.funder
         .map((f) => f.name ?? '')
@@ -178,9 +178,14 @@ export class BiorxivApiService {
     return CATEGORIES;
   }
 
-  /** Returns true if the given category string is in the taxonomy. */
-  isValidCategory(category: string): boolean {
-    return ALL_CATEGORIES.has(category);
+  /**
+   * Returns true if the given category string is valid for the specified server(s).
+   * When server is 'both', the category must exist in at least one server's taxonomy.
+   * Use isValidCategoryForServer() to check per-server membership.
+   */
+  isValidCategory(category: string, server: BiorxivServer | 'both' = 'both'): boolean {
+    if (server === 'both') return ALL_CATEGORIES.has(category);
+    return new Set(CATEGORIES[server]).has(category);
   }
 
   /**

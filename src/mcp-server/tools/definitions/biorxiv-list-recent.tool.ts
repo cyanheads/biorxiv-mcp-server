@@ -168,18 +168,22 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       );
     }
 
-    // Validate category
-    if (input.category?.trim()) {
+    // Validate category — trim before checking, and validate against the target server(s)
+    const trimmedCategory = input.category?.trim();
+    if (trimmedCategory) {
       const service = getBiorxivApiService();
-      if (!service.isValidCategory(input.category)) {
-        throw ctx.fail('invalid_category', `Category "${input.category}" is not in the taxonomy.`, {
-          ...ctx.recoveryFor('invalid_category'),
-        });
+      if (!service.isValidCategory(trimmedCategory, input.server)) {
+        const serverLabel = input.server === 'both' ? 'bioRxiv or medRxiv' : input.server;
+        throw ctx.fail(
+          'invalid_category',
+          `Category "${trimmedCategory}" is not valid for ${serverLabel}.`,
+          { ...ctx.recoveryFor('invalid_category') },
+        );
       }
     }
 
     const service = getBiorxivApiService();
-    const category = input.category?.trim() || undefined;
+    const category = trimmedCategory || undefined;
 
     type PaginationEntry = {
       cursor: number;
@@ -252,6 +256,14 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     }
 
     if (allPreprints.length === 0) {
+      // Detect cursor-overshoot: cursor > 0 but zero results — filters are fine, cursor is past the end
+      if (input.cursor > 0) {
+        return {
+          preprints: [],
+          pagination,
+          message: `Cursor ${input.cursor} is past the last available page for this date/filter combination. Set cursor to a lower offset.`,
+        };
+      }
       const filterDesc = [
         `dates ${input.start_date}–${input.end_date}`,
         category ? `category "${category}"` : null,

@@ -123,14 +123,14 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       code: JsonRpcErrorCode.NotFound,
       when: 'ALL requested DOIs resolve to empty collections on all requested servers.',
       recovery:
-        'Verify the DOI format (must start with 10.1101/) and check it exists on bioRxiv or medRxiv.',
+        'Verify the DOI exists on bioRxiv or medRxiv. Supported prefixes: 10.1101/ and 10.64898/.',
     },
     {
       reason: 'invalid_doi_format',
       code: JsonRpcErrorCode.ValidationError,
       when: 'One or more input DOIs do not match the 10.NNNN/ pattern.',
       recovery:
-        'Correct the DOI format — bioRxiv DOIs start with 10.1101/ followed by the manuscript ID.',
+        'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
     },
   ],
 
@@ -139,15 +139,6 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       doiCount: input.dois.length,
       server: input.server,
     });
-
-    // Validate all DOIs up front
-    const badDois = input.dois.filter((d) => !DOI_REGEX.test(d));
-    if (badDois.length > 0) {
-      throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${badDois.join(', ')}`, {
-        badDois,
-        ...ctx.recoveryFor('invalid_doi_format'),
-      });
-    }
 
     const service = getBiorxivApiService();
 
@@ -160,6 +151,14 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     // For each DOI, fan out across servers in parallel
     await Promise.all(
       input.dois.map(async (doi) => {
+        // Route format-invalid DOIs to failed[] rather than aborting the batch
+        if (!DOI_REGEX.test(doi)) {
+          failed.push({
+            doi,
+            error: `Invalid DOI format — must match 10.NNNN/… (e.g. 10.1101/… or 10.64898/…).`,
+          });
+          return;
+        }
         try {
           let revisions: PreprintRevision[] = [];
 
@@ -197,8 +196,14 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       }),
     );
 
-    // All DOIs failed → throw declared error
+    // All DOIs failed — pick the appropriate declared error
     if (preprints.length === 0 && failed.length === input.dois.length) {
+      const allFormatErrors = failed.every((f) => f.error.startsWith('Invalid DOI format'));
+      if (allFormatErrors) {
+        throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.dois.join(', ')}`, {
+          ...ctx.recoveryFor('invalid_doi_format'),
+        });
+      }
       throw ctx.fail(
         'doi_not_found',
         `None of the requested DOIs were found: ${input.dois.join(', ')}`,

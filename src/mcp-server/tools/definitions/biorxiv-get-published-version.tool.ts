@@ -60,7 +60,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       code: JsonRpcErrorCode.ValidationError,
       when: 'The input DOI does not match the 10.NNNN/ pattern.',
       recovery:
-        'Correct the DOI format — bioRxiv DOIs start with 10.1101/ followed by the manuscript ID.',
+        'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
     },
   ],
 

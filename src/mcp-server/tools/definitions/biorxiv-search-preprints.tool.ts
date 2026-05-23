@@ -8,11 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import {
-  JsonRpcErrorCode,
-  serviceUnavailable,
-  validationError,
-} from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
@@ -64,7 +60,13 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    query: z.string().min(1).describe('Keyword search query.'),
+    query: z
+      .string()
+      .min(1)
+      .refine((s) => s.trim().length > 0, {
+        message: 'query must contain non-whitespace characters',
+      })
+      .describe('Keyword search query.'),
     server: z
       .enum(['biorxiv', 'medrxiv', 'both'])
       .default('both')
@@ -128,6 +130,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
   errors: [
     {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'date_from or date_to is malformed, or date_from is after date_to.',
+      recovery: 'Provide valid YYYY-MM-DD dates where date_from is on or before date_to.',
+    },
+    {
       reason: 'search_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'EuropePMC search endpoint is unreachable or returns a server error.',
@@ -145,17 +153,26 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
     // Validate date inputs before calling EuropePMC
     if (input.date_from && !DATE_REGEX.test(input.date_from)) {
-      throw validationError('date_from must be in YYYY-MM-DD format.', {
+      throw ctx.fail('invalid_date_range', 'date_from must be in YYYY-MM-DD format.', {
         date_from: input.date_from,
+        ...ctx.recoveryFor('invalid_date_range'),
       });
     }
     if (input.date_to && !DATE_REGEX.test(input.date_to)) {
-      throw validationError('date_to must be in YYYY-MM-DD format.', { date_to: input.date_to });
+      throw ctx.fail('invalid_date_range', 'date_to must be in YYYY-MM-DD format.', {
+        date_to: input.date_to,
+        ...ctx.recoveryFor('invalid_date_range'),
+      });
     }
     if (input.date_from && input.date_to && input.date_from > input.date_to) {
-      throw validationError(
+      throw ctx.fail(
+        'invalid_date_range',
         `date_from (${input.date_from}) must be on or before date_to (${input.date_to}).`,
-        { date_from: input.date_from, date_to: input.date_to },
+        {
+          date_from: input.date_from,
+          date_to: input.date_to,
+          ...ctx.recoveryFor('invalid_date_range'),
+        },
       );
     }
 
