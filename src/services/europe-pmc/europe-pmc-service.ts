@@ -44,7 +44,9 @@ export class EuropePmcService {
   constructor(_config: AppConfig, _storage: StorageService) {
     const serverCfg = getServerConfig();
     this.baseUrl = serverCfg.europePmcBaseUrl;
-    this.userAgent = `biorxiv-mcp-server/${SERVER_VERSION} (mailto:${serverCfg.mailto})`;
+    this.userAgent = serverCfg.mailto
+      ? `biorxiv-mcp-server/${SERVER_VERSION} (mailto:${serverCfg.mailto})`
+      : `biorxiv-mcp-server/${SERVER_VERSION}`;
   }
 
   /**
@@ -65,11 +67,12 @@ export class EuropePmcService {
       q += ` AND FIRST_PDATE:[${from} TO ${to}]`;
     }
 
-    // Scope to preprints; optionally scope to specific source
-    if (options.server === 'biorxiv' || options.server === 'medrxiv') {
-      q += ' AND SRC:PPR AND PUBLISHER:"Cold Spring Harbor Laboratory"';
+    // Scope to preprints; narrow to the specific server publisher when requested
+    if (options.server === 'biorxiv') {
+      q += ' AND PUBLISHER:bioRxiv';
+    } else if (options.server === 'medrxiv') {
+      q += ' AND PUBLISHER:medRxiv';
     }
-    // For 'both' or unspecified, use the preprint filter broadly
     const filterParam = 'source:PPR';
 
     const fields = 'doi,title,authorString,firstPublicationDate,abstractText';

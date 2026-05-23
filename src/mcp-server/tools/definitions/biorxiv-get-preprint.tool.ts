@@ -78,7 +78,11 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
 
   input: z.object({
     dois: z
-      .array(z.string().describe('Preprint DOI (e.g. 10.1101/2024.01.15.575123).'))
+      .array(
+        z
+          .string()
+          .describe('Preprint DOI (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463).'),
+      )
       .min(1)
       .max(10)
       .describe('One or more preprint DOIs to look up (max 10).'),

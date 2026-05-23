@@ -139,7 +139,17 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   if (raw.category) rev.category = raw.category;
   if (raw.jatsxml) rev.jatsxmlUrl = raw.jatsxml;
   if (raw.abstract) rev.abstract = raw.abstract;
-  if (raw.funder) rev.funder = raw.funder;
+  if (raw.funder) {
+    if (Array.isArray(raw.funder)) {
+      const names = raw.funder
+        .map((f) => f.name ?? '')
+        .filter(Boolean)
+        .join('; ');
+      if (names) rev.funder = names;
+    } else {
+      rev.funder = raw.funder;
+    }
+  }
   // Normalize "NA" to absent — callers should check undefined, not "NA"
   if (raw.published && raw.published !== 'NA') rev.publishedJournalDoi = raw.published;
   if (raw.server) rev.server = raw.server;
@@ -179,7 +189,8 @@ export class BiorxivApiService {
    * Returns an empty collection if the DOI is not found on this server.
    */
   async getDetails(doi: string, server: BiorxivServer, ctx: Context): Promise<PreprintRevision[]> {
-    const url = `${this.baseUrl}/details/${server}/${encodeURIComponent(doi)}/0/json`;
+    const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
+    const url = `${this.baseUrl}/details/${server}/${encodedDoi}/0/json`;
     const rc = asRc(ctx);
     return withRetry(
       async () => {
@@ -238,7 +249,13 @@ export class BiorxivApiService {
         }
         const data = JSON.parse(text) as RawDetailsResponse;
         const msg = data.messages?.[0];
-        const total = typeof msg?.total === 'number' ? msg.total : 0;
+        const rawTotal = msg?.total;
+        const total =
+          typeof rawTotal === 'number'
+            ? rawTotal
+            : typeof rawTotal === 'string'
+              ? parseInt(rawTotal, 10) || 0
+              : 0;
         const preprints = (data.collection ?? []).map(normalizeRevision);
         return {
           preprints,
@@ -263,7 +280,8 @@ export class BiorxivApiService {
     server: BiorxivServer,
     ctx: Context,
   ): Promise<PublishedVersion | undefined> {
-    const url = `${this.baseUrl}/pubs/${server}/${encodeURIComponent(doi)}/json`;
+    const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
+    const url = `${this.baseUrl}/pubs/${server}/${encodedDoi}/json`;
     const rc = asRc(ctx);
     return withRetry(
       async () => {

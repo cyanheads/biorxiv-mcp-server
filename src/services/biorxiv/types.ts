@@ -14,6 +14,14 @@ export type ServerParam = BiorxivServer | 'both';
 
 // ─── Raw API shapes ─────────────────────────────────────────────────────────
 
+/** A funder entry in the bioRxiv API funder array */
+export interface RawFunderEntry {
+  award?: string;
+  id?: string;
+  'id-type'?: string;
+  name?: string;
+}
+
 /**
  * A single preprint revision as returned by the /details endpoint.
  * Fields marked optional may be absent from real upstream payloads.
@@ -26,7 +34,8 @@ export interface RawPreprintRevision {
   category?: string;
   date?: string;
   doi: string;
-  funder?: string;
+  /** Either a plain string ("NA"), an array of funder objects, or absent */
+  funder?: string | RawFunderEntry[];
   jatsxml?: string;
   license?: string;
   /** Journal DOI after publication, or "NA" when not yet published */
@@ -42,12 +51,13 @@ export interface RawDetailsResponse {
   collection?: RawPreprintRevision[];
   messages?: Array<{
     status?: string;
-    total?: number;
+    /** API returns total as a string (e.g. "915"), not a number */
+    total?: number | string;
     count?: number;
     cursor?: number | string;
     message?: string;
     category?: string;
-    count_new_papers?: number;
+    count_new_papers?: number | string;
   }>;
 }
 

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-05-23
+
+Field-test bug fixes: DOI encoding, funder parsing, pagination total, EuropePMC server filter, date validation, User-Agent, new DOI prefix.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-05-23
 
 Error code semantics for domain validation; mcp-ts-core ^0.9.5 → ^0.9.6.

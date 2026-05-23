@@ -19,7 +19,11 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    doi: z.string().describe('Preprint DOI to resolve (e.g. 10.1101/2024.01.15.575123).'),
+    doi: z
+      .string()
+      .describe(
+        'Preprint DOI to resolve (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463).',
+      ),
     server: z
       .enum(['biorxiv', 'medrxiv'])
       .default('biorxiv')

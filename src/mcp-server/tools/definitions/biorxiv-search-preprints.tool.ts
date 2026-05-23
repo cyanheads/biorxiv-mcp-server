@@ -8,13 +8,19 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  serviceUnavailable,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import type { EuropePmcResult } from '@/services/europe-pmc/types.js';
 
-const BIORXIV_DOI_PREFIX = '10.1101/';
+const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
+
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 function formatResult(
   doi: string,
@@ -137,6 +143,22 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       limit: input.limit,
     });
 
+    // Validate date inputs before calling EuropePMC
+    if (input.date_from && !DATE_REGEX.test(input.date_from)) {
+      throw validationError('date_from must be in YYYY-MM-DD format.', {
+        date_from: input.date_from,
+      });
+    }
+    if (input.date_to && !DATE_REGEX.test(input.date_to)) {
+      throw validationError('date_to must be in YYYY-MM-DD format.', { date_to: input.date_to });
+    }
+    if (input.date_from && input.date_to && input.date_from > input.date_to) {
+      throw validationError(
+        `date_from (${input.date_from}) must be on or before date_to (${input.date_to}).`,
+        { date_from: input.date_from, date_to: input.date_to },
+      );
+    }
+
     const epmc = getEuropePmcService();
     const biorxiv = getBiorxivApiService();
 
@@ -194,7 +216,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     const enriched = await Promise.all(
       epmcResults.map(async (epResult): Promise<EnrichedPreprint> => {
         const doi = epResult.doi;
-        const isBiorxivDoi = doi.startsWith(BIORXIV_DOI_PREFIX);
+        const isBiorxivDoi = BIORXIV_DOI_PREFIXES.some((p) => doi.startsWith(p));
 
         // Determine which server(s) to enrich against
         let revisions: PreprintRevision[] = [];
