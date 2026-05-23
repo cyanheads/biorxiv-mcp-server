@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-05-23 14:16:46
+Generated on: 2026-05-23 14:27:55
 
 ```text
 biorxiv-mcp-server/
@@ -144,6 +144,7 @@ biorxiv-mcp-server/
 ├── .env.example
 ├── .gitignore
 ├── .mcpbignore
+├── AGENTS.md
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml

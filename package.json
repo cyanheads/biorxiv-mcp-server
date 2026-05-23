@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/biorxiv-mcp-server",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "mcpName": "io.github.cyanheads/biorxiv-mcp-server",
   "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "type": "module",
