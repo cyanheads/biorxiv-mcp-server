@@ -119,7 +119,9 @@ const CATEGORIES: CategoryTaxonomy = {
   ],
 };
 
-// All valid category strings in one flat set for quick validation
+// Pre-built sets for O(1) category membership checks
+const BIORXIV_CATEGORIES = new Set(CATEGORIES.biorxiv);
+const MEDRXIV_CATEGORIES = new Set(CATEGORIES.medrxiv);
 const ALL_CATEGORIES = new Set([...CATEGORIES.biorxiv, ...CATEGORIES.medrxiv]);
 
 // ─── Normalization helpers ────────────────────────────────────────────────────
@@ -185,7 +187,7 @@ export class BiorxivApiService {
    */
   isValidCategory(category: string, server: BiorxivServer | 'both' = 'both'): boolean {
     if (server === 'both') return ALL_CATEGORIES.has(category);
-    return new Set(CATEGORIES[server]).has(category);
+    return (server === 'biorxiv' ? BIORXIV_CATEGORIES : MEDRXIV_CATEGORIES).has(category);
   }
 
   /**

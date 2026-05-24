@@ -1,8 +1,8 @@
 {
   "name": "@cyanheads/biorxiv-mcp-server",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "mcpName": "io.github.cyanheads/biorxiv-mcp-server",
-  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
+  "description": "Search and retrieve bioRxiv and medRxiv preprints \u2014 by DOI, date interval, or keyword \u2014 via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -50,10 +50,7 @@
     "model-context-protocol",
     "typescript",
     "bun",
-    "stdio",
-    "streamable-http",
     "ai-agent",
-    "llm",
     "europepmc",
     "doi"
   ],

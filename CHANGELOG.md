@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-05-24
+
+Fix server=\"both\" category routing and medRxiv DOI enrichment.
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-05-23
 
 Bug fixes across error contracts, search enrichment, validation, and formatting in bioRxiv tools.

@@ -128,6 +128,12 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .string()
       .optional()
       .describe('Recovery hint when zero results are returned — echoes applied filters.'),
+    category_note: z
+      .string()
+      .optional()
+      .describe(
+        'Present when server="both" and the category belongs to only one server\'s taxonomy. Explains which server the filter was applied to.',
+      ),
   }),
 
   errors: [
@@ -209,14 +215,35 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
 
     let allPreprints: PreprintRevision[] = [];
 
+    // When server="both" and a category is given, check membership per-server once.
+    // These booleans drive both the routing (pass vs. undefined) and the category_note.
+    const inBx =
+      input.server === 'both' && !!category && service.isValidCategory(category, 'biorxiv');
+    const inMx =
+      input.server === 'both' && !!category && service.isValidCategory(category, 'medrxiv');
+
+    let categoryNote: string | undefined;
+    if (input.server === 'both' && category) {
+      if (inBx && !inMx) {
+        categoryNote = `Category "${category}" is specific to bioRxiv — the filter was applied to bioRxiv only. medRxiv results are unfiltered.`;
+      } else if (inMx && !inBx) {
+        categoryNote = `Category "${category}" is specific to medRxiv — the filter was applied to medRxiv only. bioRxiv results are unfiltered.`;
+      }
+    }
+
     if (input.server === 'both') {
+      // Pass the category only to the server that recognises it; send undefined
+      // to the other so it returns its normal unfiltered result.
+      const bxCategory = inBx ? category : undefined;
+      const mxCategory = inMx ? category : undefined;
+
       const [bxResult, mxResult] = await Promise.allSettled([
         service.getListing(
           'biorxiv',
           input.start_date,
           input.end_date,
           input.cursor,
-          category,
+          bxCategory,
           ctx,
         ),
         service.getListing(
@@ -224,7 +251,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           input.start_date,
           input.end_date,
           input.cursor,
-          category,
+          mxCategory,
           ctx,
         ),
       ]);
@@ -262,6 +289,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           preprints: [],
           pagination,
           message: `Cursor ${input.cursor} is past the last available page for this date/filter combination. Set cursor to a lower offset.`,
+          ...(categoryNote && { category_note: categoryNote }),
         };
       }
       const filterDesc = [
@@ -275,6 +303,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         preprints: [],
         pagination,
         message: `No preprints found for ${filterDesc}. Try widening the date range or removing the category filter.`,
+        ...(categoryNote && { category_note: categoryNote }),
       };
     }
 
@@ -303,11 +332,16 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           preprints: spill.previewRows as unknown as PreprintRevision[],
           pagination,
           canvas_id: instance.canvasId,
+          ...(categoryNote && { category_note: categoryNote }),
         };
       }
     }
 
-    return { preprints: allPreprints, pagination };
+    return {
+      preprints: allPreprints,
+      pagination,
+      ...(categoryNote && { category_note: categoryNote }),
+    };
   },
 
   format: (result) => {
@@ -325,6 +359,10 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       lines.push(
         `**medRxiv:** page offset ${p.cursor}, total ${p.total}${p.nextCursor !== undefined ? ` — next cursor: ${p.nextCursor}` : ' (last page)'}`,
       );
+    }
+
+    if (result.category_note) {
+      lines.push(`\n> **Note:** ${result.category_note}`);
     }
 
     if (result.canvas_id) {

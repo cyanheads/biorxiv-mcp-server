@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** biorxiv-mcp-server
-**Version:** 0.1.6
+**Version:** 0.1.7
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.6`
 **Engines:** Bun ≥1.3.2, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -197,7 +197,7 @@ src/
 - **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"` for discovery tools, `"biorxiv"` for resolution tools. Fan-out via `Promise.allSettled` when `"both"`.
 - **Pagination:** integer `cursor` offset (0, 30, 60, …). Page size is fixed at 30 by the API — do not expose a `limit` parameter.
 - **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous.
-- **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. `10.1101/` prefix identifies bioRxiv; skip the parallel medRxiv enrichment call for those DOIs.
+- **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. Enrichment routes based on `input.server` — when explicit ("biorxiv" or "medrxiv"), always use that server. `10.1101/` prefix is used as a hint only within `server="both"` to prefer bioRxiv first, but is not a reliable discriminator (both servers share this prefix).
 - **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and abstracts must all appear in the rendered markdown, not just counts.
 - **Polite access:** include `BIORXIV_MAILTO` in the `User-Agent` header when set: `biorxiv-mcp-server/0.1.0 (mailto:${config.mailto})`. The env var is optional — omit the mailto segment when not configured.
 

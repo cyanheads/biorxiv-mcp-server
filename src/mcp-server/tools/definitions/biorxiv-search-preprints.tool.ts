@@ -1,9 +1,10 @@
 /**
  * @fileoverview biorxiv_search_preprints tool — keyword search for preprints
  * using EuropePMC for relevance ranking, then enriching matching DOIs with
- * full bioRxiv/medRxiv metadata from the details endpoint. The 10.1101/ prefix
- * identifies bioRxiv DOIs; DOIs without that prefix may be medRxiv or other
- * preprint sources and are enriched via both servers when server="both".
+ * full bioRxiv/medRxiv metadata from the details endpoint. When server is
+ * explicit ("biorxiv" or "medrxiv"), enrichment routes to that server directly.
+ * When server="both", the 10.1101/ prefix is used as a routing hint but is not
+ * treated as definitive — both bioRxiv and medRxiv share this prefix.
  * @module mcp-server/tools/definitions/biorxiv-search-preprints.tool
  */
 
@@ -240,14 +241,20 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         let enrichmentFailed = false;
 
         try {
-          if (input.server === 'biorxiv' || isBiorxivDoi) {
+          if (input.server === 'biorxiv') {
             revisions = await biorxiv.getDetails(doi, 'biorxiv', ctx);
           } else if (input.server === 'medrxiv') {
+            // DOI prefix is not a reliable discriminator — both servers share 10.1101/.
             revisions = await biorxiv.getDetails(doi, 'medrxiv', ctx);
           } else {
-            // both: try biorxiv first (identified by prefix), then medrxiv
+            // server='both': use DOI prefix as a hint to avoid a redundant call,
+            // but fall back to trying both when the prefix is ambiguous.
             if (isBiorxivDoi) {
               revisions = await biorxiv.getDetails(doi, 'biorxiv', ctx);
+              // If bioRxiv returned nothing, this DOI may actually live on medRxiv.
+              if (revisions.length === 0) {
+                revisions = await biorxiv.getDetails(doi, 'medrxiv', ctx);
+              }
             } else {
               const [bxR, mxR] = await Promise.allSettled([
                 biorxiv.getDetails(doi, 'biorxiv', ctx),
