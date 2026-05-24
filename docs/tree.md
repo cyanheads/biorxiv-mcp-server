@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-05-23 14:27:55
+Generated on: 2026-05-24 21:59:09
 
 ```text
 biorxiv-mcp-server/
@@ -79,6 +79,8 @@ biorxiv-mcp-server/
 │   │   └── SKILL.md
 │   ├── field-test/
 │   │   └── SKILL.md
+│   ├── git-wrapup/
+│   │   └── SKILL.md
 │   ├── maintenance/
 │   │   └── SKILL.md
 │   ├── migrate-mcp-ts-template/
@@ -122,9 +124,10 @@ biorxiv-mcp-server/
 │   │   ├── biorxiv/
 │   │   │   ├── biorxiv-service.ts
 │   │   │   └── types.ts
-│   │   └── europe-pmc/
-│   │       ├── europe-pmc-service.ts
-│   │       └── types.ts
+│   │   ├── europe-pmc/
+│   │   │   ├── europe-pmc-service.ts
+│   │   │   └── types.ts
+│   │   └── shared.ts
 │   └── index.ts
 ├── tests/
 │   ├── prompts/

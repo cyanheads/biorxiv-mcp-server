@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-05-24
+
+services/shared.ts extraction, search-preprints format() simplification, mcp-ts-core ^0.9.6 → ^0.9.9
+
 ## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-05-24
 
 Fix server=\"both\" category routing and medRxiv DOI enrichment.

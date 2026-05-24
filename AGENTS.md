@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** biorxiv-mcp-server
-**Version:** 0.1.7
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.6`
+**Version:** 0.1.8
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.9`
 **Engines:** Bun ≥1.3.2, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -37,6 +37,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
 - **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
 - **Secrets in env vars only** — never hardcoded.
+- **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed before moving on. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
 
@@ -163,6 +164,7 @@ src/
   config/
     server-config.ts                    # bioRxiv-specific env vars (BIORXIV_MAILTO, API base URLs)
   services/
+    shared.ts                           # Shared utilities (asRc, detectHtmlError, SERVER_VERSION)
     biorxiv/
       biorxiv-service.ts                # BiorxivApiService — details, publications, pubs endpoints
       types.ts                          # Domain types (Preprint, PublishedVersion, …)
@@ -226,6 +228,7 @@ Available skills:
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `maintenance` | Investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest` |
+| `git-wrapup` | Version-bump, changelog, commit, and tag workflow |
 | `release-and-publish` | Ship a release: verification gate, push commits+tags, publish to npm / MCP Registry / GHCR |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |

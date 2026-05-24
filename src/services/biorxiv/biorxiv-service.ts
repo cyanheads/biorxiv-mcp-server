@@ -10,8 +10,9 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { asRc, detectHtmlError, SERVER_VERSION } from '@/services/shared.js';
 import type {
   BiorxivServer,
   CategoryTaxonomy,
@@ -22,14 +23,6 @@ import type {
   RawPreprintRevision,
   RawPublishedResponse,
 } from './types.js';
-
-// Context is structurally assignable to RequestContext but lacks the index
-// signature — cast once per call site.
-function asRc(ctx: Context): RequestContext {
-  return ctx as unknown as RequestContext;
-}
-
-const SERVER_VERSION = '0.1.0';
 
 // ─── Hardcoded category taxonomy ─────────────────────────────────────────────
 // No API endpoint provides this; it changes infrequently. Maintained here.
@@ -124,7 +117,7 @@ const BIORXIV_CATEGORIES = new Set(CATEGORIES.biorxiv);
 const MEDRXIV_CATEGORIES = new Set(CATEGORIES.medrxiv);
 const ALL_CATEGORIES = new Set([...CATEGORIES.biorxiv, ...CATEGORIES.medrxiv]);
 
-// ─── Normalization helpers ────────────────────────────────────────────────────
+// ─── Normalization helpers ───────────────────────────────────────────────────
 
 function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   const rev: PreprintRevision = { doi: raw.doi };
@@ -157,11 +150,7 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   return rev;
 }
 
-function detectHtmlError(text: string): boolean {
-  return /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
-}
-
-// ─── Service class ────────────────────────────────────────────────────────────
+// ─── Service class ───────────────────────────────────────────────────────────
 
 export class BiorxivApiService {
   private readonly baseUrl: string;

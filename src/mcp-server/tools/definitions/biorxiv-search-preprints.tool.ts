@@ -19,35 +19,45 @@ const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
-function formatResult(
-  doi: string,
-  revisions: PreprintRevision[],
-  epmc?: { title?: string; authors?: string; publishedDate?: string; abstract?: string },
-): string {
-  const latest = revisions[revisions.length - 1];
+type EnrichedPreprint = {
+  doi: string;
+  title?: string | undefined;
+  authors?: string | undefined;
+  authorCorresponding?: string | undefined;
+  date?: string | undefined;
+  version?: string | undefined;
+  category?: string | undefined;
+  server?: string | undefined;
+  jatsxmlUrl?: string | undefined;
+  publishedJournalDoi?: string | undefined;
+  abstract?: string | undefined;
+  enriched: boolean;
+  revisionCount?: number | undefined;
+};
+
+function formatResult(p: EnrichedPreprint): string {
   const lines: string[] = [];
 
-  // Use bioRxiv metadata when available; fall back to EuropePMC
-  const title = latest?.title ?? epmc?.title ?? doi;
-  lines.push(`### ${title}`);
-  lines.push(`**DOI:** ${doi}`);
+  lines.push(`### ${p.title ?? p.doi}`);
+  lines.push(`**DOI:** ${p.doi}`);
 
-  if (latest) {
-    if (latest.server) lines.push(`**Server:** ${latest.server}`);
-    if (latest.category) lines.push(`**Category:** ${latest.category}`);
-    if (latest.date) lines.push(`**Date:** ${latest.date}`);
-    if (latest.version) lines.push(`**Version:** ${latest.version}`);
-    if (latest.authors) lines.push(`**Authors:** ${latest.authors}`);
-    if (latest.authorCorresponding) lines.push(`**Corresponding:** ${latest.authorCorresponding}`);
-    if (latest.publishedJournalDoi) lines.push(`**Published DOI:** ${latest.publishedJournalDoi}`);
-    if (latest.jatsxmlUrl) lines.push(`**JATS XML:** ${latest.jatsxmlUrl}`);
-    if (latest.abstract) lines.push(`\n**Abstract:** ${latest.abstract}`);
-    if (revisions.length > 1) lines.push(`\n*${revisions.length} revisions — latest shown.*`);
-  } else if (epmc) {
+  if (p.enriched) {
+    if (p.server) lines.push(`**Server:** ${p.server}`);
+    if (p.category) lines.push(`**Category:** ${p.category}`);
+    if (p.date) lines.push(`**Date:** ${p.date}`);
+    if (p.version) lines.push(`**Version:** ${p.version}`);
+    if (p.authors) lines.push(`**Authors:** ${p.authors}`);
+    if (p.authorCorresponding) lines.push(`**Corresponding:** ${p.authorCorresponding}`);
+    if (p.publishedJournalDoi) lines.push(`**Published DOI:** ${p.publishedJournalDoi}`);
+    if (p.jatsxmlUrl) lines.push(`**JATS XML:** ${p.jatsxmlUrl}`);
+    if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
+    if (p.revisionCount !== undefined && p.revisionCount > 1)
+      lines.push(`\n*${p.revisionCount} revisions — latest shown.*`);
+  } else {
     // EuropePMC-only fallback when bioRxiv enrichment failed
-    if (epmc.authors) lines.push(`**Authors:** ${epmc.authors}`);
-    if (epmc.publishedDate) lines.push(`**Date:** ${epmc.publishedDate}`);
-    if (epmc.abstract) lines.push(`\n**Abstract:** ${epmc.abstract}`);
+    if (p.authors) lines.push(`**Authors:** ${p.authors}`);
+    if (p.date) lines.push(`**Date:** ${p.date}`);
+    if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
     lines.push(`\n*Metadata from EuropePMC only — bioRxiv enrichment unavailable.*`);
   }
 
@@ -213,22 +223,6 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     const totalFromSearch = epmcResults.length;
 
     // Step 2: Enrich each DOI via bioRxiv API in parallel
-    type EnrichedPreprint = {
-      doi: string;
-      title?: string;
-      authors?: string;
-      authorCorresponding?: string;
-      date?: string;
-      version?: string;
-      category?: string;
-      server?: string;
-      jatsxmlUrl?: string;
-      publishedJournalDoi?: string;
-      abstract?: string;
-      enriched: boolean;
-      revisionCount?: number;
-    };
-
     let hasPartial = false;
 
     const enriched = await Promise.all(
@@ -324,39 +318,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
     for (const p of result.preprints) {
       lines.push('');
-      const revisions: PreprintRevision[] = p.enriched
-        ? [
-            {
-              doi: p.doi,
-              ...(p.title && { title: p.title }),
-              ...(p.authors && { authors: p.authors }),
-              ...(p.authorCorresponding && { authorCorresponding: p.authorCorresponding }),
-              ...(p.date && { date: p.date }),
-              ...(p.version && { version: p.version }),
-              ...(p.category && { category: p.category }),
-              ...(p.server && { server: p.server }),
-              ...(p.jatsxmlUrl && { jatsxmlUrl: p.jatsxmlUrl }),
-              ...(p.publishedJournalDoi && { publishedJournalDoi: p.publishedJournalDoi }),
-              ...(p.abstract && { abstract: p.abstract }),
-            } satisfies PreprintRevision,
-          ]
-        : [];
-
-      const epmc = !p.enriched
-        ? {
-            ...(p.title && { title: p.title }),
-            ...(p.authors && { authors: p.authors }),
-            ...(p.date && { publishedDate: p.date }),
-            ...(p.abstract && { abstract: p.abstract }),
-          }
-        : undefined;
-
-      lines.push(formatResult(p.doi, revisions, epmc));
-
+      lines.push(formatResult(p));
       lines.push(`*Enriched: ${p.enriched ? 'yes' : 'no (EuropePMC fallback)'}*`);
-      if (p.enriched && p.revisionCount !== undefined) {
-        lines.push(`*Revisions: ${p.revisionCount}*`);
-      }
     }
 
     return [{ type: 'text', text: lines.join('\n') || 'No results.' }];

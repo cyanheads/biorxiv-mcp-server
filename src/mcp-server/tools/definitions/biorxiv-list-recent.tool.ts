@@ -16,11 +16,7 @@ import type { PreprintRevision } from '@/services/biorxiv/types.js';
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
-type PreprintForFormat = {
-  [K in keyof PreprintRevision]: PreprintRevision[K] | undefined;
-};
-
-function formatPreprint(p: PreprintForFormat): string {
+function formatPreprint(p: PreprintRevision): string {
   const lines: string[] = [];
   lines.push(`### ${p.title ?? p.doi}`);
   lines.push(`**DOI:** ${p.doi}`);
@@ -382,7 +378,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     lines.push(`\n## Preprints (${result.preprints.length} shown)`);
     for (const p of result.preprints) {
       lines.push('');
-      lines.push(formatPreprint(p));
+      lines.push(formatPreprint(p as PreprintRevision));
     }
 
     return [{ type: 'text', text: lines.join('\n') }];
