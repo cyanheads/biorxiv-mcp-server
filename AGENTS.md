@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** biorxiv-mcp-server
-**Version:** 0.1.8
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.9`
+**Version:** 0.1.9
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.13`
 **Engines:** Bun ≥1.3.2, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -128,6 +128,8 @@ Handlers throw — the framework catches, classifies, and formats.
 **Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required (≥ 5 words, lint-validated). Spread `ctx.recoveryFor('reason')` into `data` to mirror the contract recovery onto the wire. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring.
 
 ```ts
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+
 errors: [
   { reason: 'doi_not_found', code: JsonRpcErrorCode.NotFound,
     when: 'DOI resolves to empty collection on all requested servers',
@@ -224,24 +226,27 @@ Available skills:
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
+| `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
+| `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `maintenance` | Investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest` |
-| `git-wrapup` | Version-bump, changelog, commit, and tag workflow |
-| `release-and-publish` | Ship a release: verification gate, push commits+tags, publish to npm / MCP Registry / GHCR |
+| `git-wrapup` | Land working-tree changes as a versioned commit + annotated tag — version bump, changelog, verify, tag. Local only. |
+| `release-and-publish` | Push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup` |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
+| `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
 | `api-services` | LLM, Speech, Graph services |
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
 | `api-workers` | Cloudflare Workers runtime |
-| `report-issue-framework` | File bug/feature request against @cyanheads/mcp-ts-core |
-| `report-issue-local` | File bug/feature request against this server's repo |
+| `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
+| `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-05-21`).
 
@@ -255,7 +260,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run rebuild` | Clean + build |
 | `bun run clean` | Remove build artifacts |
 | `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so the advisory may be a stale-lockfile false positive. If it survives the refresh, it's real. |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting |
 | `bun run test` | Run tests |
@@ -309,4 +314,7 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] `biorxiv_list_recent` with `server="both"` surfaces per-server pagination state, not a merged cursor
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = package name; `interface.shortDescription` from `package.json` description
+- [ ] `.codex-plugin/mcp.json` updated — server name key matches `package.json` name; env vars added for any required API keys
+- [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; inline `mcpServers` entry with server name key, env vars for any required API keys
 - [ ] `bun run devcheck` passes

@@ -20,6 +20,8 @@ await createApp({
     'Use biorxiv_list_recent for date-range browsing, biorxiv_get_preprint for DOI lookup, ' +
     'biorxiv_search_preprints for keyword search (powered by EuropePMC), and ' +
     'biorxiv_get_published_version for full crosswalk metadata when a preprint has been accepted to a journal.',
+  // Public hosted catalog — serve full landing inventory even when MCP_AUTH_MODE=jwt/oauth.
+  landing: { requireAuth: false },
   setup(core) {
     initBiorxivApiService(core.config, core.storage);
     initEuropePmcService(core.config, core.storage);

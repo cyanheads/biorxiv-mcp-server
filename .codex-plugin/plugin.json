@@ -1,0 +1,25 @@
+{
+  "name": "@cyanheads/biorxiv-mcp-server",
+  "version": "0.1.9",
+  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/biorxiv-mcp-server#readme",
+  "repository": "git+https://github.com/cyanheads/biorxiv-mcp-server.git",
+  "license": "Apache-2.0",
+  "keywords": ["biorxiv", "medrxiv", "preprint", "biomedical", "mcp", "mcp-server", "model-context-protocol"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "@cyanheads/biorxiv-mcp-server",
+    "shortDescription": "Search and retrieve bioRxiv and medRxiv preprints by DOI, date, or keyword.",
+    "longDescription": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. Powered by the bioRxiv API and EuropePMC for full-text search.",
+    "developerName": "cyanheads",
+    "category": "research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/biorxiv-mcp-server",
+    "defaultPrompt": []
+  }
+}

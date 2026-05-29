@@ -22,4 +22,4 @@ export function detectHtmlError(text: string): boolean {
 }
 
 /** Version string used in outbound User-Agent headers. */
-export const SERVER_VERSION = '0.1.8';
+export const SERVER_VERSION = '0.1.9';

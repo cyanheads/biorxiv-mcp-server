@@ -9,7 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
@@ -204,10 +204,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         ctx,
       );
     } catch (err) {
-      throw serviceUnavailable(
+      throw ctx.fail(
+        'search_unavailable',
         `EuropePMC search failed: ${err instanceof Error ? err.message : String(err)}`,
-        { reason: 'search_unavailable', ...ctx.recoveryFor('search_unavailable') },
-        { cause: err },
+        { ...ctx.recoveryFor('search_unavailable') },
+        { cause: err instanceof Error ? err : new Error(String(err)) },
       );
     }
 

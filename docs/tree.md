@@ -1,10 +1,15 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-05-24 21:59:09
+Generated on: 2026-05-29 04:49:04
 
 ```text
 biorxiv-mcp-server/
 ├── .claude/
+├── .claude-plugin/
+│   └── plugin.json
+├── .codex-plugin/
+│   ├── mcp.json
+│   └── plugin.json
 ├── .github/
 │   └── ISSUE_TEMPLATE/
 │       ├── bug_report.yml
@@ -75,6 +80,8 @@ biorxiv-mcp-server/
 │   │   └── SKILL.md
 │   ├── api-workers/
 │   │   └── SKILL.md
+│   ├── code-simplifier/
+│   │   └── SKILL.md
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
 │   ├── field-test/
@@ -82,8 +89,6 @@ biorxiv-mcp-server/
 │   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
-│   │   └── SKILL.md
-│   ├── migrate-mcp-ts-template/
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -152,6 +157,7 @@ biorxiv-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

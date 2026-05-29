@@ -1,11 +1,17 @@
 {
   "manifest_version": "0.3",
   "name": "biorxiv-mcp-server",
-  "version": "0.1.8",
-  "description": "Search and retrieve bioRxiv and medRxiv preprints \u2014 by DOI, date interval, or keyword \u2014 via MCP. STDIO or Streamable HTTP.",
+  "version": "0.1.9",
+  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/biorxiv-mcp-server"
+  },
+  "homepage": "https://github.com/cyanheads/biorxiv-mcp-server#readme",
+  "license": "Apache-2.0",
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -30,9 +36,10 @@
   "user_config": {
     "BIORXIV_MAILTO": {
       "title": "Contact Email",
-      "description": "Contact email for User-Agent header \u2014 optional, for polite API access.",
+      "description": "Contact email for User-Agent header — optional, for polite API access.",
       "type": "string",
-      "required": false
+      "required": false,
+      "default": ""
     }
   }
 }

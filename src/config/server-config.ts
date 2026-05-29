@@ -9,10 +9,13 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
+  // z.preprocess strips MCPB placeholder strings (${user_config.X}) to undefined
+  // so z.email() doesn't crash when the user leaves the optional field blank.
   mailto: z
-    .string()
-    .email()
-    .optional()
+    .preprocess(
+      (v) => (typeof v === 'string' && v.startsWith('${') ? undefined : v),
+      z.string().email().optional(),
+    )
     .describe('Contact email for User-Agent header — optional, used for polite API access'),
   apiBaseUrl: z.string().url().default('https://api.biorxiv.org').describe('bioRxiv API base URL'),
   europePmcBaseUrl: z
