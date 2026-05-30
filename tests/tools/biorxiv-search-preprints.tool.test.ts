@@ -4,11 +4,11 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
-import type { EuropePmcResult } from '@/services/europe-pmc/types.js';
+import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
 
 const mockEpmcSearch = vi.fn();
 const mockGetDetails = vi.fn();
@@ -29,6 +29,11 @@ const EPMC_RESULT: EuropePmcResult = {
   abstract: 'A study on CRISPR applications.',
 };
 
+/** Helper: build an EuropePmcSearchResult with a given hitCount and result set */
+function epmcSearchResult(hitCount: number, results: EuropePmcResult[]): EuropePmcSearchResult {
+  return { hitCount, results };
+}
+
 const REVISION: PreprintRevision = {
   doi: '10.1101/2024.01.15.575123',
   title: 'CRISPR gene editing in neural circuits',
@@ -42,7 +47,8 @@ const REVISION: PreprintRevision = {
 
 describe('biorxivSearchPreprintsTool', () => {
   beforeEach(() => {
-    mockEpmcSearch.mockResolvedValue([EPMC_RESULT]);
+    // hitCount > results.length to verify the true total threads through correctly
+    mockEpmcSearch.mockResolvedValue(epmcSearchResult(1234, [EPMC_RESULT]));
     mockGetDetails.mockResolvedValue([REVISION]);
   });
 
@@ -53,17 +59,38 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints).toHaveLength(1);
     expect(result.preprints[0]?.doi).toBe('10.1101/2024.01.15.575123');
     expect(result.preprints[0]?.enriched).toBe(true);
-    expect(result.total_from_search).toBe(1);
     expect(result.partial_results).toBe(false);
+    // totalFound must carry the upstream hitCount, not the returned count
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalFound).toBe(1234);
+  });
+
+  it('surfaces true hitCount and query echo in enrichment', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      server: 'biorxiv',
+      limit: 10,
+    });
+    await biorxivSearchPreprintsTool.handler(input, ctx);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalFound).toBe(1234);
+    expect(enrichment.queryEcho).toMatchObject({
+      query: 'CRISPR',
+      server: 'biorxiv',
+      limit: 10,
+    });
   });
 
   it('returns empty results when EuropePMC finds nothing', async () => {
-    mockEpmcSearch.mockResolvedValue([]);
+    mockEpmcSearch.mockResolvedValue(epmcSearchResult(0, []));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'xyzzy_no_match' });
     const result = await biorxivSearchPreprintsTool.handler(input, ctx);
     expect(result.preprints).toHaveLength(0);
-    expect(result.message).toBeDefined();
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalFound).toBe(0);
+    expect(enrichment.notice).toBeDefined();
   });
 
   it('throws search_unavailable when EuropePMC call throws', async () => {
@@ -82,9 +109,12 @@ describe('biorxivSearchPreprintsTool', () => {
     const result = await biorxivSearchPreprintsTool.handler(input, ctx);
     expect(result.partial_results).toBe(true);
     expect(result.preprints[0]?.enriched).toBe(false);
+    // hitCount still threads through even when enrichment fails
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalFound).toBe(1234);
   });
 
-  it('formats output with result count and enrichment status', () => {
+  it('formats output with result count and preprint list', () => {
     const output = {
       preprints: [
         {
@@ -94,7 +124,6 @@ describe('biorxivSearchPreprintsTool', () => {
           revisionCount: 1,
         },
       ],
-      total_from_search: 1,
       partial_results: false,
     };
     const blocks = biorxivSearchPreprintsTool.format!(output);

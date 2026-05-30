@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** biorxiv-mcp-server
-**Version:** 0.1.9
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.13`
+**Version:** 0.1.10
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.16`
 **Engines:** Bun ≥1.3.2, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3

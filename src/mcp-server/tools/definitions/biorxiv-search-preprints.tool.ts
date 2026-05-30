@@ -13,7 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
-import type { EuropePmcResult } from '@/services/europe-pmc/types.js';
+import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
@@ -128,16 +128,65 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           .describe('A single search result.'),
       )
       .describe('Search results, ranked by EuropePMC relevance.'),
-    total_from_search: z
-      .number()
-      .describe('Number of DOIs returned by EuropePMC before enrichment filtering.'),
     partial_results: z
       .boolean()
       .describe(
         'True when one or more DOIs failed bioRxiv enrichment and fell back to EuropePMC metadata.',
       ),
-    message: z.string().optional().describe('Recovery hint when zero results are returned.'),
   }),
+
+  // Agent-facing context on the success path — the true upstream total from EuropePMC,
+  // the echo of the query parameters as sent, and recovery guidance for zero results.
+  // Populated via ctx.enrich so it reaches both structuredContent and content[];
+  // never rides in the domain return.
+  enrichment: {
+    totalFound: z
+      .number()
+      .describe(
+        'Total preprints matching the query in EuropePMC (hitCount) — the true upstream grand total, not the number of results returned.',
+      ),
+    queryEcho: z
+      .object({
+        query: z.string().describe('The search query string sent to EuropePMC.'),
+        server: z.string().describe('Server scope used for enrichment.'),
+        date_from: z.string().optional().describe('date_from filter applied, if any.'),
+        date_to: z.string().optional().describe('date_to filter applied, if any.'),
+        limit: z.number().describe('Maximum results requested.'),
+      })
+      .describe(
+        'Echo of the parameters used to produce this result set — lets callers verify what was sent.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Recovery hint when zero results are returned — echoes query and suggests how to broaden.',
+      ),
+  },
+
+  // content[] trailer rendering for structured enrichment fields. Scalar/notice kinds
+  // (totalFound, notice) render automatically. queryEcho is a structured object that
+  // needs a render function to produce a single compact line.
+  enrichmentTrailer: {
+    queryEcho: {
+      render: (echo: {
+        query: string;
+        server: string;
+        date_from?: string;
+        limit: number;
+        date_to?: string;
+      }) => {
+        const parts = [
+          `Query: ${echo.query}`,
+          `server=${echo.server}`,
+          ...(echo.date_from ? [`from=${echo.date_from}`] : []),
+          ...(echo.date_to ? [`to=${echo.date_to}`] : []),
+          `limit=${echo.limit}`,
+        ];
+        return parts.join(' · ');
+      },
+    },
+  },
 
   errors: [
     {
@@ -191,9 +240,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     const biorxiv = getBiorxivApiService();
 
     // Step 1: EuropePMC relevance search
-    let epmcResults: EuropePmcResult[];
+    let epmcSearchResult: EuropePmcSearchResult;
     try {
-      epmcResults = await epmc.search(
+      epmcSearchResult = await epmc.search(
         {
           query: input.query,
           dateFrom: input.date_from,
@@ -212,16 +261,26 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       );
     }
 
+    const { hitCount, results: epmcResults } = epmcSearchResult;
+
+    const queryEcho = {
+      query: input.query,
+      server: input.server,
+      ...(input.date_from && { date_from: input.date_from }),
+      ...(input.date_to && { date_to: input.date_to }),
+      limit: input.limit,
+    };
+
     if (epmcResults.length === 0) {
+      ctx.enrich({ totalFound: hitCount, queryEcho });
+      ctx.enrich.notice(
+        `No preprints matched "${input.query}"${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms or a wider date range.`,
+      );
       return {
         preprints: [],
-        total_from_search: 0,
         partial_results: false,
-        message: `No preprints matched "${input.query}"${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms or a wider date range.`,
       };
     }
-
-    const totalFromSearch = epmcResults.length;
 
     // Step 2: Enrich each DOI via bioRxiv API in parallel
     let hasPartial = false;
@@ -294,9 +353,10 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       }),
     );
 
+    ctx.enrich({ totalFound: hitCount, queryEcho });
+
     return {
       preprints: enriched,
-      total_from_search: totalFromSearch,
       partial_results: hasPartial,
     };
   },
@@ -304,17 +364,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   format: (result) => {
     const lines: string[] = [];
 
-    lines.push(
-      `**${result.preprints.length} results** (from ${result.total_from_search} EuropePMC matches)`,
-    );
+    lines.push(`**${result.preprints.length} results**`);
     if (result.partial_results) {
       lines.push(
         '> Some results show EuropePMC metadata only — bioRxiv enrichment was unavailable.',
       );
-    }
-
-    if (result.message) {
-      lines.push(`\n> ${result.message}`);
     }
 
     for (const p of result.preprints) {

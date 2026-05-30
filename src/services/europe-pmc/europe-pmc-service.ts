@@ -13,7 +13,11 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { asRc, detectHtmlError, SERVER_VERSION } from '@/services/shared.js';
-import type { EuropePmcResult, RawEuropePmcSearchResponse } from './types.js';
+import type {
+  EuropePmcResult,
+  EuropePmcSearchResult,
+  RawEuropePmcSearchResponse,
+} from './types.js';
 
 export interface SearchOptions {
   /** Optional date filter — format YYYY-MM-DD */
@@ -41,10 +45,11 @@ export class EuropePmcService {
 
   /**
    * Search EuropePMC for preprints matching the query. Returns ranked results
-   * with DOIs, used to drive bioRxiv API enrichment. Requests the minimal field
-   * set (doi, title, authorString, firstPublicationDate, abstractText).
+   * with DOIs plus the upstream hitCount grand total, used to drive bioRxiv API
+   * enrichment. Requests the minimal field set (doi, title, authorString,
+   * firstPublicationDate, abstractText).
    */
-  async search(options: SearchOptions, ctx: Context): Promise<EuropePmcResult[]> {
+  async search(options: SearchOptions, ctx: Context): Promise<EuropePmcSearchResult> {
     const limit = Math.min(options.limit ?? 25, 100);
 
     let q = options.query;
@@ -94,7 +99,7 @@ export class EuropePmcService {
           );
         }
         const data = JSON.parse(text) as RawEuropePmcSearchResponse;
-        return (data.resultList?.result ?? [])
+        const results = (data.resultList?.result ?? [])
           .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
           .map(
             (raw): EuropePmcResult => ({
@@ -105,6 +110,7 @@ export class EuropePmcService {
               ...(raw.abstractText && { abstract: raw.abstractText }),
             }),
           );
+        return { hitCount: data.hitCount ?? results.length, results };
       },
       {
         operation: 'EuropePmcService.search',

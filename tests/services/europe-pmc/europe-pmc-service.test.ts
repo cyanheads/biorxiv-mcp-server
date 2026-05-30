@@ -47,6 +47,7 @@ describe('EuropePmcService', () => {
   it('returns normalized results from a search query', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
+        hitCount: 42,
         resultList: {
           result: [
             {
@@ -62,7 +63,8 @@ describe('EuropePmcService', () => {
     );
 
     const ctx = createMockContext();
-    const results = await service.search({ query: 'CRISPR' }, ctx);
+    const { hitCount, results } = await service.search({ query: 'CRISPR' }, ctx);
+    expect(hitCount).toBe(42);
     expect(results).toHaveLength(1);
     expect(results[0]?.doi).toBe('10.1101/2024.01.15.575123');
     expect(results[0]?.title).toBe('CRISPR gene editing study');
@@ -72,6 +74,7 @@ describe('EuropePmcService', () => {
   it('skips results without a DOI', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
+        hitCount: 1,
         resultList: {
           result: [
             { title: 'No DOI result' },
@@ -82,19 +85,20 @@ describe('EuropePmcService', () => {
     );
 
     const ctx = createMockContext();
-    const results = await service.search({ query: 'test' }, ctx);
+    const { results } = await service.search({ query: 'test' }, ctx);
     expect(results).toHaveLength(1);
     expect(results[0]?.doi).toBe('10.1101/2024.01.15.575123');
   });
 
   it('returns empty array when resultList is empty', async () => {
-    mockFetch.mockResolvedValue(makeResponse({ resultList: { result: [] } }));
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
-    const results = await service.search({ query: 'xyzzy' }, ctx);
+    const { hitCount, results } = await service.search({ query: 'xyzzy' }, ctx);
+    expect(hitCount).toBe(0);
     expect(results).toHaveLength(0);
   });
 
-  it('handles sparse upstream payload — absent optional fields stay absent', async () => {
+  it('falls back to results.length when hitCount is absent', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
         resultList: {
@@ -103,7 +107,23 @@ describe('EuropePmcService', () => {
       }),
     );
     const ctx = createMockContext();
-    const results = await service.search({ query: 'CRISPR' }, ctx);
+    const { hitCount, results } = await service.search({ query: 'CRISPR' }, ctx);
+    // No hitCount in response — falls back to results.length
+    expect(hitCount).toBe(1);
+    expect(results).toHaveLength(1);
+  });
+
+  it('handles sparse upstream payload — absent optional fields stay absent', async () => {
+    mockFetch.mockResolvedValue(
+      makeResponse({
+        hitCount: 1,
+        resultList: {
+          result: [{ doi: '10.1101/2024.01.15.575123' }],
+        },
+      }),
+    );
+    const ctx = createMockContext();
+    const { results } = await service.search({ query: 'CRISPR' }, ctx);
     expect(results[0]?.title).toBeUndefined();
     expect(results[0]?.authors).toBeUndefined();
     expect(results[0]?.abstract).toBeUndefined();

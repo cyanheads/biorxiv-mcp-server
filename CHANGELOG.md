@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-05-30
+
+enrichment adoption on biorxiv_search_preprints and biorxiv_list_recent: query echo, true EuropePMC hitCount, empty-result guidance via typed enrichment block; totalFound now reflects upstream hitCount
+
 ## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-05-28
 
 mcp-ts-core ^0.9.13: 413 body cap, HTTP session-init gate, quieter client-error logging, GET /mcp keywords; MCPB placeholder fix; landing inventory unlocked

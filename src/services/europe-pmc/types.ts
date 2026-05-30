@@ -37,3 +37,10 @@ export interface EuropePmcResult {
   publishedDate?: string;
   title?: string;
 }
+
+/** Return value from EuropePmcService.search() — carries the upstream grand total alongside results */
+export interface EuropePmcSearchResult {
+  /** EuropePMC hitCount — total matching preprints regardless of the page size requested */
+  hitCount: number;
+  results: EuropePmcResult[];
+}

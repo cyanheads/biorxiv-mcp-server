@@ -120,17 +120,25 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .describe(
         'DataCanvas ID when result overflowed the inline preview budget. Requires CANVAS_PROVIDER_TYPE=duckdb; run SQL against the full result set using the canvas ID.',
       ),
-    message: z
+  }),
+
+  // Agent-facing context on the success path — recovery guidance for empty results and
+  // per-server taxonomy routing notes. Populated via ctx.enrich so it reaches both
+  // structuredContent and content[]; never rides in the domain return.
+  enrichment: {
+    notice: z
       .string()
       .optional()
-      .describe('Recovery hint when zero results are returned — echoes applied filters.'),
-    category_note: z
+      .describe(
+        'Recovery hint when zero results are returned — echoes applied filters and suggests how to broaden.',
+      ),
+    categoryNote: z
       .string()
       .optional()
       .describe(
         'Present when server="both" and the category belongs to only one server\'s taxonomy. Explains which server the filter was applied to.',
       ),
-  }),
+  },
 
   errors: [
     {
@@ -212,18 +220,21 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     let allPreprints: PreprintRevision[] = [];
 
     // When server="both" and a category is given, check membership per-server once.
-    // These booleans drive both the routing (pass vs. undefined) and the category_note.
+    // These booleans drive both the routing (pass vs. undefined) and the categoryNote enrichment.
     const inBx =
       input.server === 'both' && !!category && service.isValidCategory(category, 'biorxiv');
     const inMx =
       input.server === 'both' && !!category && service.isValidCategory(category, 'medrxiv');
 
-    let categoryNote: string | undefined;
     if (input.server === 'both' && category) {
       if (inBx && !inMx) {
-        categoryNote = `Category "${category}" is specific to bioRxiv — the filter was applied to bioRxiv only. medRxiv results are unfiltered.`;
+        ctx.enrich({
+          categoryNote: `Category "${category}" is specific to bioRxiv — the filter was applied to bioRxiv only. medRxiv results are unfiltered.`,
+        });
       } else if (inMx && !inBx) {
-        categoryNote = `Category "${category}" is specific to medRxiv — the filter was applied to medRxiv only. bioRxiv results are unfiltered.`;
+        ctx.enrich({
+          categoryNote: `Category "${category}" is specific to medRxiv — the filter was applied to medRxiv only. bioRxiv results are unfiltered.`,
+        });
       }
     }
 
@@ -281,12 +292,10 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     if (allPreprints.length === 0) {
       // Detect cursor-overshoot: cursor > 0 but zero results — filters are fine, cursor is past the end
       if (input.cursor > 0) {
-        return {
-          preprints: [],
-          pagination,
-          message: `Cursor ${input.cursor} is past the last available page for this date/filter combination. Set cursor to a lower offset.`,
-          ...(categoryNote && { category_note: categoryNote }),
-        };
+        ctx.enrich.notice(
+          `Cursor ${input.cursor} is past the last available page for this date/filter combination. Set cursor to a lower offset.`,
+        );
+        return { preprints: [], pagination };
       }
       const filterDesc = [
         `dates ${input.start_date}–${input.end_date}`,
@@ -295,12 +304,10 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       ]
         .filter(Boolean)
         .join(', ');
-      return {
-        preprints: [],
-        pagination,
-        message: `No preprints found for ${filterDesc}. Try widening the date range or removing the category filter.`,
-        ...(categoryNote && { category_note: categoryNote }),
-      };
+      ctx.enrich.notice(
+        `No preprints found for ${filterDesc}. Try widening the date range or removing the category filter.`,
+      );
+      return { preprints: [], pagination };
     }
 
     // Spillover to DataCanvas if canvas is available and result is large
@@ -328,16 +335,11 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           preprints: spill.previewRows as unknown as PreprintRevision[],
           pagination,
           canvas_id: instance.canvasId,
-          ...(categoryNote && { category_note: categoryNote }),
         };
       }
     }
 
-    return {
-      preprints: allPreprints,
-      pagination,
-      ...(categoryNote && { category_note: categoryNote }),
-    };
+    return { preprints: allPreprints, pagination };
   },
 
   format: (result) => {
@@ -357,18 +359,10 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       );
     }
 
-    if (result.category_note) {
-      lines.push(`\n> **Note:** ${result.category_note}`);
-    }
-
     if (result.canvas_id) {
       lines.push(
         `\n**DataCanvas ID:** \`${result.canvas_id}\` — run SQL queries on the full result set.`,
       );
-    }
-
-    if (result.message) {
-      lines.push(`\n> ${result.message}`);
     }
 
     if (result.preprints.length === 0) {

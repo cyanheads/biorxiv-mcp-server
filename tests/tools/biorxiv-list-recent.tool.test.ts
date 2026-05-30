@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-list-recent.tool.js';
 import type { ListingResult, PreprintRevision } from '@/services/biorxiv/types.js';
@@ -109,5 +109,22 @@ describe('biorxivListRecentTool', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('bioRxiv');
     expect(text).toContain('Test Preprint');
+  });
+
+  it('enriches notice when zero results are returned', async () => {
+    mockGetListing.mockResolvedValue({
+      preprints: [],
+      pagination: { cursor: 0, total: 0 },
+    });
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeDefined();
   });
 });
