@@ -33,6 +33,15 @@ function makeResponse(body: unknown): Response {
   } as unknown as Response;
 }
 
+/** Make a fake response whose body is an HTML error page */
+function makeHtmlResponse(html = '<html><body>Service Unavailable</body></html>'): Response {
+  return {
+    text: () => Promise.resolve(html),
+    ok: false,
+    status: 503,
+  } as unknown as Response;
+}
+
 const MOCK_CONFIG = {} as AppConfig;
 const MOCK_STORAGE = {} as StorageService;
 
@@ -43,6 +52,8 @@ describe('EuropePmcService', () => {
     service = new EuropePmcService(MOCK_CONFIG, MOCK_STORAGE);
     mockFetch.mockReset();
   });
+
+  // ── Happy path ──────────────────────────────────────────────────────────────
 
   it('returns normalized results from a search query', async () => {
     mockFetch.mockResolvedValue(
@@ -69,6 +80,29 @@ describe('EuropePmcService', () => {
     expect(results[0]?.doi).toBe('10.1101/2024.01.15.575123');
     expect(results[0]?.title).toBe('CRISPR gene editing study');
     expect(results[0]?.authors).toBe('Smith J, Jones A');
+  });
+
+  it('maps authorString to authors and abstractText to abstract', async () => {
+    mockFetch.mockResolvedValue(
+      makeResponse({
+        hitCount: 1,
+        resultList: {
+          result: [
+            {
+              doi: '10.1101/2024.01.15.575123',
+              authorString: 'Doe J',
+              abstractText: 'Abstract content.',
+              firstPublicationDate: '2024-01-15',
+            },
+          ],
+        },
+      }),
+    );
+    const ctx = createMockContext();
+    const { results } = await service.search({ query: 'test' }, ctx);
+    expect(results[0]?.authors).toBe('Doe J');
+    expect(results[0]?.abstract).toBe('Abstract content.');
+    expect(results[0]?.publishedDate).toBe('2024-01-15');
   });
 
   it('skips results without a DOI', async () => {
@@ -127,5 +161,88 @@ describe('EuropePmcService', () => {
     expect(results[0]?.title).toBeUndefined();
     expect(results[0]?.authors).toBeUndefined();
     expect(results[0]?.abstract).toBeUndefined();
+  });
+
+  // ── URL construction ────────────────────────────────────────────────────────
+
+  it('appends PUBLISHER:bioRxiv filter when server=biorxiv', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'CRISPR', server: 'biorxiv' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    expect(decodeURIComponent(calledUrl).replace(/\+/g, ' ')).toContain('PUBLISHER:bioRxiv');
+  });
+
+  it('appends PUBLISHER:medRxiv filter when server=medrxiv', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'COVID', server: 'medrxiv' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    expect(decodeURIComponent(calledUrl).replace(/\+/g, ' ')).toContain('PUBLISHER:medRxiv');
+  });
+
+  it('appends both publisher OR filter when server=both', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test', server: 'both' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const decoded = decodeURIComponent(calledUrl).replace(/\+/g, ' ');
+    expect(decoded).toContain('PUBLISHER:bioRxiv');
+    expect(decoded).toContain('PUBLISHER:medRxiv');
+  });
+
+  it('includes date range in query when dateFrom and dateTo are provided', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test', dateFrom: '2024-01-01', dateTo: '2024-06-30' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    // URLSearchParams encodes spaces as '+' — normalise before asserting
+    const decoded = decodeURIComponent(calledUrl).replace(/\+/g, ' ');
+    expect(decoded).toContain('FIRST_PDATE:[2024-01-01 TO 2024-06-30]');
+  });
+
+  it('uses default sentinel dates when only dateFrom is provided', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test', dateFrom: '2024-01-01' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const decoded = decodeURIComponent(calledUrl).replace(/\+/g, ' ');
+    expect(decoded).toContain('FIRST_PDATE:[2024-01-01 TO');
+  });
+
+  it('caps pageSize at 100 even when limit exceeds 100', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test', limit: 999 }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    expect(calledUrl).toContain('pageSize=100');
+  });
+
+  it('uses default pageSize of 25 when limit is omitted', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    expect(calledUrl).toContain('pageSize=25');
+  });
+
+  // ── Error handling ──────────────────────────────────────────────────────────
+
+  it('throws serviceUnavailable when API returns HTML error page', async () => {
+    mockFetch.mockResolvedValue(makeHtmlResponse());
+    const ctx = createMockContext();
+    await expect(service.search({ query: 'CRISPR' }, ctx)).rejects.toThrow();
+  });
+
+  it('throws serviceUnavailable when HTML starts with lowercase html tag', async () => {
+    mockFetch.mockResolvedValue(makeHtmlResponse('<html><body>Rate limited</body></html>'));
+    const ctx = createMockContext();
+    await expect(service.search({ query: 'test' }, ctx)).rejects.toThrow();
+  });
+
+  it('propagates network errors from fetchWithTimeout', async () => {
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    const ctx = createMockContext();
+    await expect(service.search({ query: 'CRISPR' }, ctx)).rejects.toThrow('connection refused');
   });
 });

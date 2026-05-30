@@ -23,6 +23,8 @@ describe('biorxivListCategoriesTool', () => {
     mockGetCategories.mockReturnValue(CATEGORIES);
   });
 
+  // ── Happy path ──────────────────────────────────────────────────────────────
+
   it('returns the category taxonomy', async () => {
     const ctx = createMockContext();
     const input = biorxivListCategoriesTool.input.parse({});
@@ -32,6 +34,26 @@ describe('biorxivListCategoriesTool', () => {
     expect(result.medrxiv).toContain('Cardiology');
   });
 
+  it('returns both biorxiv and medrxiv arrays', async () => {
+    const ctx = createMockContext();
+    const input = biorxivListCategoriesTool.input.parse({});
+    const result = await biorxivListCategoriesTool.handler(input, ctx);
+    expect(Array.isArray(result.biorxiv)).toBe(true);
+    expect(Array.isArray(result.medrxiv)).toBe(true);
+    expect(result.biorxiv.length).toBeGreaterThan(0);
+    expect(result.medrxiv.length).toBeGreaterThan(0);
+  });
+
+  it('is idempotent across multiple calls', async () => {
+    const ctx = createMockContext();
+    const input = biorxivListCategoriesTool.input.parse({});
+    const first = await biorxivListCategoriesTool.handler(input, ctx);
+    const second = await biorxivListCategoriesTool.handler(input, ctx);
+    expect(first).toEqual(second);
+  });
+
+  // ── format ──────────────────────────────────────────────────────────────────
+
   it('formats output with both server sections', () => {
     const blocks = biorxivListCategoriesTool.format!(CATEGORIES);
     expect(blocks[0]?.type).toBe('text');
@@ -40,5 +62,21 @@ describe('biorxivListCategoriesTool', () => {
     expect(text).toContain('medRxiv Categories');
     expect(text).toContain('Neuroscience');
     expect(text).toContain('Cardiology');
+  });
+
+  it('format includes category counts in headers', () => {
+    const blocks = biorxivListCategoriesTool.format!(CATEGORIES);
+    const text = (blocks[0] as { text: string }).text;
+    // Should show (3) and (2) counts from CATEGORIES fixture
+    expect(text).toContain('(3)');
+    expect(text).toContain('(2)');
+  });
+
+  it('format includes all category entries as list items', () => {
+    const blocks = biorxivListCategoriesTool.format!(CATEGORIES);
+    const text = (blocks[0] as { text: string }).text;
+    for (const cat of [...CATEGORIES.biorxiv, ...CATEGORIES.medrxiv]) {
+      expect(text).toContain(cat);
+    }
   });
 });

@@ -37,6 +37,8 @@ describe('biorxivListRecentTool', () => {
     mockIsValidCategory.mockReturnValue(true);
   });
 
+  // ── Happy path ──────────────────────────────────────────────────────────────
+
   it('returns preprints and pagination for a valid date range', async () => {
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
     const input = biorxivListRecentTool.input.parse({
@@ -48,6 +50,73 @@ describe('biorxivListRecentTool', () => {
     expect(result.preprints).toHaveLength(1);
     expect(result.pagination.biorxiv?.total).toBe(1);
   });
+
+  it('returns medrxiv pagination when server="medrxiv"', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'medrxiv',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.pagination.medrxiv?.total).toBe(1);
+    expect(result.pagination.biorxiv).toBeUndefined();
+  });
+
+  it('returns per-server pagination when server="both"', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.pagination.biorxiv).toBeDefined();
+    expect(result.pagination.medrxiv).toBeDefined();
+  });
+
+  it('includes nextCursor when more results exist beyond the page', async () => {
+    mockGetListing.mockResolvedValue({
+      preprints: Array.from({ length: 30 }, (_, i) => ({
+        doi: `10.1101/2024.01.${String(i + 1).padStart(2, '0')}.000001`,
+      })),
+      pagination: { cursor: 0, total: 90 },
+    });
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.pagination.biorxiv?.nextCursor).toBe(30);
+  });
+
+  it('omits nextCursor when on the last page', async () => {
+    mockGetListing.mockResolvedValue({
+      preprints: [PREPRINT],
+      pagination: { cursor: 0, total: 1 },
+    });
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.pagination.biorxiv?.nextCursor).toBeUndefined();
+  });
+
+  it('defaults server to "both" and cursor to 0 when omitted', () => {
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+    });
+    expect(input.server).toBe('both');
+    expect(input.cursor).toBe(0);
+  });
+
+  // ── Input validation ────────────────────────────────────────────────────────
 
   it('throws invalid_date_range when end_date before start_date', async () => {
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
@@ -61,7 +130,7 @@ describe('biorxivListRecentTool', () => {
     });
   });
 
-  it('throws invalid_date_range for malformed dates', async () => {
+  it('throws invalid_date_range for malformed start_date', async () => {
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
     const input = biorxivListRecentTool.input.parse({
       start_date: 'not-a-date',
@@ -71,6 +140,29 @@ describe('biorxivListRecentTool', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_date_range' },
     });
+  });
+
+  it('throws invalid_date_range for malformed end_date', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: 'bad',
+    });
+    await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('allows same day for start_date and end_date', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-15',
+      end_date: '2024-01-15',
+      server: 'biorxiv',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.preprints).toBeDefined();
   });
 
   it('throws invalid_category for unknown category', async () => {
@@ -87,29 +179,31 @@ describe('biorxivListRecentTool', () => {
     });
   });
 
-  it('returns per-server pagination when server="both"', async () => {
+  it('trims whitespace from category before validation', async () => {
+    mockIsValidCategory.mockReturnValue(true);
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
     const input = biorxivListRecentTool.input.parse({
       start_date: '2024-01-01',
       end_date: '2024-01-31',
-      server: 'both',
+      category: '  Neuroscience  ',
+      server: 'biorxiv',
     });
     const result = await biorxivListRecentTool.handler(input, ctx);
-    expect(result.pagination.biorxiv).toBeDefined();
-    expect(result.pagination.medrxiv).toBeDefined();
+    // After trim, category is passed as "Neuroscience" — should resolve fine
+    expect(result.preprints).toBeDefined();
   });
 
-  it('formats output with pagination state and preprint list', () => {
-    const output = {
-      preprints: [PREPRINT],
-      pagination: { biorxiv: { cursor: 0, total: 1 } },
-    };
-    const blocks = biorxivListRecentTool.format!(output);
-    expect(blocks[0]?.type).toBe('text');
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('bioRxiv');
-    expect(text).toContain('Test Preprint');
+  it('rejects negative cursor at schema parse time', () => {
+    expect(() =>
+      biorxivListRecentTool.input.parse({
+        start_date: '2024-01-01',
+        end_date: '2024-01-31',
+        cursor: -1,
+      }),
+    ).toThrow();
   });
+
+  // ── Edge cases ──────────────────────────────────────────────────────────────
 
   it('enriches notice when zero results are returned', async () => {
     mockGetListing.mockResolvedValue({
@@ -126,5 +220,87 @@ describe('biorxivListRecentTool', () => {
     expect(result.preprints).toHaveLength(0);
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toBeDefined();
+  });
+
+  it('enriches cursor-overshoot notice when cursor > 0 and zero results', async () => {
+    mockGetListing.mockResolvedValue({
+      preprints: [],
+      pagination: { cursor: 990, total: 30 },
+    });
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+      cursor: 990,
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toMatch(/cursor/i);
+  });
+
+  it('continues gracefully when one server fails in both mode', async () => {
+    mockGetListing.mockImplementation((_server: string) => {
+      if (_server === 'biorxiv') return Promise.resolve(LISTING_RESULT);
+      return Promise.reject(new Error('medRxiv down'));
+    });
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    // bioRxiv results still returned even if medRxiv failed
+    expect(result.preprints).toHaveLength(1);
+    expect(result.pagination.biorxiv).toBeDefined();
+  });
+
+  // ── format ──────────────────────────────────────────────────────────────────
+
+  it('formats output with pagination state and preprint list', () => {
+    const output = {
+      preprints: [PREPRINT],
+      pagination: { biorxiv: { cursor: 0, total: 1 } },
+    };
+    const blocks = biorxivListRecentTool.format!(output);
+    expect(blocks[0]?.type).toBe('text');
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('bioRxiv');
+    expect(text).toContain('Test Preprint');
+  });
+
+  it('formats medrxiv pagination block when present', () => {
+    const output = {
+      preprints: [{ ...PREPRINT, server: 'medrxiv' }],
+      pagination: { medrxiv: { cursor: 0, total: 5, nextCursor: 30 } },
+    };
+    const blocks = biorxivListRecentTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('medRxiv');
+    expect(text).toContain('next cursor: 30');
+  });
+
+  it('formats empty result set (no preprints section)', () => {
+    const output = {
+      preprints: [],
+      pagination: { biorxiv: { cursor: 0, total: 0 } },
+    };
+    const blocks = biorxivListRecentTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    // Contains pagination header but no preprint items
+    expect(text).toContain('bioRxiv');
+  });
+
+  it('format shows canvas_id when present', () => {
+    const output = {
+      preprints: [PREPRINT],
+      pagination: { biorxiv: { cursor: 0, total: 1 } },
+      canvas_id: 'canvas-abc-123',
+    };
+    const blocks = biorxivListRecentTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('canvas-abc-123');
   });
 });

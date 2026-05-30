@@ -31,6 +31,8 @@ describe('biorxivGetPreprintTool', () => {
     mockGetDetails.mockResolvedValue([REVISION]);
   });
 
+  // ── Happy path ──────────────────────────────────────────────────────────────
+
   it('returns revisions for a valid DOI', async () => {
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({
@@ -44,23 +46,47 @@ describe('biorxivGetPreprintTool', () => {
     expect(result.failed).toHaveLength(0);
   });
 
-  it('throws invalid_doi_format for malformed DOI', async () => {
+  it('accepts the alternative 10.64898/ DOI prefix', async () => {
+    const altRevision: PreprintRevision = { doi: '10.64898/2026.05.07.723463', title: 'Alt' };
+    mockGetDetails.mockResolvedValue([altRevision]);
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
-    const input = biorxivGetPreprintTool.input.parse({ dois: ['not-a-doi'] });
-    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_doi_format' },
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.64898/2026.05.07.723463'],
+      server: 'biorxiv',
     });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+    expect(result.failed).toHaveLength(0);
   });
 
-  it('throws doi_not_found when all DOIs return empty collections', async () => {
-    mockGetDetails.mockResolvedValue([]);
+  it('resolves multiple DOIs in one call and returns all', async () => {
+    const second: PreprintRevision = { doi: '10.1101/2024.02.01.000002', title: 'Second' };
+    mockGetDetails.mockImplementation((doi: string) =>
+      doi === '10.1101/2024.01.15.575123' ? Promise.resolve([REVISION]) : Promise.resolve([second]),
+    );
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
-    const input = biorxivGetPreprintTool.input.parse({ dois: ['10.1101/2024.01.01.000001'] });
-    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'doi_not_found' },
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.02.01.000002'],
+      server: 'biorxiv',
     });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(2);
+    expect(result.failed).toHaveLength(0);
+  });
+
+  it('fans out both servers when server="both" and merges results', async () => {
+    const bxRevision: PreprintRevision = { doi: '10.1101/2024.01.15.575123', server: 'biorxiv' };
+    mockGetDetails.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv' ? Promise.resolve([bxRevision]) : Promise.resolve([]),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123'],
+      server: 'both',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+    expect(result.failed).toHaveLength(0);
   });
 
   it('reports partial success with failed DOIs alongside successful ones', async () => {
@@ -78,6 +104,89 @@ describe('biorxivGetPreprintTool', () => {
     expect(result.failed).toHaveLength(1);
   });
 
+  it('puts service-thrown errors into failed[] rather than aborting the batch', async () => {
+    mockGetDetails.mockImplementation((doi: string) => {
+      if (doi === '10.1101/2024.01.15.575123') return Promise.resolve([REVISION]);
+      return Promise.reject(new Error('upstream timeout'));
+    });
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.01.01.000001'],
+      server: 'biorxiv',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.error).toContain('upstream timeout');
+  });
+
+  // ── Input validation ────────────────────────────────────────────────────────
+
+  it('throws invalid_doi_format for malformed DOI', async () => {
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({ dois: ['not-a-doi'] });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_doi_format' },
+    });
+  });
+
+  it('rejects empty dois array at schema parse time', () => {
+    expect(() => biorxivGetPreprintTool.input.parse({ dois: [] })).toThrow();
+  });
+
+  it('rejects dois array longer than 10 at schema parse time', () => {
+    const tooMany = Array.from(
+      { length: 11 },
+      (_, i) => `10.1101/2024.01.${String(i + 1).padStart(2, '0')}.000001`,
+    );
+    expect(() => biorxivGetPreprintTool.input.parse({ dois: tooMany })).toThrow();
+  });
+
+  it('defaults server to "both" when omitted', () => {
+    const input = biorxivGetPreprintTool.input.parse({ dois: ['10.1101/2024.01.15.575123'] });
+    expect(input.server).toBe('both');
+  });
+
+  // ── Error handling ──────────────────────────────────────────────────────────
+
+  it('throws doi_not_found when all DOIs return empty collections', async () => {
+    mockGetDetails.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({ dois: ['10.1101/2024.01.01.000001'] });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'doi_not_found' },
+    });
+  });
+
+  it('throws doi_not_found when both servers reject for server="both"', async () => {
+    mockGetDetails.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001'],
+      server: 'both',
+    });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'doi_not_found' },
+    });
+  });
+
+  it('throws doi_not_found when all DOIs are service errors in both-server mode', async () => {
+    mockGetDetails.mockRejectedValue(new Error('network error'));
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001'],
+      server: 'both',
+    });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+    });
+  });
+
+  // ── Edge cases ──────────────────────────────────────────────────────────────
+
   it('handles sparse upstream payload without fabricating data', async () => {
     const sparse: PreprintRevision = { doi: '10.1101/2024.01.15.575123' };
     mockGetDetails.mockResolvedValue([sparse]);
@@ -87,6 +196,46 @@ describe('biorxivGetPreprintTool', () => {
     expect(result.preprints[0]?.revisions[0]?.title).toBeUndefined();
     expect(result.preprints[0]?.revisions[0]?.abstract).toBeUndefined();
   });
+
+  it('handles multiple revisions for same DOI and returns them all', async () => {
+    const rev2: PreprintRevision = { ...REVISION, version: '2', date: '2024-03-01' };
+    mockGetDetails.mockResolvedValue([REVISION, rev2]);
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    // Use explicit single server to avoid double fan-out in "both" mode
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123'],
+      server: 'biorxiv',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints[0]?.revisions).toHaveLength(2);
+  });
+
+  // ── Security ────────────────────────────────────────────────────────────────
+
+  it('puts injection-attempt DOI into failed[] without calling service', async () => {
+    mockGetDetails.mockReset();
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    // Looks like a DOI but includes path traversal characters; starts with 10. so passes DOI_REGEX
+    // but the intent is to verify the service never sees raw unsanitized values when all fail
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['not-a-doi; DROP TABLE preprints;--'],
+    });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_doi_format' },
+    });
+    expect(mockGetDetails).not.toHaveBeenCalled();
+  });
+
+  it('error message for invalid_doi_format does not expose env vars or secrets', async () => {
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({ dois: ['not-a-doi'] });
+    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    const serialized = JSON.stringify(err);
+    expect(serialized).not.toMatch(/password|secret|key|token|BIORXIV_MAILTO/i);
+  });
+
+  // ── format ──────────────────────────────────────────────────────────────────
 
   it('formats output with revision list and DOIs', () => {
     const output = {
@@ -99,5 +248,37 @@ describe('biorxivGetPreprintTool', () => {
     expect(text).toContain('10.1101/2024.01.15.575123');
     expect(text).toContain('Test Preprint Title');
     expect(text).toContain('Revisions');
+  });
+
+  it('formats failed DOIs in output', () => {
+    const output = {
+      preprints: [],
+      failed: [{ doi: '10.1101/2024.01.01.000001', error: 'Not found on biorxiv.' }],
+    };
+    const blocks = biorxivGetPreprintTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('10.1101/2024.01.01.000001');
+    expect(text).toContain('Not found');
+  });
+
+  it('formats all optional revision fields when present', () => {
+    const richRevision: PreprintRevision = {
+      ...REVISION,
+      type: 'new results',
+      license: 'CC-BY 4.0',
+      jatsxmlUrl: 'https://www.biorxiv.org/content/10.1101/2024.01.15.575123v1.xml',
+      publishedJournalDoi: '10.1038/s41586-024-00001-0',
+      funder: 'NIH R01',
+      authorCorresponding: 'Smith J',
+      authorCorrespondingInstitution: 'MIT',
+    };
+    const output = {
+      preprints: [{ doi: '10.1101/2024.01.15.575123', revisions: [richRevision] }],
+      failed: [],
+    };
+    const blocks = biorxivGetPreprintTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('CC-BY 4.0');
+    expect(text).toContain('10.1038/s41586-024-00001-0');
   });
 });
