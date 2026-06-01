@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-05-31
+
+biorxiv_list_recent: remove dead DataCanvas integration (canvas_id output, spillover handler, CANVAS_PROVIDER_TYPE config)
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-05-30
 
 enrichment adoption on biorxiv_search_preprints and biorxiv_list_recent: query echo, true EuropePMC hitCount, empty-result guidance via typed enrichment block; totalFound now reflects upstream hitCount

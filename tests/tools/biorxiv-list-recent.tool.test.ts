@@ -292,15 +292,4 @@ describe('biorxivListRecentTool', () => {
     // Contains pagination header but no preprint items
     expect(text).toContain('bioRxiv');
   });
-
-  it('format shows canvas_id when present', () => {
-    const output = {
-      preprints: [PREPRINT],
-      pagination: { biorxiv: { cursor: 0, total: 1 } },
-      canvas_id: 'canvas-abc-123',
-    };
-    const blocks = biorxivListRecentTool.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('canvas-abc-123');
-  });
 });

@@ -4,12 +4,10 @@
  * server="both". Category filtering is applied server-side via the ?category=
  * query param. Returns 30 results per page (API-fixed); use cursor to paginate.
  * When server="both", per-server pagination state is surfaced independently.
- * Large result sets spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb.
  * @module mcp-server/tools/definitions/biorxiv-list-recent.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
@@ -114,12 +112,6 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           .describe('medRxiv pagination state. Present when server is "medrxiv" or "both".'),
       })
       .describe('Per-server pagination state. Advance each server independently.'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'DataCanvas ID when result overflowed the inline preview budget. Requires CANVAS_PROVIDER_TYPE=duckdb; run SQL against the full result set using the canvas ID.',
-      ),
   }),
 
   // Agent-facing context on the success path — recovery guidance for empty results and
@@ -310,35 +302,6 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       return { preprints: [], pagination };
     }
 
-    // Spillover to DataCanvas if canvas is available and result is large
-    const canvas = (ctx as { core?: { canvas?: object } }).core?.canvas as
-      | import('@cyanheads/mcp-ts-core/canvas').DataCanvas
-      | undefined;
-
-    if (canvas && allPreprints.length > 50) {
-      const instance = await canvas.acquire(undefined, ctx);
-      async function* preprintRows(): AsyncIterable<Record<string, unknown>> {
-        for (const p of allPreprints) {
-          yield p as unknown as Record<string, unknown>;
-        }
-      }
-      const spill = await spillover({
-        canvas: instance,
-        source: preprintRows(),
-        previewChars: 80_000,
-        caps: { maxRows: 5_000 },
-        signal: ctx.signal,
-      });
-
-      if (spill.spilled) {
-        return {
-          preprints: spill.previewRows as unknown as PreprintRevision[],
-          pagination,
-          canvas_id: instance.canvasId,
-        };
-      }
-    }
-
     return { preprints: allPreprints, pagination };
   },
 
@@ -356,12 +319,6 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       const p = result.pagination.medrxiv;
       lines.push(
         `**medRxiv:** page offset ${p.cursor}, total ${p.total}${p.nextCursor !== undefined ? ` — next cursor: ${p.nextCursor}` : ' (last page)'}`,
-      );
-    }
-
-    if (result.canvas_id) {
-      lines.push(
-        `\n**DataCanvas ID:** \`${result.canvas_id}\` — run SQL queries on the full result set.`,
       );
     }
 

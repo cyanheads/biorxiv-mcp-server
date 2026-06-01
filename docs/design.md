@@ -42,7 +42,6 @@ Pairs naturally with **pubmed-mcp-server** (post-publication side), **openalex-m
 - DOI is the primary key across all tools
 - Pagination via integer cursor (numeric offset) for `biorxiv_list_recent`; offset-based for EuropePMC search results. The listing endpoint returns exactly 30 results per page (fixed by the API; no `limit` parameter is accepted).
 - Category filtering on `biorxiv_list_recent` is server-side (query parameter `?category=…`), not client-side — the API response's `category` field in the `messages` envelope confirms the active filter.
-- Large result sets (>50 rows) spill to DataCanvas for SQL querying when available
 
 ---
 
@@ -79,7 +78,6 @@ Pairs naturally with **pubmed-mcp-server** (post-publication side), **openalex-m
 | `BIORXIV_MAILTO` | No | Email address included in the `User-Agent` header (e.g. `your@email.com`). Optional, but recommended for polite API access. |
 | `BIORXIV_API_BASE_URL` | No | Override the API base URL. Defaults to `https://api.biorxiv.org`. |
 | `EUROPEPMC_API_BASE_URL` | No | Override EuropePMC base URL. Defaults to `https://www.ebi.ac.uk/europepmc/webservices/rest`. |
-| `CANVAS_PROVIDER_TYPE` | No | Set to `duckdb` to enable DataCanvas spillover for large result sets. Node only. |
 
 ---
 
@@ -175,7 +173,6 @@ When `server="both"`, each DOI generates two calls (biorxiv + medrxiv) run in pa
 - **Full-text retrieval: in scope?** → Deferred. `biorxiv_get_preprint` returns the PDF URL and abstract; parsing PDF/TDM XML is a separate concern with significant complexity and no clear agent workflow that requires it vs. using the URL directly.
 - **Category taxonomy: hardcode or fetch dynamically?** → Hardcoded static list. No API endpoint provides it; the taxonomy changes infrequently; a dedicated `biorxiv_list_categories` tool exposes it so agents can discover valid values without baking category strings into tool parameters.
 - **Two-server fan-out: default scope?** → Default to both servers (`"both"`) with optional `server` parameter to scope down. Rationale: agents asking about a topic don't typically want to miss medRxiv results when asking about bioRxiv and vice versa.
-- **DataCanvas: opt in?** → Opt-in via `CANVAS_PROVIDER_TYPE=duckdb`. `biorxiv_list_recent` can return hundreds of rows; spillover enables SQL queries over the full result set without context-window pressure.
 
 ### Options declined
 
