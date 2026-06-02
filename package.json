@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/biorxiv-mcp-server",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "mcpName": "io.github.cyanheads/biorxiv-mcp-server",
   "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "type": "module",
@@ -34,6 +34,7 @@
     "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
+    "release:github": "bun run scripts/release-github.ts",
     "list-skills": "bun run scripts/list-skills.ts",
     "test": "bunx vitest run",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
@@ -86,7 +87,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.9.16",
+    "@cyanheads/mcp-ts-core": "^0.9.21",
     "pino-pretty": "^13.1.3",
     "zod": "^4.4.3"
   },
@@ -97,6 +98,6 @@
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.17",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.8"
   }
 }
