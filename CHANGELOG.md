@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-06-04
+
+Fix misleading field references in biorxiv_get_published_version; surface enrichment_error reason in biorxiv_search_preprints
+
 ## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-06-02
 
 adopt @cyanheads/mcp-ts-core ^0.9.21 — per-request log context fix, secret-stripped fetch errors, withRetry fail-fast
