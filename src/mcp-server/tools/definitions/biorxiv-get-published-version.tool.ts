@@ -15,7 +15,7 @@ const DOI_REGEX = /^10\.\d{4,}\//;
 export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_version', {
   title: 'Get Published Journal Version',
   description:
-    "Resolve a preprint DOI to its full journal publication record — journal DOI, journal name, published date, and corresponding author details. Use when the preprint's `published` field from biorxiv_get_preprint is non-null and you need the full crosswalk metadata. Returns a not-found error when the preprint is not yet published. Check biorxiv_get_preprint first to confirm the published field is populated.",
+    "Resolve a preprint DOI to its full journal publication record — journal DOI, journal name, published date, and corresponding author details. Use when the preprint's `publishedJournalDoi` field from biorxiv_get_preprint is present and you need the full crosswalk metadata. Returns a not-found error when the preprint is not yet published. Check biorxiv_get_preprint first to confirm the publishedJournalDoi field is populated.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -53,7 +53,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       code: JsonRpcErrorCode.NotFound,
       when: 'Crosswalk endpoint returns empty collection — preprint may not be published yet.',
       recovery:
-        'Use biorxiv_get_preprint to check the published field. If it shows NA, the preprint is not yet published.',
+        'Use biorxiv_get_preprint to confirm the preprint is published — if publishedJournalDoi is absent, the preprint has not been accepted to a journal yet.',
     },
     {
       reason: 'invalid_doi_format',
