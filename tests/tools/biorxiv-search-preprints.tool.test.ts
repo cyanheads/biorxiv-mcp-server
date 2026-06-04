@@ -215,6 +215,14 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(enrichment.totalFound).toBe(1234);
   });
 
+  it('sets enrichment_error to "not_found" when revisions array is empty', async () => {
+    mockGetDetails.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]?.enrichment_error).toBe('not_found');
+  });
+
   it('marks partial_results=true when enrichment throws', async () => {
     mockGetDetails.mockRejectedValue(new Error('enrichment error'));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
@@ -222,6 +230,29 @@ describe('biorxivSearchPreprintsTool', () => {
     const result = await biorxivSearchPreprintsTool.handler(input, ctx);
     expect(result.partial_results).toBe(true);
     expect(result.preprints[0]?.enriched).toBe(false);
+  });
+
+  it('sets enrichment_error to "service_error" when enrichment throws', async () => {
+    mockGetDetails.mockRejectedValue(new Error('enrichment error'));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]?.enrichment_error).toBe('service_error');
+  });
+
+  it('sets enrichment_error to "service_error" when both allSettled calls reject (non-biorxiv DOI, server=both)', async () => {
+    // Non-biorxiv DOI prefix triggers the Promise.allSettled path — both rejections must not be
+    // misclassified as "not_found"
+    const nonBiorxivResult: EuropePmcResult = {
+      doi: '10.5678/some.other.preprint',
+      title: 'Some other preprint',
+    };
+    mockEpmcSearch.mockResolvedValue(epmcSearchResult(1, [nonBiorxivResult]));
+    mockGetDetails.mockRejectedValue(new Error('service error'));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]?.enrichment_error).toBe('service_error');
   });
 
   it('search_unavailable error does not expose secrets or credentials', async () => {
@@ -321,6 +352,30 @@ describe('biorxivSearchPreprintsTool', () => {
     const blocks = biorxivSearchPreprintsTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('no (EuropePMC fallback)');
+  });
+
+  it('format renders "not_found" reason for unenriched result with enrichment_error not_found', () => {
+    const output = {
+      preprints: [
+        { doi: '10.1101/2024.01.15.575123', enriched: false, enrichment_error: 'not_found' },
+      ],
+      partial_results: true,
+    };
+    const blocks = biorxivSearchPreprintsTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('DOI not indexed on target server');
+  });
+
+  it('format renders "service_error" reason for unenriched result with enrichment_error service_error', () => {
+    const output = {
+      preprints: [
+        { doi: '10.1101/2024.01.15.575123', enriched: false, enrichment_error: 'service_error' },
+      ],
+      partial_results: true,
+    };
+    const blocks = biorxivSearchPreprintsTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('service error — retry may help');
   });
 
   it('format shows revision count when revisionCount > 1', () => {

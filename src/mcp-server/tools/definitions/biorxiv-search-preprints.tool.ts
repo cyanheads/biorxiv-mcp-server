@@ -32,6 +32,7 @@ type EnrichedPreprint = {
   publishedJournalDoi?: string | undefined;
   abstract?: string | undefined;
   enriched: boolean;
+  enrichment_error?: 'service_error' | 'not_found' | undefined;
   revisionCount?: number | undefined;
 };
 
@@ -58,7 +59,11 @@ function formatResult(p: EnrichedPreprint): string {
     if (p.authors) lines.push(`**Authors:** ${p.authors}`);
     if (p.date) lines.push(`**Date:** ${p.date}`);
     if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
-    lines.push(`\n*Metadata from EuropePMC only — bioRxiv enrichment unavailable.*`);
+    const reason =
+      p.enrichment_error === 'service_error'
+        ? 'bioRxiv enrichment failed (service error — retry may help).'
+        : 'DOI not indexed on target server — EuropePMC metadata shown.';
+    lines.push(`\n*${reason}*`);
   }
 
   return lines.join('\n');
@@ -119,6 +124,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
               .boolean()
               .describe(
                 'True when full bioRxiv metadata was available; false for EuropePMC-only fallback.',
+              ),
+            enrichment_error: z
+              .enum(['service_error', 'not_found'])
+              .optional()
+              .describe(
+                'Reason enrichment was unavailable: "service_error" (transient — retry may help) or "not_found" (DOI not indexed on target server — EuropePMC fallback is authoritative). Only present when enriched is false.',
               ),
             revisionCount: z
               .number()
@@ -293,6 +304,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         // Determine which server(s) to enrich against
         let revisions: PreprintRevision[] = [];
         let enrichmentFailed = false;
+        let enrichmentErrorReason: 'service_error' | 'not_found' | undefined;
 
         try {
           if (input.server === 'biorxiv') {
@@ -316,10 +328,14 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
               ]);
               if (bxR.status === 'fulfilled') revisions.push(...bxR.value);
               if (mxR.status === 'fulfilled') revisions.push(...mxR.value);
+              if (bxR.status === 'rejected' && mxR.status === 'rejected') {
+                enrichmentErrorReason = 'service_error';
+              }
             }
           }
         } catch {
           enrichmentFailed = true;
+          enrichmentErrorReason = 'service_error';
         }
 
         if (enrichmentFailed || revisions.length === 0) {
@@ -331,6 +347,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
             ...(epResult.publishedDate && { date: epResult.publishedDate }),
             ...(epResult.abstract && { abstract: epResult.abstract }),
             enriched: false,
+            enrichment_error: enrichmentErrorReason ?? 'not_found',
           };
         }
 
@@ -367,14 +384,16 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     lines.push(`**${result.preprints.length} results**`);
     if (result.partial_results) {
       lines.push(
-        '> Some results show EuropePMC metadata only — bioRxiv enrichment was unavailable.',
+        '> Some results show EuropePMC metadata only — see enrichment_error per result for details.',
       );
     }
 
     for (const p of result.preprints) {
       lines.push('');
       lines.push(formatResult(p));
-      lines.push(`*Enriched: ${p.enriched ? 'yes' : 'no (EuropePMC fallback)'}*`);
+      lines.push(
+        `*Enriched: ${p.enriched ? 'yes' : 'no (EuropePMC fallback)'}${p.enrichment_error ? ` · enrichment_error: ${p.enrichment_error}` : ''}*`,
+      );
     }
 
     return [{ type: 'text', text: lines.join('\n') || 'No results.' }];
