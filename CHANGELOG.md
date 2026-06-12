@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-06-12
+
+Adopt @cyanheads/mcp-ts-core ^0.10.6; explicit server identity, ctx.enrich.total() in search, Dockerfile version label and healthcheck
+
 ## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-06-04
 
 Fix misleading field references in biorxiv_get_published_version; surface enrichment_error reason in biorxiv_search_preprints
