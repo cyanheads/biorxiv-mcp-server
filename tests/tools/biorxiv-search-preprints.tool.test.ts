@@ -62,9 +62,9 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints[0]?.doi).toBe('10.1101/2024.01.15.575123');
     expect(result.preprints[0]?.enriched).toBe(true);
     expect(result.partial_results).toBe(false);
-    // totalFound must carry the upstream hitCount, not the returned count
+    // totalCount must carry the upstream hitCount, not the returned count
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalFound).toBe(1234);
+    expect(enrichment.totalCount).toBe(1234);
   });
 
   it('surfaces true hitCount and query echo in enrichment', async () => {
@@ -76,7 +76,7 @@ describe('biorxivSearchPreprintsTool', () => {
     });
     await biorxivSearchPreprintsTool.handler(input, ctx);
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalFound).toBe(1234);
+    expect(enrichment.totalCount).toBe(1234);
     expect(enrichment.queryEcho).toMatchObject({
       query: 'CRISPR',
       server: 'biorxiv',
@@ -189,7 +189,7 @@ describe('biorxivSearchPreprintsTool', () => {
     const result = await biorxivSearchPreprintsTool.handler(input, ctx);
     expect(result.preprints).toHaveLength(0);
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalFound).toBe(0);
+    expect(enrichment.totalCount).toBe(0);
     expect(enrichment.notice).toBeDefined();
   });
 
@@ -212,7 +212,7 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints[0]?.enriched).toBe(false);
     // hitCount still threads through even when enrichment fails
     const enrichment = getEnrichment(ctx);
-    expect(enrichment.totalFound).toBe(1234);
+    expect(enrichment.totalCount).toBe(1234);
   });
 
   it('sets enrichment_error to "not_found" when revisions array is empty', async () => {

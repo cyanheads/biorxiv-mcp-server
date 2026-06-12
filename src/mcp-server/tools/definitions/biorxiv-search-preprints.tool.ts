@@ -146,15 +146,15 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       ),
   }),
 
-  // Agent-facing context on the success path — the true upstream total from EuropePMC,
-  // the echo of the query parameters as sent, and recovery guidance for zero results.
+  // Agent-facing context on the success path — the upstream grand total, the echo
+  // of the query parameters as sent, and recovery guidance for zero results.
   // Populated via ctx.enrich so it reaches both structuredContent and content[];
   // never rides in the domain return.
   enrichment: {
-    totalFound: z
+    totalCount: z
       .number()
       .describe(
-        'Total preprints matching the query in EuropePMC (hitCount) — the true upstream grand total, not the number of results returned.',
+        'Total preprints matching the query in EuropePMC (hitCount) — the true upstream grand total, not the number of results returned. Written via ctx.enrich.total().',
       ),
     queryEcho: z
       .object({
@@ -176,7 +176,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   },
 
   // content[] trailer rendering for structured enrichment fields. Scalar/notice kinds
-  // (totalFound, notice) render automatically. queryEcho is a structured object that
+  // (totalCount, notice) render automatically. queryEcho is a structured object that
   // needs a render function to produce a single compact line.
   enrichmentTrailer: {
     queryEcho: {
@@ -283,7 +283,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     };
 
     if (epmcResults.length === 0) {
-      ctx.enrich({ totalFound: hitCount, queryEcho });
+      ctx.enrich.total(hitCount);
+      ctx.enrich({ queryEcho });
       ctx.enrich.notice(
         `No preprints matched "${input.query}"${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms or a wider date range.`,
       );
@@ -370,7 +371,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       }),
     );
 
-    ctx.enrich({ totalFound: hitCount, queryEcho });
+    ctx.enrich.total(hitCount);
+    ctx.enrich({ queryEcho });
 
     return {
       preprints: enriched,
