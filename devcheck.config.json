@@ -12,5 +12,8 @@
   },
   "outdated": {
     "allowlist": ["@cyanheads/mcp-ts-core"]
+  },
+  "skillVersions": {
+    "ignore": ["tool-defs-analysis"]
   }
 }
