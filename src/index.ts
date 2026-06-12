@@ -12,6 +12,8 @@ import { initBiorxivApiService } from './services/biorxiv/biorxiv-service.js';
 import { initEuropePmcService } from './services/europe-pmc/europe-pmc-service.js';
 
 await createApp({
+  name: 'biorxiv-mcp-server',
+  title: 'biorxiv-mcp-server',
   tools: [...allToolDefinitions],
   resources: [],
   prompts: [],
