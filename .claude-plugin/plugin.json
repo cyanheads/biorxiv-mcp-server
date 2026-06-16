@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/biorxiv-mcp-server",
+  "name": "biorxiv-mcp-server",
   "version": "0.1.14",
   "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "author": {
@@ -9,7 +9,7 @@
   "repository": "git+https://github.com/cyanheads/biorxiv-mcp-server.git",
   "license": "Apache-2.0",
   "mcpServers": {
-    "@cyanheads/biorxiv-mcp-server": {
+    "biorxiv-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/biorxiv-mcp-server"],
       "env": {

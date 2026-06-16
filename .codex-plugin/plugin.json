@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/biorxiv-mcp-server",
+  "name": "biorxiv-mcp-server",
   "version": "0.1.14",
   "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "author": {
@@ -13,7 +13,7 @@
   "keywords": ["biorxiv", "medrxiv", "preprint", "biomedical", "mcp", "mcp-server", "model-context-protocol"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "@cyanheads/biorxiv-mcp-server",
+    "displayName": "biorxiv-mcp-server",
     "shortDescription": "Search and retrieve bioRxiv and medRxiv preprints by DOI, date, or keyword.",
     "longDescription": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. Powered by the bioRxiv API and EuropePMC for full-text search.",
     "developerName": "cyanheads",
