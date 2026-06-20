@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-06-12 07:25:22
+Generated on: 2026-06-20 10:35:56
 
 ```text
 biorxiv-mcp-server/
@@ -28,6 +28,7 @@ biorxiv-mcp-server/
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-06-20
+
+Adopt @cyanheads/mcp-ts-core ^0.10.9; check-dependency-specifiers devcheck step, lint:packaging plugin-manifest checks, fresh-scaffold devcheck guards, ctx.content media collector
+
 ## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-06-12
 
 Adopt @cyanheads/mcp-ts-core ^0.10.6; explicit server identity, ctx.enrich.total() in search, Dockerfile version label and healthcheck
