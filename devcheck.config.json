@@ -15,5 +15,8 @@
   },
   "skillVersions": {
     "ignore": ["tool-defs-analysis"]
+  },
+  "packaging": {
+    "pluginManifests": true
   }
 }
