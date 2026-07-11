@@ -12,7 +12,7 @@ import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 export const biorxivListCategoriesTool = tool('biorxiv_list_categories', {
   title: 'List bioRxiv/medRxiv Categories',
   description:
-    'List valid subject category strings for bioRxiv and medRxiv. Use these strings as the `category` filter in biorxiv_list_recent to narrow results to a specific field. The taxonomy is static and maintained in-server; run this tool before filtering to get the current valid values.',
+    'List valid subject category strings for bioRxiv and medRxiv. Use these strings as the `category` filter in biorxiv_list_recent to narrow results to a specific field. Run this tool before filtering to get the current valid values.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({}),

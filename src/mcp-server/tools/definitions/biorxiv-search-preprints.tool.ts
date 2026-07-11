@@ -72,7 +72,7 @@ function formatResult(p: EnrichedPreprint): string {
 export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   title: 'Search Preprints by Keyword',
   description:
-    "Search preprints by keyword using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. The search backend is EuropePMC — bioRxiv's native search endpoint is not used.",
+    'Search preprints by keyword using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -154,7 +154,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     totalCount: z
       .number()
       .describe(
-        'Total preprints matching the query in EuropePMC (hitCount) — the true upstream grand total, not the number of results returned. Written via ctx.enrich.total().',
+        'Total preprints matching the query in EuropePMC (hitCount) — the true upstream grand total, not the number of results returned.',
       ),
     queryEcho: z
       .object({

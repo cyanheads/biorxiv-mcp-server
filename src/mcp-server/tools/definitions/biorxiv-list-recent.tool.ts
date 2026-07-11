@@ -38,7 +38,7 @@ function formatPreprint(p: PreprintRevision): string {
 export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   title: 'List Recent Preprints',
   description:
-    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. Category filtering is applied server-side; call biorxiv_list_categories for valid category strings.',
+    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. Call biorxiv_list_categories for valid category strings.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -51,9 +51,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     category: z
       .string()
       .optional()
-      .describe(
-        'Subject category filter applied server-side. Use biorxiv_list_categories for valid values.',
-      ),
+      .describe('Subject category filter. Use biorxiv_list_categories for valid values.'),
     cursor: z
       .number()
       .int()
