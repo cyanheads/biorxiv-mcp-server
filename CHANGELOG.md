@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-11
+
+Strip leaked Highwire/JATS markup from titles and abstracts, render every revision field in biorxiv_get_preprint's content[], and remove implementation-detail leaks from advertised tool descriptions (#25, #26, #31)
+
 ## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-07-11
 
 Adopt @cyanheads/mcp-ts-core ^0.10.14; Socket supply-chain scanner + minimumReleaseAge install guard, Dockerfile hardening, and SERVER_VERSION now derives from package.json instead of a hardcoded, drifted literal (#28)
