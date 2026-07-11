@@ -29,9 +29,13 @@ const EPMC_RESULT: EuropePmcResult = {
   abstract: 'A study on CRISPR applications.',
 };
 
-/** Build an EuropePmcSearchResult with a given hitCount and result set */
-function epmcSearchResult(hitCount: number, results: EuropePmcResult[]): EuropePmcSearchResult {
-  return { hitCount, results };
+/** Build an EuropePmcSearchResult with a given hitCount, result set, and optional next-page cursor */
+function epmcSearchResult(
+  hitCount: number,
+  results: EuropePmcResult[],
+  nextCursorMark?: string,
+): EuropePmcSearchResult {
+  return { hitCount, results, ...(nextCursorMark && { nextCursorMark }) };
 }
 
 const REVISION: PreprintRevision = {
@@ -172,6 +176,53 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints).toHaveLength(1);
   });
 
+  it('throws invalid_date_range for a calendar-impossible month in date_from', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      date_from: '2024-13-01',
+    });
+    await expect(biorxivSearchPreprintsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('throws invalid_date_range for a day-of-month overflow in date_from (2024-02-30)', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      date_from: '2024-02-30',
+    });
+    await expect(biorxivSearchPreprintsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('throws invalid_date_range for Feb 29 in a non-leap year (date_to)', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      date_to: '2023-02-29',
+    });
+    await expect(biorxivSearchPreprintsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('accepts a valid leap day (2024-02-29)', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      date_from: '2024-02-29',
+      date_to: '2024-02-29',
+    });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+  });
+
   it('rejects limit below 1 at schema parse time', () => {
     expect(() => biorxivSearchPreprintsTool.input.parse({ query: 'test', limit: 0 })).toThrow();
   });
@@ -298,6 +349,44 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints[0]?.title).toBe('CRISPR gene editing in neural circuits');
     expect(result.preprints[0]?.authors).toBe('Smith J, Jones A');
     expect(result.preprints[0]?.enriched).toBe(false);
+  });
+
+  // ── Cursor pagination ─────────────────────────────────────────────────────────
+
+  it('threads cursor_mark input into the EuropePMC service call', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      cursor_mark: 'AoJpage2',
+    });
+    await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(mockEpmcSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ cursorMark: 'AoJpage2' }),
+      expect.anything(),
+    );
+  });
+
+  it('surfaces nextCursorMark and echoes cursor_mark when more pages exist', async () => {
+    mockEpmcSearch.mockResolvedValue(epmcSearchResult(500, [EPMC_RESULT], 'AoJnextpage'));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      cursor_mark: 'AoJpage1',
+    });
+    await biorxivSearchPreprintsTool.handler(input, ctx);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.nextCursorMark).toBe('AoJnextpage');
+    expect(enrichment.queryEcho).toMatchObject({ cursor_mark: 'AoJpage1' });
+  });
+
+  it('omits nextCursorMark and cursor_mark echo on the last page', async () => {
+    // Default beforeEach mock returns no nextCursorMark → last page
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    await biorxivSearchPreprintsTool.handler(input, ctx);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.nextCursorMark).toBeUndefined();
+    expect(enrichment.queryEcho).not.toHaveProperty('cursor_mark');
   });
 
   // ── Security ────────────────────────────────────────────────────────────────

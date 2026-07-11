@@ -14,6 +14,7 @@ import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
+import { isValidCalendarDate } from '@/services/shared.js';
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
@@ -99,6 +100,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .max(100)
       .default(25)
       .describe('Maximum results to return (1–100). Defaults to 25.'),
+    cursor_mark: z
+      .string()
+      .optional()
+      .describe(
+        'Opaque page token for ranked EuropePMC results. Omit for the first page; pass the nextCursorMark returned by a prior call to fetch the next page. Pages through the same ranked list rather than raising limit.',
+      ),
   }),
 
   output: z.object({
@@ -156,12 +163,19 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .describe(
         'Total preprints matching the query in EuropePMC (hitCount) — the true upstream grand total, not the number of results returned.',
       ),
+    nextCursorMark: z
+      .string()
+      .optional()
+      .describe(
+        'Opaque token for the next page of ranked results. Present only when more results exist beyond this page; pass it back as cursor_mark. Absent on the last page.',
+      ),
     queryEcho: z
       .object({
         query: z.string().describe('The search query string sent to EuropePMC.'),
         server: z.string().describe('Server scope used for enrichment.'),
         date_from: z.string().optional().describe('date_from filter applied, if any.'),
         date_to: z.string().optional().describe('date_to filter applied, if any.'),
+        cursor_mark: z.string().optional().describe('cursor_mark page token applied, if any.'),
         limit: z.number().describe('Maximum results requested.'),
       })
       .describe(
@@ -186,12 +200,14 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         date_from?: string;
         limit: number;
         date_to?: string;
+        cursor_mark?: string;
       }) => {
         const parts = [
           `Query: ${echo.query}`,
           `server=${echo.server}`,
           ...(echo.date_from ? [`from=${echo.date_from}`] : []),
           ...(echo.date_to ? [`to=${echo.date_to}`] : []),
+          ...(echo.cursor_mark ? [`cursor=${echo.cursor_mark}`] : []),
           `limit=${echo.limit}`,
         ];
         return parts.join(' · ');
@@ -222,15 +238,29 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       limit: input.limit,
     });
 
-    // Validate date inputs before calling EuropePMC
+    // Validate date inputs before calling EuropePMC: shape first, then
+    // real-calendar-date (rejects overflow days like 2024-02-30 that the shape
+    // regex accepts but no calendar holds), then range.
     if (input.date_from && !DATE_REGEX.test(input.date_from)) {
       throw ctx.fail('invalid_date_range', 'date_from must be in YYYY-MM-DD format.', {
         date_from: input.date_from,
         ...ctx.recoveryFor('invalid_date_range'),
       });
     }
+    if (input.date_from && !isValidCalendarDate(input.date_from)) {
+      throw ctx.fail('invalid_date_range', 'date_from is not a real calendar date (YYYY-MM-DD).', {
+        date_from: input.date_from,
+        ...ctx.recoveryFor('invalid_date_range'),
+      });
+    }
     if (input.date_to && !DATE_REGEX.test(input.date_to)) {
       throw ctx.fail('invalid_date_range', 'date_to must be in YYYY-MM-DD format.', {
+        date_to: input.date_to,
+        ...ctx.recoveryFor('invalid_date_range'),
+      });
+    }
+    if (input.date_to && !isValidCalendarDate(input.date_to)) {
+      throw ctx.fail('invalid_date_range', 'date_to is not a real calendar date (YYYY-MM-DD).', {
         date_to: input.date_to,
         ...ctx.recoveryFor('invalid_date_range'),
       });
@@ -260,6 +290,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           dateTo: input.date_to,
           limit: input.limit,
           server: input.server,
+          cursorMark: input.cursor_mark,
         },
         ctx,
       );
@@ -272,19 +303,20 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       );
     }
 
-    const { hitCount, results: epmcResults } = epmcSearchResult;
+    const { hitCount, results: epmcResults, nextCursorMark } = epmcSearchResult;
 
     const queryEcho = {
       query: input.query,
       server: input.server,
       ...(input.date_from && { date_from: input.date_from }),
       ...(input.date_to && { date_to: input.date_to }),
+      ...(input.cursor_mark && { cursor_mark: input.cursor_mark }),
       limit: input.limit,
     };
 
     if (epmcResults.length === 0) {
       ctx.enrich.total(hitCount);
-      ctx.enrich({ queryEcho });
+      ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
       ctx.enrich.notice(
         `No preprints matched "${input.query}"${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms or a wider date range.`,
       );
@@ -371,7 +403,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     );
 
     ctx.enrich.total(hitCount);
-    ctx.enrich({ queryEcho });
+    ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
 
     return {
       preprints: enriched,

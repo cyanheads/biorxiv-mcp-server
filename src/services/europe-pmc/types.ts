@@ -42,5 +42,11 @@ export interface EuropePmcResult {
 export interface EuropePmcSearchResult {
   /** EuropePMC hitCount — total matching preprints regardless of the page size requested */
   hitCount: number;
+  /**
+   * Opaque cursor for the next page of ranked results. EuropePMC omits this
+   * field entirely on the final page (REST v6.6 termination semantics), so its
+   * absence — not a repeated value — signals that no further pages remain.
+   */
+  nextCursorMark?: string;
   results: EuropePmcResult[];
 }

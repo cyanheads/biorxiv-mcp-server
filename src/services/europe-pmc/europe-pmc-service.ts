@@ -20,6 +20,8 @@ import type {
 } from './types.js';
 
 export interface SearchOptions {
+  /** Opaque EuropePMC cursor for the page to fetch. Defaults to '*' (first page). */
+  cursorMark?: string | undefined;
   /** Optional date filter — format YYYY-MM-DD */
   dateFrom?: string | undefined;
   /** Optional date filter — format YYYY-MM-DD */
@@ -76,7 +78,7 @@ export class EuropePmcService {
       query: q,
       resulttype: 'lite',
       synonym: 'FALSE',
-      cursorMark: '*',
+      cursorMark: options.cursorMark ?? '*',
       pageSize: String(limit),
       format: 'json',
       fields,
@@ -112,7 +114,13 @@ export class EuropePmcService {
               ...(abstract && { abstract }),
             };
           });
-        return { hitCount: data.hitCount ?? results.length, results };
+        return {
+          hitCount: data.hitCount ?? results.length,
+          results,
+          // Absent on the last page (EuropePMC omits it) — omit here too so
+          // callers read "no field" as "no more pages".
+          ...(data.nextCursorMark && { nextCursorMark: data.nextCursorMark }),
+        };
       },
       {
         operation: 'EuropePmcService.search',

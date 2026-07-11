@@ -252,6 +252,49 @@ describe('EuropePmcService', () => {
     expect(calledUrl).toContain('pageSize=25');
   });
 
+  // ── Cursor pagination ─────────────────────────────────────────────────────────
+
+  it('sends cursorMark=* on the first page when no cursor is supplied', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'CRISPR' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    expect(decodeURIComponent(calledUrl)).toContain('cursorMark=*');
+  });
+
+  it('threads a supplied cursorMark into the request URL', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'CRISPR', cursorMark: 'AoJ8y7Wd0S8' }, ctx);
+    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    expect(decodeURIComponent(calledUrl)).toContain('cursorMark=AoJ8y7Wd0S8');
+  });
+
+  it('returns nextCursorMark when the upstream response includes one', async () => {
+    mockFetch.mockResolvedValue(
+      makeResponse({
+        hitCount: 500,
+        nextCursorMark: 'AoJnextpage',
+        resultList: { result: [{ doi: '10.1101/2024.01.15.575123' }] },
+      }),
+    );
+    const ctx = createMockContext();
+    const result = await service.search({ query: 'CRISPR' }, ctx);
+    expect(result.nextCursorMark).toBe('AoJnextpage');
+  });
+
+  it('omits nextCursorMark on the last page when upstream drops the field', async () => {
+    mockFetch.mockResolvedValue(
+      makeResponse({
+        hitCount: 1,
+        resultList: { result: [{ doi: '10.1101/2024.01.15.575123' }] },
+      }),
+    );
+    const ctx = createMockContext();
+    const result = await service.search({ query: 'CRISPR' }, ctx);
+    expect(result.nextCursorMark).toBeUndefined();
+  });
+
   // ── Error handling ──────────────────────────────────────────────────────────
 
   it('throws serviceUnavailable when API returns HTML error page', async () => {
