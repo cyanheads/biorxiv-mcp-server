@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { detectHtmlError, SERVER_VERSION } from '@/services/shared.js';
+import packageJson from '../../package.json' with { type: 'json' };
 
 describe('detectHtmlError', () => {
   // ── True cases ──────────────────────────────────────────────────────────────
@@ -66,5 +67,9 @@ describe('SERVER_VERSION', () => {
     expect(SERVER_VERSION.length).toBeGreaterThan(0);
     // Basic semver format: major.minor.patch
     expect(SERVER_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it('is derived from package.json, not hardcoded (guards against version drift)', () => {
+    expect(SERVER_VERSION).toBe(packageJson.version);
   });
 });

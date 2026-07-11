@@ -7,6 +7,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import packageJson from '../../package.json' with { type: 'json' };
 
 /**
  * Cast Context to RequestContext for fetchWithTimeout / withRetry.
@@ -21,5 +22,11 @@ export function detectHtmlError(text: string): boolean {
   return /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
 }
 
-/** Version string used in outbound User-Agent headers. */
-export const SERVER_VERSION = '0.1.11';
+/**
+ * Version string used in outbound User-Agent headers. Derived from package.json
+ * (the single source of truth) so it can never drift from the released version.
+ * Resolves identically from `src/services/shared.ts` and the built
+ * `dist/services/shared.js` — `../../package.json` is the repo root in both, and
+ * the Docker production stage copies package.json alongside dist/.
+ */
+export const SERVER_VERSION: string = packageJson.version;
