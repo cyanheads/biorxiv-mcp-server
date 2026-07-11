@@ -17,9 +17,17 @@ const DOI_REGEX = /^10\.\d{4,}\//;
 function formatRevision(r: PreprintRevision): string {
   const lines: string[] = [];
   lines.push(`#### v${r.version ?? '?'} — ${r.date ?? 'unknown date'}`);
+  if (r.title) lines.push(`**Title:** ${r.title}`);
   lines.push(`**DOI:** ${r.doi}`);
+  if (r.server) lines.push(`**Server:** ${r.server}`);
   if (r.type) lines.push(`**Type:** ${r.type}`);
+  if (r.category) lines.push(`**Category:** ${r.category}`);
   if (r.license) lines.push(`**License:** ${r.license}`);
+  if (r.authors) lines.push(`**Authors:** ${r.authors}`);
+  if (r.authorCorresponding) lines.push(`**Corresponding:** ${r.authorCorresponding}`);
+  if (r.authorCorrespondingInstitution)
+    lines.push(`**Institution:** ${r.authorCorrespondingInstitution}`);
+  if (r.funder) lines.push(`**Funder:** ${r.funder}`);
   if (r.jatsxmlUrl) lines.push(`**JATS XML:** ${r.jatsxmlUrl}`);
   if (r.publishedJournalDoi) lines.push(`**Published Journal DOI:** ${r.publishedJournalDoi}`);
   if (r.abstract) lines.push(`\n**Abstract:** ${r.abstract}`);
@@ -30,17 +38,11 @@ function formatPreprint(doi: string, revisions: PreprintRevision[]): string {
   if (revisions.length === 0) return '';
   const latest = revisions[revisions.length - 1];
   const lines: string[] = [];
+  // Header carries only the preprint-level identity; every metadata field —
+  // including revision-specific titles and authors — is rendered per-revision
+  // by formatRevision() so content[] matches structuredContent for all revisions.
   lines.push(`### ${latest?.title ?? doi}`);
   lines.push(`**DOI:** ${doi}`);
-  if (latest?.server) lines.push(`**Server:** ${latest.server}`);
-  if (latest?.category) lines.push(`**Category:** ${latest.category}`);
-  if (latest?.authors) lines.push(`**Authors:** ${latest.authors}`);
-  if (latest?.authorCorresponding) lines.push(`**Corresponding:** ${latest.authorCorresponding}`);
-  if (latest?.authorCorrespondingInstitution)
-    lines.push(`**Institution:** ${latest.authorCorrespondingInstitution}`);
-  if (latest?.funder) lines.push(`**Funder:** ${latest.funder}`);
-  if (latest?.publishedJournalDoi)
-    lines.push(`**Published Journal DOI:** ${latest.publishedJournalDoi}`);
   lines.push(`\n#### Revisions (${revisions.length} total)`);
   for (const rev of revisions) {
     lines.push('');
@@ -73,7 +75,7 @@ const RevisionSchema = z.object({
 export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
   title: 'Get Preprint by DOI',
   description:
-    'Fetch full metadata, abstract, all revision history, full-text/PDF links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Per-DOI failures are surfaced in failed[] rather than aborting the batch. DOIs must match the pattern 10.NNNN/…',
+    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI rather than aborting the batch. DOIs must match the pattern 10.NNNN/…',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

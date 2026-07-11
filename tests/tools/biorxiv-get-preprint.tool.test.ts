@@ -281,4 +281,58 @@ describe('biorxivGetPreprintTool', () => {
     expect(text).toContain('CC-BY 4.0');
     expect(text).toContain('10.1038/s41586-024-00001-0');
   });
+
+  it('renders every revision-specific field in content[] for all revisions, not just the latest', () => {
+    // Two revisions with DIVERGENT values per field (mirrors the live v1/v2 title
+    // divergence on 10.1101/2023.09.16.558066). A latest-only header would drop v1's
+    // distinct values, so asserting both sets present proves per-revision rendering.
+    const v1: PreprintRevision = {
+      doi: '10.1101/2023.09.16.558066',
+      version: '1',
+      date: '2023-09-16',
+      title: 'Playing the long game: rational agents sacrifice immediate rewards',
+      authors: 'Kao AB',
+      authorCorresponding: 'Albert Kao',
+      authorCorrespondingInstitution: 'Santa Fe Institute',
+      category: 'Animal Behavior and Cognition',
+      funder: 'NSF',
+      server: 'biorxiv',
+      abstract: 'Living in groups offers social animals collective wisdom.',
+    };
+    const v2: PreprintRevision = {
+      doi: '10.1101/2023.09.16.558066',
+      version: '2',
+      date: '2024-02-01',
+      title: 'Agents seeking long-term access to the wisdom of the crowd',
+      authors: 'Kao AB, Smith J',
+      authorCorresponding: 'Jane Smith',
+      authorCorrespondingInstitution: 'MIT',
+      category: 'Evolutionary Biology',
+      funder: 'NIH',
+      server: 'medrxiv',
+      abstract: 'A revised analysis of collective decision-making.',
+    };
+    const output = {
+      preprints: [{ doi: '10.1101/2023.09.16.558066', revisions: [v1, v2] }],
+      failed: [],
+    };
+    const blocks = biorxivGetPreprintTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+
+    // Both revisions' divergent titles must appear — not only the latest's.
+    expect(text).toContain('Playing the long game: rational agents sacrifice immediate rewards');
+    expect(text).toContain('Agents seeking long-term access to the wisdom of the crowd');
+    // The other six previously-omitted per-revision fields, for both revisions.
+    expect(text).toContain('Kao AB, Smith J');
+    expect(text).toContain('Albert Kao');
+    expect(text).toContain('Jane Smith');
+    expect(text).toContain('Santa Fe Institute');
+    expect(text).toContain('MIT');
+    expect(text).toContain('Animal Behavior and Cognition');
+    expect(text).toContain('Evolutionary Biology');
+    expect(text).toContain('NSF');
+    expect(text).toContain('NIH');
+    expect(text).toContain('**Server:** biorxiv');
+    expect(text).toContain('**Server:** medrxiv');
+  });
 });
