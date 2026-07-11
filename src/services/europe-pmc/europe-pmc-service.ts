@@ -12,7 +12,7 @@ import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { asRc, detectHtmlError, SERVER_VERSION } from '@/services/shared.js';
+import { asRc, detectHtmlError, normalizeUpstreamText, SERVER_VERSION } from '@/services/shared.js';
 import type {
   EuropePmcResult,
   EuropePmcSearchResult,
@@ -101,15 +101,17 @@ export class EuropePmcService {
         const data = JSON.parse(text) as RawEuropePmcSearchResponse;
         const results = (data.resultList?.result ?? [])
           .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
-          .map(
-            (raw): EuropePmcResult => ({
+          .map((raw): EuropePmcResult => {
+            const title = normalizeUpstreamText(raw.title);
+            const abstract = normalizeUpstreamText(raw.abstractText);
+            return {
               doi: raw.doi,
-              ...(raw.title && { title: raw.title }),
+              ...(title && { title }),
               ...(raw.authorString && { authors: raw.authorString }),
               ...(raw.firstPublicationDate && { publishedDate: raw.firstPublicationDate }),
-              ...(raw.abstractText && { abstract: raw.abstractText }),
-            }),
-          );
+              ...(abstract && { abstract }),
+            };
+          });
         return { hitCount: data.hitCount ?? results.length, results };
       },
       {

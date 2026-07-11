@@ -203,6 +203,26 @@ describe('BiorxivApiService', () => {
       const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
       expect(revisions).toHaveLength(2);
     });
+
+    it('normalizes Highwire/JATS markup out of title and abstract', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [
+            {
+              doi: '10.1101/2024.01.15.575123',
+              title: 'Editing <i>Staphylococcus aureus</i> genomes',
+              abstract:
+                'AO_SCPLOWBSTRACTC_SCPLOWWe report a method. O_FIG O_LINKSMALLFIG SRC="FIGDIR/small/x.gif" ALT="Figure 1">View larger version:org.highwire.dtl.DTLVardef@130b9ee M_FIG C_FIG',
+            },
+          ],
+        }),
+      );
+      const ctx = createMockContext();
+      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      expect(revisions[0]?.title).toBe('Editing Staphylococcus aureus genomes');
+      expect(revisions[0]?.abstract).toBe('We report a method.');
+      expect(revisions[0]?.abstract).not.toMatch(/O_FIG|C_FIG|SRC=|org\.highwire|SCPLOW/);
+    });
   });
 
   // ── getListing ──────────────────────────────────────────────────────────────
@@ -376,6 +396,25 @@ describe('BiorxivApiService', () => {
       expect(result?.preprintAbstract).toBe('Abstract here.');
       expect(result?.preprintAuthorCorresponding).toBe('Smith J');
       expect(result?.preprintAuthorCorrespondingInstitution).toBe('MIT');
+    });
+
+    it('normalizes Highwire/JATS markup out of preprint title and abstract', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [
+            {
+              preprint_doi: '10.1101/2024.01.15.575123',
+              preprint_title: 'CO<sub>2</sub> fixation in <i>E. coli</i>',
+              preprint_abstract:
+                'AO_SCPLOWBSTRACTC_SCPLOWCarbon fixation is central to metabolism.',
+            },
+          ],
+        }),
+      );
+      const ctx = createMockContext();
+      const result = await service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      expect(result?.preprintTitle).toBe('CO2 fixation in E. coli');
+      expect(result?.preprintAbstract).toBe('Carbon fixation is central to metabolism.');
     });
 
     it('throws serviceUnavailable when API returns HTML error page', async () => {

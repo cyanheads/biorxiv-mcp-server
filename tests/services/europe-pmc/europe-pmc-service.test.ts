@@ -163,6 +163,32 @@ describe('EuropePmcService', () => {
     expect(results[0]?.abstract).toBeUndefined();
   });
 
+  it('normalizes HTML and sentinel markup out of title and abstract', async () => {
+    mockFetch.mockResolvedValue(
+      makeResponse({
+        hitCount: 1,
+        resultList: {
+          result: [
+            {
+              doi: '10.1101/2024.01.15.575123',
+              title: 'Synergistic CRISPR-Cas Antimicrobials in  <i>Staphylococcus aureus</i>',
+              authorString: 'Smith J',
+              firstPublicationDate: '2024-01-15',
+              abstractText: 'AO_SCPLOWBSTRACTC_SCPLOWMultidrug-resistant pathogens pose a threat.',
+            },
+          ],
+        },
+      }),
+    );
+    const ctx = createMockContext();
+    const { results } = await service.search({ query: 'CRISPR' }, ctx);
+    expect(results[0]?.title).toBe(
+      'Synergistic CRISPR-Cas Antimicrobials in Staphylococcus aureus',
+    );
+    expect(results[0]?.abstract).toBe('Multidrug-resistant pathogens pose a threat.');
+    expect(results[0]?.title).not.toContain('<i>');
+  });
+
   // ── URL construction ────────────────────────────────────────────────────────
 
   it('appends PUBLISHER:bioRxiv filter when server=biorxiv', async () => {

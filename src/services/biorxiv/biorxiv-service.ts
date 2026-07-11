@@ -12,7 +12,7 @@ import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { asRc, detectHtmlError, SERVER_VERSION } from '@/services/shared.js';
+import { asRc, detectHtmlError, normalizeUpstreamText, SERVER_VERSION } from '@/services/shared.js';
 import type {
   BiorxivServer,
   CategoryTaxonomy,
@@ -121,7 +121,8 @@ const ALL_CATEGORIES = new Set([...CATEGORIES.biorxiv, ...CATEGORIES.medrxiv]);
 
 function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   const rev: PreprintRevision = { doi: raw.doi };
-  if (raw.title) rev.title = raw.title;
+  const title = normalizeUpstreamText(raw.title);
+  if (title) rev.title = title;
   if (raw.authors) rev.authors = raw.authors;
   if (raw.author_corresponding) rev.authorCorresponding = raw.author_corresponding;
   if (raw.author_corresponding_institution)
@@ -132,7 +133,8 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   if (raw.license) rev.license = raw.license;
   if (raw.category) rev.category = raw.category;
   if (raw.jatsxml) rev.jatsxmlUrl = raw.jatsxml;
-  if (raw.abstract) rev.abstract = raw.abstract;
+  const abstract = normalizeUpstreamText(raw.abstract);
+  if (abstract) rev.abstract = abstract;
   if (raw.funder && raw.funder !== 'NA') {
     if (Array.isArray(raw.funder)) {
       const names = raw.funder
@@ -297,11 +299,13 @@ export class BiorxivApiService {
         if (record.published_doi) pv.publishedDoi = record.published_doi;
         if (record.published_journal) pv.publishedJournal = record.published_journal;
         if (record.published_date) pv.publishedDate = record.published_date;
-        if (record.preprint_title) pv.preprintTitle = record.preprint_title;
+        const preprintTitle = normalizeUpstreamText(record.preprint_title);
+        if (preprintTitle) pv.preprintTitle = preprintTitle;
         if (record.preprint_authors) pv.preprintAuthors = record.preprint_authors;
         if (record.preprint_category) pv.preprintCategory = record.preprint_category;
         if (record.preprint_date) pv.preprintDate = record.preprint_date;
-        if (record.preprint_abstract) pv.preprintAbstract = record.preprint_abstract;
+        const preprintAbstract = normalizeUpstreamText(record.preprint_abstract);
+        if (preprintAbstract) pv.preprintAbstract = preprintAbstract;
         if (record.preprint_author_corresponding)
           pv.preprintAuthorCorresponding = record.preprint_author_corresponding;
         if (record.preprint_author_corresponding_institution)
