@@ -10,7 +10,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
-import type { PreprintRevision } from '@/services/biorxiv/types.js';
+import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
+import { isValidCalendarDate } from '@/services/shared.js';
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -126,7 +127,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .string()
       .optional()
       .describe(
-        'Present when server="both" and the category belongs to only one server\'s taxonomy. Explains which server the filter was applied to.',
+        'Present when server="both" and the category exists in only one server\'s taxonomy. Explains which server was queried and why the other was excluded.',
       ),
   },
 
@@ -154,9 +155,15 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       category: input.category,
     });
 
-    // Validate dates
+    // Validate dates: shape first, then real-calendar-date (rejects overflow days
+    // like 2024-02-30 that the shape regex accepts but no calendar holds), then range.
     if (!DATE_REGEX.test(input.start_date) || !DATE_REGEX.test(input.end_date)) {
       throw ctx.fail('invalid_date_range', 'Date must be in YYYY-MM-DD format.', {
+        ...ctx.recoveryFor('invalid_date_range'),
+      });
+    }
+    if (!isValidCalendarDate(input.start_date) || !isValidCalendarDate(input.end_date)) {
+      throw ctx.fail('invalid_date_range', 'Date must be a real calendar date (YYYY-MM-DD).', {
         ...ctx.recoveryFor('invalid_date_range'),
       });
     }
@@ -210,37 +217,50 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     let allPreprints: PreprintRevision[] = [];
 
     // When server="both" and a category is given, check membership per-server once.
-    // These booleans drive both the routing (pass vs. undefined) and the categoryNote enrichment.
+    // A category that exists in only one taxonomy (inBx !== inMx) collapses the
+    // request onto that server alone — querying the other would return an
+    // unfiltered page mixed in with the filtered one under a filtered-looking
+    // request. Shared categories (Epidemiology, Pathology) and no-category
+    // requests still fan out to both servers.
     const inBx =
       input.server === 'both' && !!category && service.isValidCategory(category, 'biorxiv');
     const inMx =
       input.server === 'both' && !!category && service.isValidCategory(category, 'medrxiv');
+    const exclusiveServer: BiorxivServer | undefined =
+      inBx === inMx ? undefined : inBx ? 'biorxiv' : 'medrxiv';
 
-    if (input.server === 'both' && category) {
-      if (inBx && !inMx) {
-        ctx.enrich({
-          categoryNote: `Category "${category}" is specific to bioRxiv — the filter was applied to bioRxiv only. medRxiv results are unfiltered.`,
-        });
-      } else if (inMx && !inBx) {
-        ctx.enrich({
-          categoryNote: `Category "${category}" is specific to medRxiv — the filter was applied to medRxiv only. bioRxiv results are unfiltered.`,
-        });
-      }
+    if (input.server === 'both' && category && exclusiveServer) {
+      ctx.enrich({
+        categoryNote:
+          exclusiveServer === 'biorxiv'
+            ? `Category "${category}" is specific to bioRxiv — only bioRxiv was queried. medRxiv was not included because its taxonomy has no such category.`
+            : `Category "${category}" is specific to medRxiv — only medRxiv was queried. bioRxiv was not included because its taxonomy has no such category.`,
+      });
     }
 
-    if (input.server === 'both') {
-      // Pass the category only to the server that recognises it; send undefined
-      // to the other so it returns its normal unfiltered result.
-      const bxCategory = inBx ? category : undefined;
-      const mxCategory = inMx ? category : undefined;
-
+    if (exclusiveServer) {
+      // "both" request with a server-exclusive category → query only the owning
+      // server, so the page never mixes filtered with unfiltered records.
+      const r = await service.getListing(
+        exclusiveServer,
+        input.start_date,
+        input.end_date,
+        input.cursor,
+        category,
+        ctx,
+      );
+      pagination[exclusiveServer] = toPaginationEntry(r);
+      allPreprints = r.preprints;
+    } else if (input.server === 'both') {
+      // Fan out to both servers. Any category here is shared by both taxonomies,
+      // so it applies to each; with no category both return unfiltered pages.
       const [bxResult, mxResult] = await Promise.allSettled([
         service.getListing(
           'biorxiv',
           input.start_date,
           input.end_date,
           input.cursor,
-          bxCategory,
+          category,
           ctx,
         ),
         service.getListing(
@@ -248,7 +268,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           input.start_date,
           input.end_date,
           input.cursor,
-          mxCategory,
+          category,
           ctx,
         ),
       ]);

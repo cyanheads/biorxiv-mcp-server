@@ -23,6 +23,29 @@ export function detectHtmlError(text: string): boolean {
 }
 
 /**
+ * Validate that a `YYYY-MM-DD` string names a real calendar date. The shape
+ * regex callers gate on first still accepts day-of-month overflow inside a
+ * nominally valid month (`2024-02-30`, `2024-04-31`, `2023-02-29`), which
+ * `new Date(...)` silently rolls forward into the following month rather than
+ * rejecting. Construct a UTC date from the parsed numeric components and
+ * round-trip each field back to catch that overflow; genuine leap days
+ * (`2024-02-29`) round-trip cleanly and are accepted. A string that fails the
+ * shape match returns `false` rather than throwing, so it is safe to call
+ * without a prior regex gate.
+ */
+export function isValidCalendarDate(dateStr: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+/**
  * Strip Highwire/JATS export artifacts that bioRxiv/medRxiv and EuropePMC leak
  * into raw title and abstract text, so no upstream markup reaches
  * `structuredContent` or the rendered `content[]`. Removes:

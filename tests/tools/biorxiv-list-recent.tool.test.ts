@@ -165,6 +165,53 @@ describe('biorxivListRecentTool', () => {
     expect(result.preprints).toBeDefined();
   });
 
+  it('throws invalid_date_range for a calendar-impossible month (2024-13-01)', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-13-01',
+      end_date: '2024-13-02',
+    });
+    await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('throws invalid_date_range for a day-of-month overflow (2024-02-30)', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-02-30',
+      end_date: '2024-03-05',
+    });
+    await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('throws invalid_date_range for Feb 29 in a non-leap year (2023-02-29)', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2023-02-29',
+      end_date: '2023-03-05',
+    });
+    await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+  });
+
+  it('accepts a valid leap day (2024-02-29)', async () => {
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-02-29',
+      end_date: '2024-02-29',
+      server: 'biorxiv',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.preprints).toBeDefined();
+  });
+
   it('throws invalid_category for unknown category', async () => {
     mockIsValidCategory.mockReturnValue(false);
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
@@ -255,6 +302,73 @@ describe('biorxivListRecentTool', () => {
     // bioRxiv results still returned even if medRxiv failed
     expect(result.preprints).toHaveLength(1);
     expect(result.pagination.biorxiv).toBeDefined();
+  });
+
+  // ── Category routing for server="both" ──────────────────────────────────────
+
+  it('queries only the matching server for a server-exclusive category when server="both"', async () => {
+    // Neuroscience exists only in the bioRxiv taxonomy
+    mockIsValidCategory.mockImplementation((_cat: string, server: string) => server !== 'medrxiv');
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-15',
+      end_date: '2024-01-15',
+      server: 'both',
+      category: 'Neuroscience',
+    });
+    mockGetListing.mockClear();
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    // Only bioRxiv was queried — medRxiv (no matching category) is not called
+    expect(mockGetListing).toHaveBeenCalledTimes(1);
+    expect(mockGetListing).toHaveBeenCalledWith(
+      'biorxiv',
+      '2024-01-15',
+      '2024-01-15',
+      0,
+      'Neuroscience',
+      expect.anything(),
+    );
+    expect(result.pagination.biorxiv).toBeDefined();
+    expect(result.pagination.medrxiv).toBeUndefined();
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.categoryNote).toMatch(/only bioRxiv was queried/);
+  });
+
+  it('queries both servers for a category shared by both taxonomies when server="both"', async () => {
+    // Epidemiology exists in both taxonomies — both remain valid
+    mockIsValidCategory.mockReturnValue(true);
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-15',
+      end_date: '2024-01-15',
+      server: 'both',
+      category: 'Epidemiology',
+    });
+    mockGetListing.mockClear();
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    // Category is sent to BOTH servers (filtered on each), not dropped for either
+    expect(mockGetListing).toHaveBeenCalledTimes(2);
+    expect(mockGetListing).toHaveBeenCalledWith(
+      'biorxiv',
+      '2024-01-15',
+      '2024-01-15',
+      0,
+      'Epidemiology',
+      expect.anything(),
+    );
+    expect(mockGetListing).toHaveBeenCalledWith(
+      'medrxiv',
+      '2024-01-15',
+      '2024-01-15',
+      0,
+      'Epidemiology',
+      expect.anything(),
+    );
+    expect(result.pagination.biorxiv).toBeDefined();
+    expect(result.pagination.medrxiv).toBeDefined();
+    // No exclusivity note when the category is shared
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.categoryNote).toBeUndefined();
   });
 
   // ── format ──────────────────────────────────────────────────────────────────
