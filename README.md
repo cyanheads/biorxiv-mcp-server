@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/biorxiv-mcp-server</h1>
   <p><b>Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.</b>
-  <div>5 Tools</div>
+  <div>6 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.18-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -23,14 +23,15 @@
 
 ## Tools
 
-Five tools for working with bioRxiv and medRxiv preprint data:
+Six tools for working with bioRxiv and medRxiv preprint data:
 
 | Tool | Description |
 |:---|:---|
 | `biorxiv_get_preprint` | Fetch full metadata, abstract, revision history, and journal crosswalk for one or more preprints by DOI |
 | `biorxiv_list_recent` | List preprints posted or updated within a date interval, with optional server and category filters |
-| `biorxiv_search_preprints` | Search preprints by keyword via EuropePMC for relevance ranking, enriched with bioRxiv/medRxiv metadata |
+| `biorxiv_search_preprints` | Search preprints by keyword and/or author via EuropePMC for relevance ranking, enriched with bioRxiv/medRxiv metadata |
 | `biorxiv_get_published_version` | Resolve a preprint DOI to its journal publication record (journal DOI, name, published date) |
+| `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown extracted from its rendered HTML article page |
 | `biorxiv_list_categories` | List valid subject category strings for bioRxiv and medRxiv |
 
 ### `biorxiv_get_preprint`
@@ -57,9 +58,10 @@ Page through preprints in a date interval.
 
 ### `biorxiv_search_preprints`
 
-Keyword search with relevance ranking.
+Keyword and/or author search with relevance ranking.
 
 - EuropePMC powers relevance ranking (indexes new preprints within 1–2 days of posting); bioRxiv/medRxiv API provides canonical metadata enrichment
+- Optional `author` maps to an EuropePMC `AUTH:"…"` field query, ANDed with the keyword query — supply `query`, `author`, or both
 - Covers both servers by default; scope down with `server`
 - Optional date range filters (`date_from`, `date_to`)
 - Enrichment failures degrade gracefully to EuropePMC-only metadata, surfaced via `partial_results`
@@ -73,6 +75,17 @@ Resolve a preprint DOI to its journal publication crosswalk.
 - Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `published` field in `biorxiv_get_preprint`
 - Returns journal DOI, journal name, published date, and corresponding author institution
 - Use when the preprint's `published` field is non-null and you need the full crosswalk record
+
+---
+
+### `biorxiv_get_fulltext`
+
+Retrieve a preprint's full text as best-effort Markdown.
+
+- Fetches the rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`) and extracts Markdown — there is no keyless JATS source
+- Resolves the latest version via the details API first, for the URL version and clean not-found handling
+- Long articles page via `offset`/`limit` character chunking (`totalChars`, `remainingChars`, `hasMore`)
+- PDF-only preprints and blocked/challenge pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`
 
 ---
 
@@ -97,7 +110,8 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 bioRxiv-specific:
 
 - `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff
-- `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword results
+- `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword and/or author results
+- `BiorxivFullTextService` fetches and extracts Markdown from the rendered HTML article pages on `www.biorxiv.org` / `www.medrxiv.org` — a distinct origin from the JSON API
 - Two-server fan-out via `Promise.allSettled` — both `biorxiv` and `medrxiv` queried in parallel when `server="both"`, results merged and deduplicated by DOI
 - Polite `User-Agent` header including a mailto address (`BIORXIV_MAILTO` env var) per Cold Spring Harbor Lab API guidelines
 - Pairs with **pubmed-mcp-server** (post-publication), **openalex-mcp-server** (citation analytics), and **crossref-mcp-server** (DOI metadata)
@@ -203,6 +217,8 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `BIORXIV_MAILTO` | Email address included in the `User-Agent` header for polite API access per Cold Spring Harbor Lab guidelines. Optional, but recommended. | — |
 | `BIORXIV_API_BASE_URL` | Override the bioRxiv API base URL. | `https://api.biorxiv.org` |
 | `EUROPEPMC_API_BASE_URL` | Override the EuropePMC base URL. | `https://www.ebi.ac.uk/europepmc/webservices/rest` |
+| `BIORXIV_WEB_BASE_URL` | Override the bioRxiv website base URL (full-text HTML source for `biorxiv_get_fulltext`). | `https://www.biorxiv.org` |
+| `MEDRXIV_WEB_BASE_URL` | Override the medRxiv website base URL (full-text HTML source for `biorxiv_get_fulltext`). | `https://www.medrxiv.org` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path. | `/mcp` |
@@ -250,9 +266,10 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point — registers tools and initializes services. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Five tools across bioRxiv and medRxiv. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six tools across bioRxiv and medRxiv. |
 | `src/services/biorxiv` | `BiorxivApiService` — details, publications, and crosswalk endpoint wrappers with retry. |
-| `src/services/europe-pmc` | `EuropePmcService` — preprint keyword search endpoint wrapper. |
+| `src/services/biorxiv-fulltext` | `BiorxivFullTextService` — rendered HTML article page fetch and Markdown extraction. |
+| `src/services/europe-pmc` | `EuropePmcService` — preprint keyword/author search endpoint wrapper. |
 | `tests/` | Unit and integration tests mirroring the `src/` structure. |
 
 ## Development guide

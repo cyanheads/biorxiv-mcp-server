@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-07-11 16:31:25
+Generated on: 2026-07-11 21:04:30
 
 ```text
 biorxiv-mcp-server/
@@ -23,6 +23,7 @@ biorxiv-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -139,6 +140,7 @@ biorxiv-mcp-server/
 │   │   │   └── definitions/
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── biorxiv-get-fulltext.tool.ts
 │   │           ├── biorxiv-get-preprint.tool.ts
 │   │           ├── biorxiv-get-published-version.tool.ts
 │   │           ├── biorxiv-list-categories.tool.ts
@@ -149,6 +151,8 @@ biorxiv-mcp-server/
 │   │   ├── biorxiv/
 │   │   │   ├── biorxiv-service.ts
 │   │   │   └── types.ts
+│   │   ├── biorxiv-fulltext/
+│   │   │   └── biorxiv-fulltext-service.ts
 │   │   ├── europe-pmc/
 │   │   │   ├── europe-pmc-service.ts
 │   │   │   └── types.ts
@@ -160,10 +164,13 @@ biorxiv-mcp-server/
 │   ├── services/
 │   │   ├── biorxiv/
 │   │   │   └── biorxiv-service.test.ts
+│   │   ├── biorxiv-fulltext/
+│   │   │   └── biorxiv-fulltext-service.test.ts
 │   │   ├── europe-pmc/
 │   │   │   └── europe-pmc-service.test.ts
 │   │   └── shared.test.ts
 │   └── tools/
+│       ├── biorxiv-get-fulltext.tool.test.ts
 │       ├── biorxiv-get-preprint.tool.test.ts
 │       ├── biorxiv-get-published-version.tool.test.ts
 │       ├── biorxiv-list-categories.tool.test.ts

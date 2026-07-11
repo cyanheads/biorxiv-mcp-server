@@ -1,6 +1,6 @@
 {
   "name": "biorxiv-mcp-server",
-  "version": "0.1.18",
+  "version": "0.2.0",
   "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-11
+
+Add biorxiv_get_fulltext for full-text retrieval via HTML extraction and an author filter on biorxiv_search_preprints (#19)
+
 ## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-07-11
 
 Add EuropePMC cursor pagination to biorxiv_search_preprints, fix biorxiv_list_recent mixing unfiltered records into server-exclusive category results, and reject calendar-impossible dates before upstream calls (#27, #29, #30)
