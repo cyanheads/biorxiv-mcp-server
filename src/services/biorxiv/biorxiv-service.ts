@@ -187,7 +187,7 @@ export class BiorxivApiService {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/details/${server}/${encodedDoi}/0/json`;
     const rc = asRc(ctx);
-    return withRetry(
+    return await withRetry(
       async () => {
         const response = await fetchWithTimeout(url, 15_000, rc, {
           signal: ctx.signal,
@@ -230,7 +230,7 @@ export class BiorxivApiService {
     }
 
     const rc = asRc(ctx);
-    return withRetry(
+    return await withRetry(
       async () => {
         const response = await fetchWithTimeout(url, 20_000, rc, {
           signal: ctx.signal,
@@ -278,7 +278,7 @@ export class BiorxivApiService {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/pubs/${server}/${encodedDoi}/json`;
     const rc = asRc(ctx);
-    return withRetry(
+    return await withRetry(
       async () => {
         const response = await fetchWithTimeout(url, 15_000, rc, {
           signal: ctx.signal,

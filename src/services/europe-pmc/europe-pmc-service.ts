@@ -85,7 +85,7 @@ export class EuropePmcService {
     const url = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
 
     const rc = asRc(ctx);
-    return withRetry(
+    return await withRetry(
       async () => {
         const response = await fetchWithTimeout(url, 20_000, rc, {
           signal: ctx.signal,

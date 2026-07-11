@@ -6,12 +6,13 @@
       "typescript",
       "tsc-alias",
       "depcheck",
-      "@cyanheads/mcp-ts-core"
+      "@cyanheads/mcp-ts-core",
+      "@socketsecurity/bun-security-scanner"
     ],
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": ["@cyanheads/mcp-ts-core"]
+    "allowlist": ["@cyanheads/mcp-ts-core", "@biomejs/biome", "@types/node", "typescript"]
   },
   "skillVersions": {
     "ignore": ["tool-defs-analysis"]

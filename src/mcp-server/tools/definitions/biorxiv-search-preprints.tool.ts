@@ -339,7 +339,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           enrichmentErrorReason = 'service_error';
         }
 
-        if (enrichmentFailed || revisions.length === 0) {
+        const latest = revisions.at(-1);
+        if (enrichmentFailed || !latest) {
           hasPartial = true;
           return {
             doi,
@@ -351,8 +352,6 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
             enrichment_error: enrichmentErrorReason ?? 'not_found',
           };
         }
-
-        const latest = revisions[revisions.length - 1]!;
         return {
           doi,
           ...(latest.title && { title: latest.title }),
