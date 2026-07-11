@@ -8,8 +8,9 @@
 |:-----|:------------|:-----------|:------------|
 | `biorxiv_get_preprint` | Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI call returns all revisions in a single response; includes the published journal DOI and journal name when the preprint has been accepted. | `dois: string[]` (1–10, DOI format `10.1101/YYYY.MM.DD.NNNNNN`); `server?: "biorxiv" \| "medrxiv" \| "both"` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
 | `biorxiv_list_recent` | List preprints posted or updated within a date interval, optionally scoped to one server or subject category. Returns 30 preprints per page (fixed by the API); use `cursor` to step through additional pages. Response includes `total` count for calculating remaining pages. | `start_date: string` (YYYY-MM-DD); `end_date: string`; `server?: "biorxiv" \| "medrxiv" \| "both"`; `category?: string` (server-side filter); `cursor?: number` (integer offset, default 0) | `readOnlyHint: true`, `openWorldHint: true` |
-| `biorxiv_search_preprints` | Search preprints by keyword using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Covers both servers by default. Surfaces preprints that may not yet have a PubMed record. EuropePMC indexes new preprints within 1–2 days of posting. | `query: string`; `server?: "biorxiv" \| "medrxiv" \| "both"`; `date_from?: string` (YYYY-MM-DD); `date_to?: string`; `limit?: number` | `readOnlyHint: true`, `openWorldHint: true` |
+| `biorxiv_search_preprints` | Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Covers both servers by default. Surfaces preprints that may not yet have a PubMed record. EuropePMC indexes new preprints within 1–2 days of posting. | `query?: string`; `author?: string` (at least one of `query`/`author`; author maps to an EuropePMC `AUTH:` clause); `server?: "biorxiv" \| "medrxiv" \| "both"`; `date_from?: string` (YYYY-MM-DD); `date_to?: string`; `limit?: number` | `readOnlyHint: true`, `openWorldHint: true` |
 | `biorxiv_get_published_version` | Resolve a preprint DOI to its full journal publication record (journal DOI, journal name, published date), or confirm a preprint is not yet published. Use when the preprint's `published` field is non-null and you need richer crosswalk metadata than `biorxiv_get_preprint` provides. | `doi: string`; `server?: "biorxiv" \| "medrxiv"` (defaults to `biorxiv`) | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
+| `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown, extracted from its rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`). Resolves the latest version via the details API, then fetches and extracts the body via the framework HTML extractor. Long articles page via offset/limit character chunking. HTML→Markdown, not JATS — section structure is approximate. PDF-only preprints or blocked pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`. | `doi: string`; `server?: "biorxiv" \| "medrxiv"` (defaults to `biorxiv`); `offset?: number` (default 0); `limit?: number` (max 50000, default 20000) | `readOnlyHint: true`, `openWorldHint: true` |
 | `biorxiv_list_categories` | List valid subject category strings for bioRxiv and medRxiv, usable as the `category` filter in `biorxiv_list_recent`. Returns the static taxonomy for both servers. | _(none)_ | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` |
 
 ### Resources
@@ -49,8 +50,9 @@ Pairs naturally with **pubmed-mcp-server** (post-publication side), **openalex-m
 
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
-| `BiorxivApiService` | `api.biorxiv.org` — details, publications, pubs (crosswalk) endpoints | `biorxiv_get_preprint`, `biorxiv_list_recent`, `biorxiv_get_published_version` |
-| `EuropePmcService` | EuropePMC REST API search endpoint — preprint search by keyword | `biorxiv_search_preprints` |
+| `BiorxivApiService` | `api.biorxiv.org` — details, publications, pubs (crosswalk) endpoints | `biorxiv_get_preprint`, `biorxiv_list_recent`, `biorxiv_get_published_version`, `biorxiv_get_fulltext` (version resolution) |
+| `EuropePmcService` | EuropePMC REST API search endpoint — preprint search by keyword and/or author | `biorxiv_search_preprints` |
+| `BiorxivFullTextService` | `www.biorxiv.org` / `www.medrxiv.org` — rendered full-text HTML article pages (distinct origin from the JSON API); extracts Markdown via the framework HTML extractor | `biorxiv_get_fulltext` |
 
 **BiorxivApiService resilience:**
 
@@ -78,6 +80,8 @@ Pairs naturally with **pubmed-mcp-server** (post-publication side), **openalex-m
 | `BIORXIV_MAILTO` | No | Email address included in the `User-Agent` header (e.g. `your@email.com`). Optional, but recommended for polite API access. |
 | `BIORXIV_API_BASE_URL` | No | Override the API base URL. Defaults to `https://api.biorxiv.org`. |
 | `EUROPEPMC_API_BASE_URL` | No | Override EuropePMC base URL. Defaults to `https://www.ebi.ac.uk/europepmc/webservices/rest`. |
+| `BIORXIV_WEB_BASE_URL` | No | Override the bioRxiv website base URL (full-text HTML source for `biorxiv_get_fulltext`). Defaults to `https://www.biorxiv.org`. |
+| `MEDRXIV_WEB_BASE_URL` | No | Override the medRxiv website base URL (full-text HTML source for `biorxiv_get_fulltext`). Defaults to `https://www.medrxiv.org`. |
 
 ---
 
@@ -148,14 +152,18 @@ When `server="both"`, each DOI generates two calls (biorxiv + medrxiv) run in pa
 | `biorxiv_list_recent` | `invalid_category` | `InvalidParams` | Category string not in taxonomy (server returns empty with no error) | No — use `biorxiv_list_categories` to get valid values |
 | `biorxiv_search_preprints` | `search_unavailable` | `ServiceUnavailable` | EuropePMC search endpoint is unreachable or returns 5xx | Yes — retry after delay |
 | `biorxiv_get_published_version` | `doi_not_found` | `NotFound` | Crosswalk endpoint returns empty collection — preprint may not be published yet | No — check `published` field in `biorxiv_get_preprint` first |
-| All | _(baseline)_ | `ServiceUnavailable` | `api.biorxiv.org` is unreachable or returns 5xx | Yes |
+| `biorxiv_get_fulltext` | `invalid_doi_format` | `ValidationError` | Input DOI does not match `10.NNNN/` pattern | No — fix and retry |
+| `biorxiv_get_fulltext` | `doi_not_found` | `NotFound` | DOI resolves to no preprint on the requested server | No — find the DOI via `biorxiv_search_preprints` or try the other server |
+| `biorxiv_get_fulltext` | `fulltext_unavailable` | `NotFound` | Preprint exists but its full-text HTML page is blocked, missing, or yields no extractable text (PDF-only) | No — use `biorxiv_get_preprint` for title, abstract, and metadata |
+| `biorxiv_get_fulltext` | `offset_out_of_range` | `ValidationError` | `offset` ≥ total character length of the extracted text | No — use a smaller offset (`remainingChars` shows what is left) |
+| All | _(baseline)_ | `ServiceUnavailable` | `api.biorxiv.org` (or the full-text origin) is unreachable or returns 5xx | Yes |
 
 ---
 
 ## Known Limitations
 
 - **bioRxiv native search is not used** — the `/search` endpoint is weak and undocumented. EuropePMC provides relevance-ranked results but may lag new preprints by 1–2 days.
-- **Full-text retrieval not included** — bioRxiv exposes PDF URLs and a TDM API for full-text XML. PDF/full-text parsing is deferred; `biorxiv_get_preprint` returns the PDF URL (`jatsxml` field) and abstract; the caller can fetch the PDF directly from the DOI URL.
+- **Full-text via HTML extraction (best-effort, not JATS)** — `biorxiv_get_fulltext` retrieves full text by fetching the rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`) and extracting Markdown via the framework HTML extractor. There is no keyless JATS source: the `.full.xml` suffix falls back to HTML, and JATS proper is S3-TDM/requester-pays only. Section structure is therefore approximate, not structured JATS. Coverage is partial — some preprints are PDF-only (empty extraction) and some origins may block programmatic access (Cloudflare); both surface as a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`. Long articles page via offset/limit character chunking.
 - **Listing page size is fixed at 30** — the API does not accept a `limit` parameter; pagination requires stepping by cursor offset (0, 30, 60, …). The `total` field in the response lets clients calculate total pages.
 - **Category filter on listing is server-side** — the API filters by category; invalid category strings return empty results without an error. Validate against `biorxiv_list_categories` before filtering.
 - **No multi-server batch endpoint** — the API requires separate calls per server; the service layer fans out via `Promise.all`.
@@ -191,3 +199,18 @@ When `server="both"`, each DOI generates two calls (biorxiv + medrxiv) run in pa
 - **`biorxiv_get_published_version` scope narrowed** — `biorxiv_get_preprint` already surfaces the journal DOI in the `published` field. `biorxiv_get_published_version` (using `/pubs/{server}/{doi}`) provides richer crosswalk metadata (journal name, published date, corresponding author institution). Retaining the tool but narrowing its described use case to when the richer crosswalk fields are needed — not as the primary DOI resolution path.
 - **`biorxiv_search_preprints`: `category` filter removed** — EuropePMC's preprint search does not support server-side category filtering in the same taxonomy as bioRxiv. Dropped `category` from this tool's inputs to avoid a false client-side filter that would silently degrade to no-op; agents that want category-scoped results should use `biorxiv_list_recent` with `category`.
 - **Error contracts added** — No error contracts were declared in the original design. Added a typed error contract table for all five tools covering the domain failure modes an agent should plan around (DOI not found, invalid date range, invalid category, EuropePMC unavailable, crosswalk not found).
+
+### Full-text retrieval — now implemented (`biorxiv_get_fulltext`)
+
+Previously deferred (see the "Deferred" notes above); implemented after an API design pass.
+
+- **Source: rendered HTML page, not JATS.** Verified there is no keyless JATS source — `…v{N}.full.xml` falls back to HTML, and JATS proper is S3-TDM/requester-pays only. So the tool fetches the `.full` HTML page and extracts Markdown via the framework `htmlExtractor` (`defuddle` + `linkedom`, added as direct deps). Honest `contentFormat: 'html-markdown'` label plus a best-effort caveat; section structure is not guaranteed.
+- **Content selector `.fulltext-view`.** bioRxiv/medRxiv render on the Highwire platform; defuddle's auto-detection latches onto the reference apparatus and misses the body (~383 words vs ~10,197 for one probed article). Passing the `.fulltext-view` selector captures the full text; defuddle falls back to auto-detection when the selector misses, so it is always safe to pass.
+- **Distinct fetch path from the JSON API.** The full-text fetch EXPECTS `text/html`, so it does not route through `BiorxivApiService`'s "HTML response = upstream error" guard. It lives in a separate `BiorxivFullTextService` with its own per-server web-host config (`BIORXIV_WEB_BASE_URL` / `MEDRXIV_WEB_BASE_URL`).
+- **Coverage handled as typed errors, not crashes.** PDF-only preprints (empty extraction), Cloudflare block/challenge pages, and 403/404 responses map to one `fulltext_unavailable` reason routing to `biorxiv_get_preprint`; transient 5xx/timeouts bubble as `ServiceUnavailable`. Challenge/interstitial pages are detected and never fed to the extractor.
+- **Chunking mirrors `gutenberg_get_text`.** offset/limit character chunking with `totalChars`/`remainingChars`/`hasMore` disclosure so long articles are fully readable across calls.
+- **`biorxiv_get_usage` descoped.** The same design pass proposed a per-preprint usage/metrics tool; bioRxiv's `/usage/{m|y}/{cursor}` endpoint returns corpus-wide aggregate stats, not per-preprint counts, so it cannot back that tool. Not built.
+
+### `author` filter on `biorxiv_search_preprints`
+
+- **Author maps to an EuropePMC `AUTH:"…"` field query,** ANDed with the keyword query in `EuropePmcService`. `query` was relaxed to optional with a schema refine requiring at least one of `query`/`author`, so author-only search is valid and existing query-only calls stay valid. Embedded double-quotes are stripped from the author value so a stray quote cannot break the AUTH phrase.

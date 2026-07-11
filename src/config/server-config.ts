@@ -23,6 +23,22 @@ const ServerConfigSchema = z.object({
     .url()
     .default('https://www.ebi.ac.uk/europepmc/webservices/rest')
     .describe('EuropePMC REST API base URL'),
+  // Full-text HTML lives on the public websites, not the JSON API host — a
+  // distinct origin per server. Overridable for testing or mirrors.
+  biorxivWebBaseUrl: z
+    .string()
+    .url()
+    .default('https://www.biorxiv.org')
+    .describe(
+      'bioRxiv website base URL — source of rendered full-text HTML pages for biorxiv_get_fulltext',
+    ),
+  medrxivWebBaseUrl: z
+    .string()
+    .url()
+    .default('https://www.medrxiv.org')
+    .describe(
+      'medRxiv website base URL — source of rendered full-text HTML pages for biorxiv_get_fulltext',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -34,6 +50,8 @@ export function getServerConfig(): ServerConfig {
     mailto: 'BIORXIV_MAILTO',
     apiBaseUrl: 'BIORXIV_API_BASE_URL',
     europePmcBaseUrl: 'EUROPEPMC_API_BASE_URL',
+    biorxivWebBaseUrl: 'BIORXIV_WEB_BASE_URL',
+    medrxivWebBaseUrl: 'MEDRXIV_WEB_BASE_URL',
   });
   return _config;
 }

@@ -4,12 +4,14 @@
  * @module mcp-server/tools/definitions/index
  */
 
+export { biorxivGetFulltextTool } from './biorxiv-get-fulltext.tool.js';
 export { biorxivGetPreprintTool } from './biorxiv-get-preprint.tool.js';
 export { biorxivGetPublishedVersionTool } from './biorxiv-get-published-version.tool.js';
 export { biorxivListCategoriesTool } from './biorxiv-list-categories.tool.js';
 export { biorxivListRecentTool } from './biorxiv-list-recent.tool.js';
 export { biorxivSearchPreprintsTool } from './biorxiv-search-preprints.tool.js';
 
+import { biorxivGetFulltextTool } from './biorxiv-get-fulltext.tool.js';
 import { biorxivGetPreprintTool } from './biorxiv-get-preprint.tool.js';
 import { biorxivGetPublishedVersionTool } from './biorxiv-get-published-version.tool.js';
 import { biorxivListCategoriesTool } from './biorxiv-list-categories.tool.js';
@@ -22,4 +24,5 @@ export const allToolDefinitions = [
   biorxivGetPreprintTool,
   biorxivGetPublishedVersionTool,
   biorxivSearchPreprintsTool,
+  biorxivGetFulltextTool,
 ] as const;

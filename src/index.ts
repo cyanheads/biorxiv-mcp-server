@@ -9,6 +9,7 @@
 import { createApp } from '@cyanheads/mcp-ts-core';
 import { allToolDefinitions } from './mcp-server/tools/definitions/index.js';
 import { initBiorxivApiService } from './services/biorxiv/biorxiv-service.js';
+import { initBiorxivFullTextService } from './services/biorxiv-fulltext/biorxiv-fulltext-service.js';
 import { initEuropePmcService } from './services/europe-pmc/europe-pmc-service.js';
 
 await createApp({
@@ -27,5 +28,6 @@ await createApp({
   setup(core) {
     initBiorxivApiService(core.config, core.storage);
     initEuropePmcService(core.config, core.storage);
+    initBiorxivFullTextService(core.config, core.storage);
   },
 });
