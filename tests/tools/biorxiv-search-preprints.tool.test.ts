@@ -122,6 +122,51 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(input.limit).toBe(25);
   });
 
+  // ── Author filter ─────────────────────────────────────────────────────────────
+
+  it('threads author into the EuropePMC service call', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({
+      query: 'CRISPR',
+      author: 'Doudna J',
+    });
+    await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(mockEpmcSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'CRISPR', author: 'Doudna J' }),
+      expect.anything(),
+    );
+  });
+
+  it('accepts an author-only search with no keyword query', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ author: 'Doudna J' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+    expect(mockEpmcSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ author: 'Doudna J' }),
+      expect.anything(),
+    );
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.queryEcho).toMatchObject({ author: 'Doudna J' });
+    expect(enrichment.queryEcho).not.toHaveProperty('query');
+  });
+
+  it('echoes both query and author in queryEcho', async () => {
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR', author: 'Doudna J' });
+    await biorxivSearchPreprintsTool.handler(input, ctx);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.queryEcho).toMatchObject({ query: 'CRISPR', author: 'Doudna J' });
+  });
+
+  it('rejects a request with neither query nor author at schema parse time', () => {
+    expect(() => biorxivSearchPreprintsTool.input.parse({ server: 'biorxiv' })).toThrow();
+  });
+
+  it('rejects a whitespace-only author with no query at schema parse time', () => {
+    expect(() => biorxivSearchPreprintsTool.input.parse({ author: '   ' })).toThrow();
+  });
+
   // ── Input validation ────────────────────────────────────────────────────────
 
   it('rejects empty query at schema parse time', () => {

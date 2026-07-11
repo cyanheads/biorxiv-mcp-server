@@ -252,6 +252,43 @@ describe('EuropePmcService', () => {
     expect(calledUrl).toContain('pageSize=25');
   });
 
+  // ── Author filter ─────────────────────────────────────────────────────────────
+
+  it('maps author to an AUTH: field clause in the query', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'CRISPR', author: 'Jennifer Doudna' }, ctx);
+    const decoded = decodeURIComponent((mockFetch.mock.calls[0] as string[])[0]).replace(
+      /\+/g,
+      ' ',
+    );
+    expect(decoded).toContain('CRISPR AND AUTH:"Jennifer Doudna"');
+  });
+
+  it('supports an author-only search when query is omitted', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ author: 'Doudna J' }, ctx);
+    const decoded = decodeURIComponent((mockFetch.mock.calls[0] as string[])[0]).replace(
+      /\+/g,
+      ' ',
+    );
+    expect(decoded).toContain('AUTH:"Doudna J"');
+    // No stray leading " AND " when there is no keyword query
+    expect(decoded).not.toContain(' AND AUTH:"Doudna J"');
+  });
+
+  it('strips embedded double-quotes from the author to keep the AUTH phrase intact', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ author: 'Sm"ith' }, ctx);
+    const decoded = decodeURIComponent((mockFetch.mock.calls[0] as string[])[0]).replace(
+      /\+/g,
+      ' ',
+    );
+    expect(decoded).toContain('AUTH:"Smith"');
+  });
+
   // ── Cursor pagination ─────────────────────────────────────────────────────────
 
   it('sends cursorMark=* on the first page when no cursor is supplied', async () => {

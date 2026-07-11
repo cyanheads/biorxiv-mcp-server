@@ -20,6 +20,8 @@ import type {
 } from './types.js';
 
 export interface SearchOptions {
+  /** Optional author filter — ANDed into the query as an `AUTH:"…"` clause. */
+  author?: string | undefined;
   /** Opaque EuropePMC cursor for the page to fetch. Defaults to '*' (first page). */
   cursorMark?: string | undefined;
   /** Optional date filter — format YYYY-MM-DD */
@@ -28,7 +30,8 @@ export interface SearchOptions {
   dateTo?: string | undefined;
   /** Maximum number of results to return (capped at 100) */
   limit?: number | undefined;
-  query: string;
+  /** Free-text keyword query. Optional when `author` is supplied. */
+  query?: string | undefined;
   /** Server filter: 'biorxiv' | 'medrxiv' | 'both' */
   server?: string | undefined;
 }
@@ -54,7 +57,17 @@ export class EuropePmcService {
   async search(options: SearchOptions, ctx: Context): Promise<EuropePmcSearchResult> {
     const limit = Math.min(options.limit ?? 25, 100);
 
-    let q = options.query;
+    // Base terms: the free-text keyword query and/or an AUTH: author clause.
+    // At least one is guaranteed non-empty by the tool's input refinement.
+    const terms: string[] = [];
+    const keyword = options.query?.trim();
+    if (keyword) terms.push(keyword);
+    const author = options.author?.trim();
+    if (author) {
+      // Strip embedded double-quotes so a stray quote can't break the AUTH phrase.
+      terms.push(`AUTH:"${author.replace(/"/g, '')}"`);
+    }
+    let q = terms.join(' AND ');
 
     if (options.dateFrom || options.dateTo) {
       const from = options.dateFrom ?? '1900-01-01';

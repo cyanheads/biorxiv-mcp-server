@@ -73,40 +73,49 @@ function formatResult(p: EnrichedPreprint): string {
 export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   title: 'Search Preprints by Keyword',
   description:
-    'Search preprints by keyword using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent.',
+    'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
-  input: z.object({
-    query: z
-      .string()
-      .min(1)
-      .refine((s) => s.trim().length > 0, {
-        message: 'query must contain non-whitespace characters',
-      })
-      .describe('Keyword search query.'),
-    server: z
-      .enum(['biorxiv', 'medrxiv', 'both'])
-      .default('both')
-      .describe('Server scope for enrichment. "both" checks all matching DOIs on both servers.'),
-    date_from: z
-      .string()
-      .optional()
-      .describe('Earliest first-publication date filter (YYYY-MM-DD).'),
-    date_to: z.string().optional().describe('Latest first-publication date filter (YYYY-MM-DD).'),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(25)
-      .describe('Maximum results to return (1–100). Defaults to 25.'),
-    cursor_mark: z
-      .string()
-      .optional()
-      .describe(
-        'Opaque page token for ranked EuropePMC results. Omit for the first page; pass the nextCursorMark returned by a prior call to fetch the next page. Pages through the same ranked list rather than raising limit.',
-      ),
-  }),
+  input: z
+    .object({
+      query: z
+        .string()
+        .optional()
+        .describe(
+          'Keyword search query. Optional when author is provided — supply at least one of query or author.',
+        ),
+      author: z
+        .string()
+        .optional()
+        .describe(
+          'Author name to filter by, mapped to an EuropePMC AUTH:"…" field query and ANDed with the keyword query. Optional when query is provided (e.g. "Jennifer Doudna").',
+        ),
+      server: z
+        .enum(['biorxiv', 'medrxiv', 'both'])
+        .default('both')
+        .describe('Server scope for enrichment. "both" checks all matching DOIs on both servers.'),
+      date_from: z
+        .string()
+        .optional()
+        .describe('Earliest first-publication date filter (YYYY-MM-DD).'),
+      date_to: z.string().optional().describe('Latest first-publication date filter (YYYY-MM-DD).'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(25)
+        .describe('Maximum results to return (1–100). Defaults to 25.'),
+      cursor_mark: z
+        .string()
+        .optional()
+        .describe(
+          'Opaque page token for ranked EuropePMC results. Omit for the first page; pass the nextCursorMark returned by a prior call to fetch the next page. Pages through the same ranked list rather than raising limit.',
+        ),
+    })
+    .refine((v) => Boolean(v.query?.trim()) || Boolean(v.author?.trim()), {
+      message: 'Provide at least one of query or author (with non-whitespace content).',
+    }),
 
   output: z.object({
     preprints: z
@@ -171,7 +180,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       ),
     queryEcho: z
       .object({
-        query: z.string().describe('The search query string sent to EuropePMC.'),
+        query: z.string().optional().describe('The keyword query sent to EuropePMC, if any.'),
+        author: z
+          .string()
+          .optional()
+          .describe('The author filter applied as an AUTH: clause, if any.'),
         server: z.string().describe('Server scope used for enrichment.'),
         date_from: z.string().optional().describe('date_from filter applied, if any.'),
         date_to: z.string().optional().describe('date_to filter applied, if any.'),
@@ -195,7 +208,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   enrichmentTrailer: {
     queryEcho: {
       render: (echo: {
-        query: string;
+        query?: string;
+        author?: string;
         server: string;
         date_from?: string;
         limit: number;
@@ -203,7 +217,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         cursor_mark?: string;
       }) => {
         const parts = [
-          `Query: ${echo.query}`,
+          ...(echo.query ? [`Query: ${echo.query}`] : []),
+          ...(echo.author ? [`author=${echo.author}`] : []),
           `server=${echo.server}`,
           ...(echo.date_from ? [`from=${echo.date_from}`] : []),
           ...(echo.date_to ? [`to=${echo.date_to}`] : []),
@@ -234,6 +249,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   async handler(input, ctx) {
     ctx.log.info('Executing biorxiv_search_preprints', {
       query: input.query,
+      author: input.author,
       server: input.server,
       limit: input.limit,
     });
@@ -286,6 +302,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       epmcSearchResult = await epmc.search(
         {
           query: input.query,
+          author: input.author,
           dateFrom: input.date_from,
           dateTo: input.date_to,
           limit: input.limit,
@@ -306,7 +323,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     const { hitCount, results: epmcResults, nextCursorMark } = epmcSearchResult;
 
     const queryEcho = {
-      query: input.query,
+      ...(input.query && { query: input.query }),
+      ...(input.author && { author: input.author }),
       server: input.server,
       ...(input.date_from && { date_from: input.date_from }),
       ...(input.date_to && { date_to: input.date_to }),
@@ -317,8 +335,13 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     if (epmcResults.length === 0) {
       ctx.enrich.total(hitCount);
       ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
+      const criteria =
+        [
+          ...(input.query ? [`"${input.query}"`] : []),
+          ...(input.author ? [`author "${input.author}"`] : []),
+        ].join(' and ') || 'the given criteria';
       ctx.enrich.notice(
-        `No preprints matched "${input.query}"${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms or a wider date range.`,
+        `No preprints matched ${criteria}${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms${input.author ? ', a different author spelling,' : ''} or a wider date range.`,
       );
       return {
         preprints: [],
