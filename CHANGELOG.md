@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-08-09
+
+BiorxivApiService classifies HTTP 429 as a retryable rate_limited error, biorxiv_list_recent raises when every server fails instead of returning an empty page, and biorxiv_search_preprints enrichment carries full revision metadata (#33, #40, #41)
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-08-09
 
 biorxiv_get_fulltext caches extracted articles for offset paging, classifies HTTP 429 as a retryable rate_limited error, and resolves DOIs against both servers by default (#36, #37, #38)

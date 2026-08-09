@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-08-09 13:20:12
+Generated on: 2026-08-09 13:52:33
 
 ```text
 biorxiv-mcp-server/
@@ -161,6 +161,8 @@ biorxiv-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── helpers/
+│   │   └── rate-limit.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/
