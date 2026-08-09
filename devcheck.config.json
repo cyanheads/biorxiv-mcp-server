@@ -12,7 +12,7 @@
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": ["@cyanheads/mcp-ts-core", "@biomejs/biome", "@types/node", "typescript"]
+    "allowlist": ["@cyanheads/mcp-ts-core", "@biomejs/biome", "@types/node"]
   },
   "skillVersions": {
     "ignore": ["tool-defs-analysis"]
