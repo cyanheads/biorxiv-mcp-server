@@ -3,7 +3,14 @@
  * within a date interval. Fans out to both bioRxiv and medRxiv when
  * server="both". Category filtering is applied server-side via the ?category=
  * query param. Returns 30 results per page (API-fixed); use cursor to paginate.
- * When server="both", per-server pagination state is surfaced independently.
+ * When server="both", per-server pagination state is surfaced independently,
+ * including per-server cursor exhaustion: the two servers hold different result
+ * counts, so one cursor can be valid for one and past the end for the other.
+ * The API reports total 0 for an out-of-range cursor, so an exhausted entry is
+ * flagged rather than left to read as "this server has nothing in the interval".
+ * A server that never answered is a separate condition: it has no pagination
+ * state at all, so it is named in failed[] and in the notice rather than
+ * dropped, which would leave a partial result reading as a complete one.
  * @module mcp-server/tools/definitions/biorxiv-list-recent.tool
  */
 
@@ -14,6 +21,18 @@ import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.j
 import { isValidCalendarDate } from '@/services/shared.js';
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const SERVERS = ['biorxiv', 'medrxiv'] as const;
+const SERVER_LABEL = { biorxiv: 'bioRxiv', medrxiv: 'medRxiv' } as const;
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+/** Human-facing server names for a notice sentence: "bioRxiv and medRxiv". */
+function serverLabels(servers: readonly BiorxivServer[]): string {
+  return servers.map((s) => SERVER_LABEL[s]).join(' and ');
+}
 
 function formatPreprint(p: PreprintRevision): string {
   const lines: string[] = [];
@@ -39,7 +58,7 @@ function formatPreprint(p: PreprintRevision): string {
 export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   title: 'List Recent Preprints',
   description:
-    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. Call biorxiv_list_categories for valid category strings.',
+    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. A server that fails to answer under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Call biorxiv_list_categories for valid category strings.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -98,6 +117,12 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
             cursor: z.number().describe('Current cursor (offset used for this page).'),
             total: z.number().describe('Total preprints available on bioRxiv for these filters.'),
             nextCursor: z.number().optional().describe('Cursor value for the next page, if any.'),
+            exhausted: z
+              .boolean()
+              .optional()
+              .describe(
+                'True when this cursor is past bioRxiv\'s last page: no records came back at a non-zero cursor. The API reports total 0 for an out-of-range cursor, so "total" is not the interval total here — step back to a lower cursor to read it.',
+              ),
           })
           .optional()
           .describe('bioRxiv pagination state. Present when server is "biorxiv" or "both".'),
@@ -106,11 +131,29 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
             cursor: z.number().describe('Current cursor (offset used for this page).'),
             total: z.number().describe('Total preprints available on medRxiv for these filters.'),
             nextCursor: z.number().optional().describe('Cursor value for the next page, if any.'),
+            exhausted: z
+              .boolean()
+              .optional()
+              .describe(
+                'True when this cursor is past medRxiv\'s last page: no records came back at a non-zero cursor. The API reports total 0 for an out-of-range cursor, so "total" is not the interval total here — step back to a lower cursor to read it.',
+              ),
           })
           .optional()
           .describe('medRxiv pagination state. Present when server is "medrxiv" or "both".'),
       })
       .describe('Per-server pagination state. Advance each server independently.'),
+    failed: z
+      .array(
+        z
+          .object({
+            server: z.enum(['biorxiv', 'medrxiv']).describe('Server whose listing request failed.'),
+            error: z.string().describe('What went wrong on that server.'),
+          })
+          .describe('A server that did not answer.'),
+      )
+      .describe(
+        'Servers that did not answer, so their records are missing from "preprints" and they have no "pagination" entry. Non-empty means this result set is partial — retry to include them. Only populated when server="both"; a single-server failure surfaces as a tool error. Distinct from an exhausted pagination entry, where the server answered.',
+      ),
   }),
 
   // Agent-facing context on the success path — recovery guidance for empty results and
@@ -121,7 +164,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .string()
       .optional()
       .describe(
-        'Recovery hint when zero results are returned — echoes applied filters and suggests how to broaden.',
+        'Guidance on how to read this result set: which servers did not answer, which cursors are past the end, and — when nothing came back — the applied filters and how to broaden them. All applicable qualifications are composed into one string.',
       ),
     categoryNote: z
       .string()
@@ -196,12 +239,19 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       cursor: number;
       total: number;
       nextCursor?: number;
+      exhausted?: boolean;
     };
 
     const pagination: {
       biorxiv?: PaginationEntry;
       medrxiv?: PaginationEntry;
     } = {};
+
+    const failed: { server: BiorxivServer; error: string }[] = [];
+
+    // ctx.enrich.notice is last-wins, so every qualification that applies to this
+    // result set is collected here and flushed as one string before returning.
+    const notices: string[] = [];
 
     function toPaginationEntry(r: {
       pagination: { cursor: number; total: number };
@@ -211,7 +261,14 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         r.pagination.cursor + r.preprints.length < r.pagination.total
           ? r.pagination.cursor + 30
           : undefined;
-      return { ...r.pagination, ...(nextCursor !== undefined && { nextCursor }) };
+      // Zero records at a non-zero cursor means the cursor overshot this server's
+      // last page; the API's total 0 for that request is an artifact, not a count.
+      const exhausted = r.preprints.length === 0 && r.pagination.cursor > 0;
+      return {
+        ...r.pagination,
+        ...(nextCursor !== undefined && { nextCursor }),
+        ...(exhausted && { exhausted }),
+      };
     }
 
     let allPreprints: PreprintRevision[] = [];
@@ -278,6 +335,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         allPreprints.push(...bxResult.value.preprints);
       } else {
         ctx.log.warning('bioRxiv listing failed', { error: String(bxResult.reason) });
+        failed.push({ server: 'biorxiv', error: errorMessage(bxResult.reason) });
       }
 
       if (mxResult.status === 'fulfilled') {
@@ -285,6 +343,30 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         allPreprints.push(...mxResult.value.preprints);
       } else {
         ctx.log.warning('medRxiv listing failed', { error: String(mxResult.reason) });
+        failed.push({ server: 'medrxiv', error: errorMessage(mxResult.reason) });
+      }
+
+      // A server that never answered contributes no pagination entry, so nothing
+      // else in the response distinguishes "that server had no preprints" from
+      // "that server was never heard from". This is the qualification that changes
+      // how every other number here reads, so it leads the notice.
+      if (failed.length > 0) {
+        const labels = serverLabels(failed.map((f) => f.server));
+        notices.push(
+          failed.length === SERVERS.length
+            ? `${labels} did not answer, so nothing was retrieved — this is not an empty interval. See failed[] for the errors and retry.`
+            : `${labels} did not answer, so this result set is partial — it holds no ${labels} records. See failed[] for the error and retry to include them.`,
+        );
+      }
+
+      // One server's cursor overshot while the other still returned records. The
+      // fully-empty branch below does not fire, so without this nothing qualifies
+      // the exhausted server's total 0 — it reads as "no preprints in the interval".
+      const exhaustedServers = SERVERS.filter((s) => pagination[s]?.exhausted);
+      if (exhaustedServers.length > 0 && allPreprints.length > 0) {
+        notices.push(
+          `Cursor ${input.cursor} is past the last available page on ${serverLabels(exhaustedServers)} — that entry is marked exhausted and its total of 0 is an out-of-range artifact, not the interval total. Lower the cursor to page that server.`,
+        );
       }
     } else {
       const r = await service.getListing(
@@ -299,44 +381,59 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       allPreprints = r.preprints;
     }
 
-    if (allPreprints.length === 0) {
+    // "Nothing here" is a claim about what the servers reported, so it is only made
+    // when a server actually answered — every server having failed is already
+    // covered by the failure notice above, and re-reading it as an empty interval
+    // is the misread this whole path exists to prevent.
+    const someServerAnswered = SERVERS.some((s) => pagination[s] !== undefined);
+
+    if (allPreprints.length === 0 && someServerAnswered) {
       // Detect cursor-overshoot: cursor > 0 but zero results — filters are fine, cursor is past the end
       if (input.cursor > 0) {
-        ctx.enrich.notice(
+        notices.push(
           `Cursor ${input.cursor} is past the last available page for this date/filter combination. Set cursor to a lower offset.`,
         );
-        return { preprints: [], pagination };
+      } else {
+        const filterDesc = [
+          `dates ${input.start_date}–${input.end_date}`,
+          category ? `category "${category}"` : null,
+          input.server !== 'both' ? `server "${input.server}"` : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        notices.push(
+          `No preprints found for ${filterDesc}. Try widening the date range or removing the category filter.`,
+        );
       }
-      const filterDesc = [
-        `dates ${input.start_date}–${input.end_date}`,
-        category ? `category "${category}"` : null,
-        input.server !== 'both' ? `server "${input.server}"` : null,
-      ]
-        .filter(Boolean)
-        .join(', ');
-      ctx.enrich.notice(
-        `No preprints found for ${filterDesc}. Try widening the date range or removing the category filter.`,
-      );
-      return { preprints: [], pagination };
     }
 
-    return { preprints: allPreprints, pagination };
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+
+    return { preprints: allPreprints, pagination, failed };
   },
 
   format: (result) => {
     const lines: string[] = [];
 
     // Pagination summary
-    if (result.pagination.biorxiv) {
-      const p = result.pagination.biorxiv;
-      lines.push(
-        `**bioRxiv:** page offset ${p.cursor}, total ${p.total}${p.nextCursor !== undefined ? ` — next cursor: ${p.nextCursor}` : ' (last page)'}`,
-      );
+    for (const server of SERVERS) {
+      const p = result.pagination[server];
+      if (!p) continue;
+      let line = `**${SERVER_LABEL[server]}:** page offset ${p.cursor}, total ${p.total}`;
+      if (p.nextCursor !== undefined) line += ` — next cursor: ${p.nextCursor}`;
+      else if (!p.exhausted) line += ' (last page)';
+      if (p.exhausted)
+        line +=
+          ' — cursor exhausted: past the last available page, no records at this offset (the total shown is an out-of-range artifact, not the interval total)';
+      lines.push(line);
     }
-    if (result.pagination.medrxiv) {
-      const p = result.pagination.medrxiv;
+
+    // A failed server has no pagination line of its own, so it is listed here to
+    // keep the per-server summary complete — its silent absence is what makes a
+    // partial result look complete.
+    for (const f of result.failed) {
       lines.push(
-        `**medRxiv:** page offset ${p.cursor}, total ${p.total}${p.nextCursor !== undefined ? ` — next cursor: ${p.nextCursor}` : ' (last page)'}`,
+        `**${SERVER_LABEL[f.server]}:** server did not answer — no records from it are included (${f.error})`,
       );
     }
 

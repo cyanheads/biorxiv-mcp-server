@@ -287,7 +287,75 @@ describe('biorxivListRecentTool', () => {
     expect(enrichment.notice).toMatch(/cursor/i);
   });
 
-  it('continues gracefully when one server fails in both mode', async () => {
+  it('marks a single-server cursor overshoot exhausted while keeping total in the payload', async () => {
+    mockGetListing.mockResolvedValue({
+      preprints: [],
+      pagination: { cursor: 990, total: 0 },
+    });
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+      cursor: 990,
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.pagination.biorxiv?.exhausted).toBe(true);
+    expect(result.pagination.biorxiv?.total).toBe(0);
+  });
+
+  it('marks the overshot server exhausted and notices it when the other still returns a page', async () => {
+    mockGetListing.mockImplementation((server: string) =>
+      server === 'biorxiv'
+        ? Promise.resolve({
+            preprints: Array.from({ length: 30 }, (_, i) => ({
+              doi: `10.1101/2026.07.01.${String(i + 1).padStart(6, '0')}`,
+            })),
+            pagination: { cursor: 120, total: 232 },
+          })
+        : Promise.resolve({ preprints: [], pagination: { cursor: 120, total: 0 } }),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2026-07-01',
+      end_date: '2026-07-01',
+      server: 'both',
+      cursor: 120,
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+
+    expect(result.preprints).toHaveLength(30);
+    expect(result.pagination.medrxiv?.exhausted).toBe(true);
+    // #15 kept total in the payload for the empty case — it must still be present here
+    expect(result.pagination.medrxiv?.total).toBe(0);
+    expect(result.pagination.biorxiv?.exhausted).toBeUndefined();
+    expect(result.pagination.biorxiv?.total).toBe(232);
+    // An exhausted server answered — it is not a failed one
+    expect(result.failed).toEqual([]);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toMatch(/medRxiv/);
+    expect(enrichment.notice).toMatch(/120/);
+  });
+
+  it('does not mark a server exhausted when an empty page comes back at cursor 0', async () => {
+    mockGetListing.mockImplementation((server: string) =>
+      server === 'biorxiv'
+        ? Promise.resolve(LISTING_RESULT)
+        : Promise.resolve({ preprints: [], pagination: { cursor: 0, total: 0 } }),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+    expect(result.pagination.medrxiv?.exhausted).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('continues gracefully when one server fails in both mode, naming it as failed', async () => {
     mockGetListing.mockImplementation((_server: string) => {
       if (_server === 'biorxiv') return Promise.resolve(LISTING_RESULT);
       return Promise.reject(new Error('medRxiv down'));
@@ -302,6 +370,84 @@ describe('biorxivListRecentTool', () => {
     // bioRxiv results still returned even if medRxiv failed
     expect(result.preprints).toHaveLength(1);
     expect(result.pagination.biorxiv).toBeDefined();
+    // The failed server has no pagination entry — without failed[] and the notice,
+    // this response would be indistinguishable from a complete two-server result
+    expect(result.pagination.medrxiv).toBeUndefined();
+    expect(result.failed).toEqual([{ server: 'medrxiv', error: 'medRxiv down' }]);
+    // A failed server is not an exhausted one
+    expect(result.pagination.biorxiv?.exhausted).toBeUndefined();
+
+    const notice = getEnrichment(ctx).notice;
+    expect(notice).toMatch(/medRxiv did not answer/);
+    expect(notice).toMatch(/partial/);
+  });
+
+  it('renders the failed server in content[] alongside the surviving pagination line', async () => {
+    mockGetListing.mockImplementation((_server: string) =>
+      _server === 'biorxiv'
+        ? Promise.resolve(LISTING_RESULT)
+        : Promise.reject(new Error('medRxiv down')),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+
+    const text = (biorxivListRecentTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('**bioRxiv:** page offset 0, total 1');
+    expect(text).toContain('**medRxiv:** server did not answer');
+    expect(text).toContain('medRxiv down');
+    // The failed server must not read as an exhausted cursor
+    expect(text).not.toContain('exhausted');
+  });
+
+  it('keeps the failed server in the notice when the surviving server returns nothing', async () => {
+    mockGetListing.mockImplementation((_server: string) =>
+      _server === 'biorxiv'
+        ? Promise.reject(new Error('bioRxiv down'))
+        : Promise.resolve({ preprints: [], pagination: { cursor: 0, total: 0 } }),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+
+    expect(result.preprints).toHaveLength(0);
+    expect(result.failed).toEqual([{ server: 'biorxiv', error: 'bioRxiv down' }]);
+    // The zero-result guidance must not overwrite the partial-result qualification:
+    // "nothing found" is not an established absence when a server never answered
+    const notice = getEnrichment(ctx).notice;
+    expect(notice).toMatch(/bioRxiv did not answer/);
+    expect(notice).toMatch(/No preprints found/);
+  });
+
+  it('does not report an empty interval when neither server answered', async () => {
+    mockGetListing.mockImplementation((server: string) =>
+      Promise.reject(new Error(`${server} down`)),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const result = await biorxivListRecentTool.handler(input, ctx);
+
+    expect(result.preprints).toHaveLength(0);
+    expect(result.failed).toEqual([
+      { server: 'biorxiv', error: 'biorxiv down' },
+      { server: 'medrxiv', error: 'medrxiv down' },
+    ]);
+    // No server reported anything, so absence was never established
+    const notice = getEnrichment(ctx).notice;
+    expect(notice).toMatch(/not an empty interval/);
+    expect(notice).not.toMatch(/No preprints found/);
   });
 
   // ── Category routing for server="both" ──────────────────────────────────────
@@ -377,6 +523,7 @@ describe('biorxivListRecentTool', () => {
     const output = {
       preprints: [PREPRINT],
       pagination: { biorxiv: { cursor: 0, total: 1 } },
+      failed: [],
     };
     const blocks = biorxivListRecentTool.format!(output);
     expect(blocks[0]?.type).toBe('text');
@@ -389,6 +536,7 @@ describe('biorxivListRecentTool', () => {
     const output = {
       preprints: [{ ...PREPRINT, server: 'medrxiv' }],
       pagination: { medrxiv: { cursor: 0, total: 5, nextCursor: 30 } },
+      failed: [],
     };
     const blocks = biorxivListRecentTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -396,10 +544,36 @@ describe('biorxivListRecentTool', () => {
     expect(text).toContain('next cursor: 30');
   });
 
+  it('renders an exhausted server distinctly from a genuine last page with results', () => {
+    const lastPage = biorxivListRecentTool.format!({
+      preprints: [PREPRINT],
+      pagination: { biorxiv: { cursor: 30, total: 31 } },
+      failed: [],
+    });
+    const lastPageText = (lastPage[0] as { text: string }).text;
+    expect(lastPageText).toContain('(last page)');
+    expect(lastPageText).not.toContain('exhausted');
+
+    const overshot = biorxivListRecentTool.format!({
+      preprints: [PREPRINT],
+      pagination: {
+        biorxiv: { cursor: 120, total: 232, nextCursor: 150 },
+        medrxiv: { cursor: 120, total: 0, exhausted: true },
+      },
+      failed: [],
+    });
+    const overshotText = (overshot[0] as { text: string }).text;
+    expect(overshotText).toContain('**bioRxiv:** page offset 120, total 232 — next cursor: 150');
+    expect(overshotText).toMatch(/\*\*medRxiv:\*\* page offset 120, total 0 .*exhausted/);
+    // The medRxiv line must not read as a genuine final page of results
+    expect(overshotText).not.toContain('total 0 (last page)');
+  });
+
   it('formats empty result set (no preprints section)', () => {
     const output = {
       preprints: [],
       pagination: { biorxiv: { cursor: 0, total: 0 } },
+      failed: [],
     };
     const blocks = biorxivListRecentTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
