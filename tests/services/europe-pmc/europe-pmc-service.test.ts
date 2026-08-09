@@ -1,14 +1,17 @@
 /**
- * @fileoverview Tests for EuropePmcService — preprint keyword search and
- * result normalization.
+ * @fileoverview Tests for EuropePmcService — preprint keyword search, result
+ * normalization, and HTTP 429 classification.
  * @module tests/services/europe-pmc/europe-pmc-service.test
  */
 
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
+import { findRateLimit } from '@/services/shared.js';
+import { EUROPE_PMC_RATE_LIMIT_BODY, europePmcRateLimitError } from '../../helpers/rate-limit.js';
 
 const mockFetch = vi.fn();
 
@@ -33,13 +36,38 @@ function makeResponse(body: unknown): Response {
   } as unknown as Response;
 }
 
-/** Make a fake response whose body is an HTML error page */
+/**
+ * Make a fake response whose body is an HTML error page. `ok`/`status` are
+ * cosmetic here: the real `fetchWithTimeout` throws on non-2xx before the
+ * service reads the body, so a response that reaches `detectHtmlError` is by
+ * definition a 2xx one carrying an HTML error page.
+ */
 function makeHtmlResponse(html = '<html><body>Service Unavailable</body></html>'): Response {
   return {
     text: () => Promise.resolve(html),
-    ok: false,
-    status: 503,
+    ok: true,
+    status: 200,
   } as unknown as Response;
+}
+
+/**
+ * McpError shaped like the one `fetchWithTimeout` throws on a non-2xx response:
+ * canonical `status`/`body`, the legacy `statusCode`/`responseBody` aliases, and
+ * `retryAfter` when the origin sent the header. The service never sees a
+ * `Response` for a non-2xx — it sees this rejection, so a fixture that resolved
+ * a `{ status: 429 }` response instead would leave the branch under test unrun.
+ */
+function httpError(status: number, retryAfter?: string): McpError {
+  const code = status === 429 ? JsonRpcErrorCode.RateLimited : JsonRpcErrorCode.ServiceUnavailable;
+  return new McpError(code, `Fetch failed for EuropePMC. Status: ${status}`, {
+    status,
+    statusText: 'Too Many Requests',
+    body: EUROPE_PMC_RATE_LIMIT_BODY,
+    statusCode: status,
+    responseBody: EUROPE_PMC_RATE_LIMIT_BODY,
+    ...(retryAfter !== undefined && { retryAfter }),
+    errorSource: 'FetchHttpError',
+  });
 }
 
 const MOCK_CONFIG = {} as AppConfig;
@@ -334,21 +362,145 @@ describe('EuropePmcService', () => {
 
   // ── Error handling ──────────────────────────────────────────────────────────
 
+  // A bare `.rejects.toThrow()` here would also pass on the JSON parse error an
+  // absent guard produces, so both cases assert the classified code instead.
   it('throws serviceUnavailable when API returns HTML error page', async () => {
     mockFetch.mockResolvedValue(makeHtmlResponse());
     const ctx = createMockContext();
-    await expect(service.search({ query: 'CRISPR' }, ctx)).rejects.toThrow();
+    const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect((err as McpError).message).toContain('EuropePMC returned HTML instead of JSON');
   });
 
   it('throws serviceUnavailable when HTML starts with lowercase html tag', async () => {
     mockFetch.mockResolvedValue(makeHtmlResponse('<html><body>Rate limited</body></html>'));
     const ctx = createMockContext();
-    await expect(service.search({ query: 'test' }, ctx)).rejects.toThrow();
+    const err = await service.search({ query: 'test' }, ctx).catch((e: unknown) => e);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
   });
 
   it('propagates network errors from fetchWithTimeout', async () => {
     mockFetch.mockRejectedValue(new Error('connection refused'));
     const ctx = createMockContext();
     await expect(service.search({ query: 'CRISPR' }, ctx)).rejects.toThrow('connection refused');
+  });
+
+  // ── HTTP 429 classification ─────────────────────────────────────────────────
+
+  describe('rate-limit classification', () => {
+    it('classifies a 429 as rate_limited carrying the parsed Retry-After', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.RateLimited);
+      expect((err as McpError).data).toMatchObject({
+        reason: 'rate_limited',
+        retryable: true,
+        retryAfter: 45,
+      });
+    });
+
+    it('keeps the upstream 429 body out of the caller-visible payload', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+
+      const data = (err as McpError).data ?? {};
+      expect(JSON.stringify(data)).not.toContain('429 Too Many Requests');
+      expect(data).not.toHaveProperty('body');
+      expect(data).not.toHaveProperty('responseBody');
+      expect(data).not.toHaveProperty('statusCode');
+      expect(data).not.toHaveProperty('status');
+      expect((err as McpError).message).not.toContain('<html>');
+    });
+
+    it('passes 429 as an expected status so it logs at debug', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      await service.search({ query: 'CRISPR' }, ctx).catch(() => undefined);
+
+      const options = (mockFetch.mock.calls[0] as unknown[])[3] as { expectedStatuses?: number[] };
+      expect(options.expectedStatuses).toEqual([429]);
+    });
+
+    it('reads an HTTP-date Retry-After as a wait in seconds', async () => {
+      mockFetch.mockRejectedValue(httpError(429, new Date(Date.now() + 120_000).toUTCString()));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      const retryAfter = (err as McpError).data?.retryAfter as number;
+      expect(retryAfter).toBeGreaterThan(110);
+      expect(retryAfter).toBeLessThanOrEqual(120);
+    });
+
+    it('leaves retryAfter absent when the origin sent no Retry-After header', async () => {
+      mockFetch.mockRejectedValue(httpError(429));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.RateLimited);
+      expect((err as McpError).data?.retryAfter).toBeUndefined();
+      expect((err as McpError).data?.reason).toBe('rate_limited');
+    });
+
+    it('leaves retryAfter absent when the Retry-After header is unparseable', async () => {
+      mockFetch.mockRejectedValue(httpError(429, 'soon'));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      expect((err as McpError).data?.reason).toBe('rate_limited');
+      expect((err as McpError).data?.retryAfter).toBeUndefined();
+    });
+
+    it('names the wait in a recovery hint the caller can act on', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      const hint = ((err as McpError).data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+      expect(hint).toContain('45 seconds');
+      expect(hint).toContain('EuropePMC');
+    });
+
+    it('preserves the upstream rejection as cause for diagnosis', async () => {
+      const upstream = httpError(429, '45');
+      mockFetch.mockRejectedValue(upstream);
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      expect((err as Error).cause).toBe(upstream);
+    });
+
+    it('leaves a non-429 upstream failure untouched for the framework to classify', async () => {
+      const upstream = httpError(503);
+      mockFetch.mockRejectedValue(upstream);
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      expect(err).toBe(upstream);
+    });
+
+    it('throws a rejection findRateLimit recognizes — the seam the tool branches on', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      const err = await service.search({ query: 'CRISPR' }, ctx).catch((e: unknown) => e);
+      expect(findRateLimit([err])).toEqual({ retryAfter: 45 });
+    });
+
+    it('throws the shape the shared tool-test fixture stands in for', async () => {
+      // biorxiv_search_preprints' suite mocks this service away and drives
+      // `europePmcRateLimitError()` instead. If the real throw and that fixture
+      // drift apart, that suite keeps passing while the tool mis-branches in
+      // production.
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      const err = (await service
+        .search({ query: 'CRISPR' }, ctx)
+        .catch((e: unknown) => e)) as McpError;
+      const fixture = europePmcRateLimitError(45);
+      const contractFields = (e: McpError) => ({
+        code: e.code,
+        reason: e.data?.reason,
+        retryable: e.data?.retryable,
+        retryAfter: e.data?.retryAfter,
+      });
+      expect(contractFields(err)).toEqual(contractFields(fixture));
+    });
   });
 });

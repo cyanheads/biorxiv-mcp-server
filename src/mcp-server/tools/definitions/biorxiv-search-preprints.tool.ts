@@ -12,6 +12,11 @@
  * failing the search, including an origin rate limit (HTTP 429) — which gets
  * its own enrichment_error value so a caller can tell a wait-and-retry from a
  * generic upstream error without parsing prose.
+ *
+ * The two paths are separate: enrichment degrades because EuropePMC metadata
+ * is still there to fall back on, while the EuropePMC search itself is this
+ * tool's primary call and has nothing to degrade to, so a 429 there raises a
+ * retryable `rate_limited` error carrying the origin's Retry-After wait.
  * @module mcp-server/tools/definitions/biorxiv-search-preprints.tool
  */
 
@@ -21,7 +26,7 @@ import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
-import { findRateLimit, isValidCalendarDate } from '@/services/shared.js';
+import { describeWait, findRateLimit, isValidCalendarDate } from '@/services/shared.js';
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
@@ -94,7 +99,7 @@ function formatResult(p: EnrichedPreprint): string {
 export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   title: 'Search Preprints by Keyword',
   description:
-    'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent.',
+    'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. A EuropePMC rate limit (HTTP 429) fails the call with a retryable rate_limited error carrying the wait in seconds — a rate-limited metadata enrichment does not, and instead marks the affected record enrichment_error: "rate_limited".',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z
@@ -272,6 +277,14 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       recovery:
         'EuropePMC may be temporarily unavailable. Retry after a short delay or use biorxiv_list_recent with a date range instead.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      retryable: true,
+      when: 'The EuropePMC search endpoint rejected the keyword search with HTTP 429. Distinct from a rate-limited enrichment call, which degrades to EuropePMC-only metadata instead of failing.',
+      recovery:
+        'Wait the retryAfter seconds before searching again. biorxiv_list_recent queries api.biorxiv.org, which this limit does not cover, so try a date-range listing meanwhile.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -340,11 +353,30 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         ctx,
       );
     } catch (err) {
+      const cause = err instanceof Error ? err : new Error(String(err));
+      // A 429 here is not "unreachable or a server error": the origin answered,
+      // named a wait, and will answer again after it. Only the parsed wait
+      // crosses over — the service already kept the upstream body out of `data`.
+      const rateLimit = findRateLimit([err]);
+      if (rateLimit) {
+        const wait = describeWait(rateLimit.retryAfter);
+        throw ctx.fail(
+          'rate_limited',
+          `EuropePMC search failed: ${cause.message}`,
+          {
+            ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
+            recovery: {
+              hint: `Wait ${wait} before searching again — EuropePMC is rate-limiting this host. biorxiv_list_recent reads api.biorxiv.org, which this limit does not cover, so try a date-range listing meanwhile.`,
+            },
+          },
+          { cause },
+        );
+      }
       throw ctx.fail(
         'search_unavailable',
-        `EuropePMC search failed: ${err instanceof Error ? err.message : String(err)}`,
+        `EuropePMC search failed: ${cause.message}`,
         { ...ctx.recoveryFor('search_unavailable') },
-        { cause: err instanceof Error ? err : new Error(String(err)) },
+        { cause },
       );
     }
 

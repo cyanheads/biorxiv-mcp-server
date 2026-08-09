@@ -3,13 +3,13 @@
  * @module tests/tools/biorxiv-search-preprints.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
-import { rateLimitError } from '../helpers/rate-limit.js';
+import { europePmcRateLimitError, rateLimitError } from '../helpers/rate-limit.js';
 
 const mockEpmcSearch = vi.fn();
 const mockGetDetails = vi.fn();
@@ -316,6 +316,80 @@ describe('biorxivSearchPreprintsTool', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'search_unavailable' },
     });
+  });
+
+  it('throws rate_limited, not search_unavailable, when EuropePMC returns 429', async () => {
+    mockEpmcSearch.mockRejectedValue(europePmcRateLimitError(45));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const err = await biorxivSearchPreprintsTool.handler(input, ctx).catch((e: unknown) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 45 },
+    });
+  });
+
+  it('names the wait and a still-answering origin in the rate_limited recovery hint', async () => {
+    mockEpmcSearch.mockRejectedValue(europePmcRateLimitError(45));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const err = (await biorxivSearchPreprintsTool
+      .handler(input, ctx)
+      .catch((e: unknown) => e)) as McpError;
+
+    const hint = (err.data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+    expect(hint).toContain('45 seconds');
+    // The fallback must be a different origin — pointing back at EuropePMC
+    // would send the caller straight into the same limit.
+    expect(hint).toContain('biorxiv_list_recent');
+    expect(hint).toContain('api.biorxiv.org');
+  });
+
+  it('renders a generic wait when the 429 carried no usable Retry-After', async () => {
+    mockEpmcSearch.mockRejectedValue(europePmcRateLimitError());
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const err = (await biorxivSearchPreprintsTool
+      .handler(input, ctx)
+      .catch((e: unknown) => e)) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(err.data?.reason).toBe('rate_limited');
+    expect(err.data?.retryAfter).toBeUndefined();
+    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toContain(
+      'a minute or two',
+    );
+  });
+
+  it('keeps the upstream 429 response body out of the rate_limited payload', async () => {
+    mockEpmcSearch.mockRejectedValue(europePmcRateLimitError(45));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const err = (await biorxivSearchPreprintsTool
+      .handler(input, ctx)
+      .catch((e: unknown) => e)) as McpError;
+
+    const data = err.data ?? {};
+    expect(JSON.stringify(data)).not.toContain('429 Too Many Requests');
+    expect(JSON.stringify(data)).not.toContain('<html>');
+    expect(data).not.toHaveProperty('body');
+    expect(data).not.toHaveProperty('responseBody');
+    expect(data).not.toHaveProperty('status');
+    expect(data).not.toHaveProperty('statusCode');
+  });
+
+  it('still raises search_unavailable for a non-429 EuropePMC failure', async () => {
+    mockEpmcSearch.mockRejectedValue(new Error('Fetch failed for EuropePMC. Status: 503'));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const err = (await biorxivSearchPreprintsTool
+      .handler(input, ctx)
+      .catch((e: unknown) => e)) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data?.reason).toBe('search_unavailable');
+    expect(err.data?.retryAfter).toBeUndefined();
   });
 
   it('marks partial_results=true when bioRxiv enrichment fails', async () => {

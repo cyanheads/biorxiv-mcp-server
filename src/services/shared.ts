@@ -2,7 +2,7 @@
  * @fileoverview Shared utilities for biorxiv-mcp-server service layer. Provides
  * the Context→RequestContext cast, HTML error detection, calendar-date and
  * upstream-text normalization, `Retry-After` parsing and rate-limit rejection
- * lookup shared by both fetch paths, and the server version string used in
+ * lookup shared by every fetch path, and the server version string used in
  * User-Agent headers across all services.
  * @module services/shared
  */
@@ -99,8 +99,8 @@ export function normalizeUpstreamText(text: string | undefined): string | undefi
  * or unparseable value so callers fall back to generic wording rather than
  * echoing an uninterpretable header into agent-facing prose.
  *
- * Shared by both fetch paths — the JSON API and the full-text article origin
- * each surface the same header and must read it identically.
+ * Shared by every fetch path — the JSON API, the full-text article origin, and
+ * EuropePMC each surface the same header and must read it identically.
  */
 export function parseRetryAfterSeconds(raw: unknown): number | undefined {
   if (typeof raw !== 'string') return;

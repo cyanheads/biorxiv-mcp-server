@@ -3,21 +3,76 @@
  * for preprint keyword search. Returns ranked DOI lists used by
  * biorxiv_search_preprints for bioRxiv/medRxiv enrichment. All requests
  * include a polite User-Agent and are retried with exponential backoff.
+ * Detects HTML error pages, and classifies an origin rate limit (HTTP 429) as
+ * its own retryable `rate_limited` condition carrying the parsed `Retry-After`
+ * wait — never the upstream response body.
  * @module services/europe-pmc/europe-pmc-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, rateLimited, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { asRc, detectHtmlError, normalizeUpstreamText, SERVER_VERSION } from '@/services/shared.js';
+import {
+  asRc,
+  describeWait,
+  detectHtmlError,
+  normalizeUpstreamText,
+  parseRetryAfterSeconds,
+  SERVER_VERSION,
+} from '@/services/shared.js';
 import type {
   EuropePmcResult,
   EuropePmcSearchResult,
   RawEuropePmcSearchResponse,
 } from './types.js';
+
+/**
+ * The one status this service classifies itself rather than treating as a bug.
+ * Passing it to `fetchWithTimeout` only lowers the log severity from `error` to
+ * `debug`; the thrown error and its classification are unchanged.
+ */
+const EXPECTED_STATUSES = [429];
+
+/**
+ * Re-throws a failed EuropePMC call, classifying HTTP 429 as its own retryable
+ * `rate_limited` condition. Everything else — 5xx, timeout, network error, the
+ * HTML-error guard below — re-throws untouched for the framework's
+ * auto-classifier.
+ *
+ * `fetchWithTimeout` attaches the upstream response body to `err.data`
+ * (`body`/`responseBody`), so the replacement payload is built from scratch
+ * rather than spread: only the parsed `Retry-After` crosses into it. Retry is
+ * not this function's concern — `withRetry` already honors `data.retryAfter`
+ * and fails fast when the requested wait exceeds its cap, so by the time a 429
+ * reaches here the waiting is over and only classification is left.
+ */
+function rethrowClassified(err: unknown): never {
+  const data =
+    err instanceof McpError
+      ? (err.data as { status?: unknown; retryAfter?: unknown } | undefined)
+      : undefined;
+  if (data?.status !== 429) throw err;
+
+  const retryAfter = parseRetryAfterSeconds(data.retryAfter);
+  const wait = describeWait(retryAfter);
+  throw rateLimited(
+    retryAfter === undefined
+      ? 'EuropePMC is rate-limiting this host (HTTP 429).'
+      : `EuropePMC is rate-limiting this host (HTTP 429) and asked for a ${retryAfter}-second wait before the next request.`,
+    {
+      reason: 'rate_limited',
+      retryable: true,
+      ...(retryAfter !== undefined && { retryAfter }),
+      recovery: {
+        hint: `Wait ${wait} before querying EuropePMC again — only keyword search reaches this origin, so preprint metadata lookups on api.biorxiv.org are outside this limit.`,
+      },
+    },
+    { cause: err },
+  );
+}
 
 export interface SearchOptions {
   /** Optional author filter — ANDed into the query as an `AUTH:"…"` clause. */
@@ -53,6 +108,7 @@ export class EuropePmcService {
    * with DOIs plus the upstream hitCount grand total, used to drive bioRxiv API
    * enrichment. Requests the minimal field set (doi, title, authorString,
    * firstPublicationDate, abstractText).
+   * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async search(options: SearchOptions, ctx: Context): Promise<EuropePmcSearchResult> {
     const limit = Math.min(options.limit ?? 25, 100);
@@ -100,48 +156,53 @@ export class EuropePmcService {
     const url = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
 
     const rc = asRc(ctx);
-    return await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(url, 20_000, rc, {
-          signal: ctx.signal,
-          headers: { 'User-Agent': this.userAgent },
-        });
-        const text = await response.text();
-        if (detectHtmlError(text)) {
-          throw serviceUnavailable(
-            'EuropePMC returned HTML instead of JSON — service may be degraded.',
-            { url },
-          );
-        }
-        const data = JSON.parse(text) as RawEuropePmcSearchResponse;
-        const results = (data.resultList?.result ?? [])
-          .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
-          .map((raw): EuropePmcResult => {
-            const title = normalizeUpstreamText(raw.title);
-            const abstract = normalizeUpstreamText(raw.abstractText);
-            return {
-              doi: raw.doi,
-              ...(title && { title }),
-              ...(raw.authorString && { authors: raw.authorString }),
-              ...(raw.firstPublicationDate && { publishedDate: raw.firstPublicationDate }),
-              ...(abstract && { abstract }),
-            };
+    try {
+      return await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, 20_000, rc, {
+            signal: ctx.signal,
+            headers: { 'User-Agent': this.userAgent },
+            expectedStatuses: EXPECTED_STATUSES,
           });
-        return {
-          hitCount: data.hitCount ?? results.length,
-          results,
-          // Absent on the last page (EuropePMC omits it) — omit here too so
-          // callers read "no field" as "no more pages".
-          ...(data.nextCursorMark && { nextCursorMark: data.nextCursorMark }),
-        };
-      },
-      {
-        operation: 'EuropePmcService.search',
-        context: rc,
-        baseDelayMs: 300,
-        signal: ctx.signal,
-      },
-    );
+          const text = await response.text();
+          if (detectHtmlError(text)) {
+            throw serviceUnavailable(
+              'EuropePMC returned HTML instead of JSON — service may be degraded.',
+              { url },
+            );
+          }
+          const data = JSON.parse(text) as RawEuropePmcSearchResponse;
+          const results = (data.resultList?.result ?? [])
+            .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
+            .map((raw): EuropePmcResult => {
+              const title = normalizeUpstreamText(raw.title);
+              const abstract = normalizeUpstreamText(raw.abstractText);
+              return {
+                doi: raw.doi,
+                ...(title && { title }),
+                ...(raw.authorString && { authors: raw.authorString }),
+                ...(raw.firstPublicationDate && { publishedDate: raw.firstPublicationDate }),
+                ...(abstract && { abstract }),
+              };
+            });
+          return {
+            hitCount: data.hitCount ?? results.length,
+            results,
+            // Absent on the last page (EuropePMC omits it) — omit here too so
+            // callers read "no field" as "no more pages".
+            ...(data.nextCursorMark && { nextCursorMark: data.nextCursorMark }),
+          };
+        },
+        {
+          operation: 'EuropePmcService.search',
+          context: rc,
+          baseDelayMs: 300,
+          signal: ctx.signal,
+        },
+      );
+    } catch (err) {
+      rethrowClassified(err);
+    }
   }
 }
 
