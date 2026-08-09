@@ -1,21 +1,25 @@
 /**
  * @fileoverview Server-specific configuration for biorxiv-mcp-server. Parses
- * domain env vars (BIORXIV_MAILTO, BIORXIV_API_BASE_URL, EUROPEPMC_API_BASE_URL)
- * separately from the framework's core config. Lazy-parsed on first access.
+ * domain env vars (BIORXIV_MAILTO, BIORXIV_API_BASE_URL, EUROPEPMC_API_BASE_URL,
+ * BIORXIV_WEB_BASE_URL, MEDRXIV_WEB_BASE_URL) separately from the framework's
+ * core config. Lazy-parsed on first access.
  * @module config/server-config
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
+/**
+ * An unsubstituted MCPB placeholder (`${user_config.X}`) reads back as a literal
+ * string when the user leaves the optional field blank. Strip it to undefined so
+ * the field falls through to its default instead of failing format validation.
+ */
+const stripMcpbPlaceholder = (v: unknown): unknown =>
+  typeof v === 'string' && v.startsWith('${') ? undefined : v;
+
 const ServerConfigSchema = z.object({
-  // z.preprocess strips MCPB placeholder strings (${user_config.X}) to undefined
-  // so z.email() doesn't crash when the user leaves the optional field blank.
   mailto: z
-    .preprocess(
-      (v) => (typeof v === 'string' && v.startsWith('${') ? undefined : v),
-      z.string().email().optional(),
-    )
+    .preprocess(stripMcpbPlaceholder, z.string().email().optional())
     .describe('Contact email for User-Agent header — optional, used for polite API access'),
   apiBaseUrl: z.string().url().default('https://api.biorxiv.org').describe('bioRxiv API base URL'),
   europePmcBaseUrl: z
@@ -26,16 +30,12 @@ const ServerConfigSchema = z.object({
   // Full-text HTML lives on the public websites, not the JSON API host — a
   // distinct origin per server. Overridable for testing or mirrors.
   biorxivWebBaseUrl: z
-    .string()
-    .url()
-    .default('https://www.biorxiv.org')
+    .preprocess(stripMcpbPlaceholder, z.string().url().default('https://www.biorxiv.org'))
     .describe(
       'bioRxiv website base URL — source of rendered full-text HTML pages for biorxiv_get_fulltext',
     ),
   medrxivWebBaseUrl: z
-    .string()
-    .url()
-    .default('https://www.medrxiv.org')
+    .preprocess(stripMcpbPlaceholder, z.string().url().default('https://www.medrxiv.org'))
     .describe(
       'medRxiv website base URL — source of rendered full-text HTML pages for biorxiv_get_fulltext',
     ),
