@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** biorxiv-mcp-server
-**Version:** 0.2.3
+**Version:** 0.2.4
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.1`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
@@ -167,7 +167,8 @@ src/
     server-config.ts                    # bioRxiv-specific env vars (BIORXIV_MAILTO, API base URLs)
   services/
     shared.ts                           # Shared utilities (asRc, detectHtmlError, normalizeUpstreamText,
-                                        #   isValidCalendarDate, parseRetryAfterSeconds, findRateLimit, SERVER_VERSION)
+                                        #   isValidCalendarDate, parseRetryAfterSeconds, findRateLimit, describeWait,
+                                        #   SERVER_VERSION)
     biorxiv/
       biorxiv-service.ts                # BiorxivApiService — details, publications, pubs endpoints
       types.ts                          # Domain types (Preprint, PublishedVersion, …)

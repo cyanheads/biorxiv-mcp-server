@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-08-09 13:52:33
+Generated on: 2026-08-09 15:02:44
 
 ```text
 biorxiv-mcp-server/
@@ -179,6 +179,7 @@ biorxiv-mcp-server/
 │       ├── biorxiv-get-published-version.tool.test.ts
 │       ├── biorxiv-list-categories.tool.test.ts
 │       ├── biorxiv-list-recent.tool.test.ts
+│       ├── biorxiv-search-preprints.rate-limit.test.ts
 │       └── biorxiv-search-preprints.tool.test.ts
 ├── .dockerignore
 ├── .env.example
