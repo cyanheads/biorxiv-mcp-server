@@ -118,6 +118,72 @@ describe('biorxivGetPreprintTool', () => {
     expect(result.preprints).toHaveLength(1);
     expect(result.failed).toHaveLength(1);
     expect(result.failed[0]?.error).toContain('upstream timeout');
+    expect(result.failed[0]?.reason).toBe('upstream_unavailable');
+    expect(result.failed[0]?.retryable).toBe(true);
+  });
+
+  it('discriminates a not-found DOI from an upstream failure in the same batch', async () => {
+    mockGetDetails.mockImplementation((doi: string) => {
+      if (doi === '10.1101/2024.01.15.575123') return Promise.resolve([REVISION]);
+      if (doi === '10.1101/2024.01.01.000001') return Promise.resolve([]);
+      return Promise.reject(new Error('ECONNREFUSED'));
+    });
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.01.01.000001', '10.1101/2024.02.02.000002'],
+      server: 'biorxiv',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+    const byDoi = Object.fromEntries(result.failed.map((f) => [f.doi, f]));
+    expect(byDoi['10.1101/2024.01.01.000001']).toMatchObject({
+      reason: 'not_found',
+      retryable: false,
+    });
+    expect(byDoi['10.1101/2024.02.02.000002']).toMatchObject({
+      reason: 'upstream_unavailable',
+      retryable: true,
+    });
+  });
+
+  it('marks a DOI upstream_unavailable when one server fails and the other returns empty', async () => {
+    // bioRxiv never answers; medRxiv answers empty for the first DOI and holds the second.
+    // The first DOI is therefore not established as absent, even though a server replied.
+    mockGetDetails.mockImplementation((doi: string, server: string) => {
+      if (server === 'biorxiv') return Promise.reject(new Error('network error'));
+      return doi === '10.1101/2024.02.02.000002'
+        ? Promise.resolve([REVISION])
+        : Promise.resolve([]);
+    });
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.02.02.000002'],
+      server: 'both',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.preprints).toHaveLength(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]).toMatchObject({
+      doi: '10.1101/2024.01.15.575123',
+      reason: 'upstream_unavailable',
+      retryable: true,
+    });
+    expect(result.failed[0]?.error).toContain('biorxiv');
+  });
+
+  it('reports not_found when every attempted server answered with an empty collection', async () => {
+    // One DOI resolves so the handler returns instead of throwing the batch error
+    mockGetDetails.mockImplementation((doi: string) =>
+      doi === '10.1101/2024.01.15.575123' ? Promise.resolve([REVISION]) : Promise.resolve([]),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.01.01.000001'],
+      server: 'both',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]).toMatchObject({ reason: 'not_found', retryable: false });
   });
 
   // ── Input validation ────────────────────────────────────────────────────────
@@ -160,7 +226,7 @@ describe('biorxivGetPreprintTool', () => {
     });
   });
 
-  it('throws doi_not_found when both servers reject for server="both"', async () => {
+  it('throws doi_not_found when both servers return empty collections for server="both"', async () => {
     mockGetDetails.mockResolvedValue([]);
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({
@@ -173,7 +239,7 @@ describe('biorxivGetPreprintTool', () => {
     });
   });
 
-  it('throws doi_not_found when all DOIs are service errors in both-server mode', async () => {
+  it('throws retryable upstream_unavailable when all DOIs are service errors in both-server mode', async () => {
     mockGetDetails.mockRejectedValue(new Error('network error'));
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({
@@ -181,7 +247,50 @@ describe('biorxivGetPreprintTool', () => {
       server: 'both',
     });
     await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true },
+    });
+  });
+
+  it('throws retryable upstream_unavailable when the lone server errors in single-server mode', async () => {
+    mockGetDetails.mockRejectedValue(new Error('network error'));
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001'],
+      server: 'biorxiv',
+    });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true },
+    });
+  });
+
+  it('recovery hint for upstream_unavailable tells the caller to retry, not to verify the DOI', async () => {
+    mockGetDetails.mockRejectedValue(new Error('network error'));
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001'],
+      server: 'both',
+    });
+    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.recovery.hint).toMatch(/retry/i);
+    expect(err.data.recovery.hint).not.toMatch(/verify the doi/i);
+  });
+
+  it('throws upstream_unavailable when one DOI is a service error and the rest are not found', async () => {
+    mockGetDetails.mockImplementation((doi: string) =>
+      doi === '10.1101/2024.01.01.000001'
+        ? Promise.resolve([])
+        : Promise.reject(new Error('network error')),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001', '10.1101/2024.02.02.000002'],
+      server: 'biorxiv',
+    });
+    await expect(biorxivGetPreprintTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true },
     });
   });
 
@@ -253,12 +362,43 @@ describe('biorxivGetPreprintTool', () => {
   it('formats failed DOIs in output', () => {
     const output = {
       preprints: [],
-      failed: [{ doi: '10.1101/2024.01.01.000001', error: 'Not found on biorxiv.' }],
+      failed: [
+        {
+          doi: '10.1101/2024.01.01.000001',
+          error: 'Not found on biorxiv.',
+          reason: 'not_found' as const,
+          retryable: false,
+        },
+      ],
     };
     const blocks = biorxivGetPreprintTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('10.1101/2024.01.01.000001');
     expect(text).toContain('Not found');
+  });
+
+  it('renders the failure reason and retryable flag for each failed DOI', () => {
+    const output = {
+      preprints: [],
+      failed: [
+        {
+          doi: '10.1101/2024.01.01.000001',
+          error: 'Not found on biorxiv.',
+          reason: 'not_found' as const,
+          retryable: false,
+        },
+        {
+          doi: '10.1101/2024.02.02.000002',
+          error: 'Lookup failed — biorxiv: network error',
+          reason: 'upstream_unavailable' as const,
+          retryable: true,
+        },
+      ],
+    };
+    const blocks = biorxivGetPreprintTool.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('not_found, retryable: false');
+    expect(text).toContain('upstream_unavailable, retryable: true');
   });
 
   it('formats all optional revision fields when present', () => {

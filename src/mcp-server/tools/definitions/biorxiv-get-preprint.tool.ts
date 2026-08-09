@@ -4,13 +4,16 @@
  * by DOI. Each DOI call returns all revisions in a single response. When
  * server="both", each DOI fans out across bioRxiv and medRxiv in parallel;
  * per-DOI failures are reported in failed[] rather than aborting the batch.
+ * A DOI is only reported as not found when every attempted server answered
+ * with an empty collection — if a server never answered, the DOI is reported
+ * as upstream-unavailable and retryable, on both the per-DOI and batch surfaces.
  * @module mcp-server/tools/definitions/biorxiv-get-preprint.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
-import type { PreprintRevision } from '@/services/biorxiv/types.js';
+import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
 
 const DOI_REGEX = /^10\.\d{4,}\//;
 
@@ -75,7 +78,7 @@ const RevisionSchema = z.object({
 export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
   title: 'Get Preprint by DOI',
   description:
-    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI rather than aborting the batch. DOIs must match the pattern 10.NNNN/…',
+    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable) and a retryable flag. DOIs must match the pattern 10.NNNN/…',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -113,6 +116,16 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
           .object({
             doi: z.string().describe('DOI that failed to resolve.'),
             error: z.string().describe('Error description.'),
+            reason: z
+              .enum(['not_found', 'invalid_doi_format', 'upstream_unavailable'])
+              .describe(
+                'Why this DOI failed: not_found (every attempted server answered with an empty collection), invalid_doi_format (the DOI does not match 10.NNNN/…), or upstream_unavailable (a server never answered, so absence could not be established).',
+              ),
+            retryable: z
+              .boolean()
+              .describe(
+                'True when retrying this DOI may succeed — set only for upstream_unavailable. A not_found or invalid_doi_format entry will not change on retry.',
+              ),
           })
           .describe('A DOI that failed to resolve.'),
       )
@@ -123,7 +136,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     {
       reason: 'doi_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'ALL requested DOIs resolve to empty collections on all requested servers.',
+      when: 'ALL requested DOIs resolve to empty collections on all requested servers, with every server answering.',
       recovery:
         'Verify the DOI exists on bioRxiv or medRxiv. Supported prefixes: 10.1101/ and 10.64898/.',
     },
@@ -133,6 +146,14 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       when: 'One or more input DOIs do not match the 10.NNNN/ pattern.',
       recovery:
         'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      retryable: true,
+      when: 'No DOI resolved and at least one lookup failed against api.biorxiv.org, so absence could not be established for any requested DOI.',
+      recovery:
+        'Retry the request after a short delay — the DOIs may well exist; api.biorxiv.org did not answer.',
     },
   ],
 
@@ -145,10 +166,13 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     const service = getBiorxivApiService();
 
     type PreprintResult = { doi: string; revisions: PreprintRevision[] };
-    type FailedResult = { doi: string; error: string };
+    type FailureReason = 'not_found' | 'invalid_doi_format' | 'upstream_unavailable';
+    type FailedResult = { doi: string; error: string; reason: FailureReason; retryable: boolean };
 
     const preprints: PreprintResult[] = [];
     const failed: FailedResult[] = [];
+    const servers: BiorxivServer[] =
+      input.server === 'both' ? ['biorxiv', 'medrxiv'] : [input.server];
 
     // For each DOI, fan out across servers in parallel
     await Promise.all(
@@ -158,53 +182,70 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
           failed.push({
             doi,
             error: `Invalid DOI format — must match 10.NNNN/… (e.g. 10.1101/… or 10.64898/…).`,
+            reason: 'invalid_doi_format',
+            retryable: false,
           });
           return;
         }
-        try {
-          let revisions: PreprintRevision[] = [];
 
-          if (input.server === 'both') {
-            const [bxResult, mxResult] = await Promise.allSettled([
-              service.getDetails(doi, 'biorxiv', ctx),
-              service.getDetails(doi, 'medrxiv', ctx),
-            ]);
-            if (bxResult.status === 'fulfilled') revisions.push(...bxResult.value);
-            if (mxResult.status === 'fulfilled') revisions.push(...mxResult.value);
+        const settled = await Promise.allSettled(
+          servers.map((server) => service.getDetails(doi, server, ctx)),
+        );
+        const revisions = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+        if (revisions.length > 0) {
+          preprints.push({ doi, revisions });
+          return;
+        }
 
-            // If both failed, surface the error
-            if (bxResult.status === 'rejected' && mxResult.status === 'rejected') {
-              throw bxResult.reason instanceof Error
-                ? bxResult.reason
-                : new Error(String(bxResult.reason));
-            }
-          } else {
-            revisions = await service.getDetails(doi, input.server, ctx);
-          }
-
-          if (revisions.length > 0) {
-            preprints.push({ doi, revisions });
-          } else if (input.server !== 'both') {
-            failed.push({ doi, error: `Not found on ${input.server}.` });
-          } else {
-            failed.push({ doi, error: 'Not found on bioRxiv or medRxiv.' });
-          }
-        } catch (err) {
+        // No revisions. "Not found" is a claim about what the servers reported, so it
+        // requires every attempted server to have answered — a server that failed
+        // leaves absence unestablished and the DOI retryable.
+        const rejections = settled.flatMap((r, i) =>
+          r.status === 'rejected'
+            ? [
+                {
+                  server: servers[i] as BiorxivServer,
+                  message: r.reason instanceof Error ? r.reason.message : String(r.reason),
+                },
+              ]
+            : [],
+        );
+        if (rejections.length > 0) {
           failed.push({
             doi,
-            error: err instanceof Error ? err.message : String(err),
+            error: `Lookup failed — ${rejections.map((f) => `${f.server}: ${f.message}`).join('; ')}`,
+            reason: 'upstream_unavailable',
+            retryable: true,
           });
+          return;
         }
+
+        failed.push({
+          doi,
+          error:
+            input.server === 'both'
+              ? 'Not found on bioRxiv or medRxiv.'
+              : `Not found on ${input.server}.`,
+          reason: 'not_found',
+          retryable: false,
+        });
       }),
     );
 
     // All DOIs failed — pick the appropriate declared error
     if (preprints.length === 0 && failed.length === input.dois.length) {
-      const allFormatErrors = failed.every((f) => f.error.startsWith('Invalid DOI format'));
-      if (allFormatErrors) {
+      if (failed.every((f) => f.reason === 'invalid_doi_format')) {
         throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.dois.join(', ')}`, {
           ...ctx.recoveryFor('invalid_doi_format'),
         });
+      }
+      const unavailable = failed.filter((f) => f.reason === 'upstream_unavailable');
+      if (unavailable.length > 0) {
+        throw ctx.fail(
+          'upstream_unavailable',
+          `No DOI could be resolved — ${unavailable.map((f) => `${f.doi}: ${f.error}`).join('; ')}`,
+          { ...ctx.recoveryFor('upstream_unavailable') },
+        );
       }
       throw ctx.fail(
         'doi_not_found',
@@ -230,7 +271,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     if (result.failed.length > 0) {
       lines.push('\n## Failed DOIs');
       for (const f of result.failed) {
-        lines.push(`- **${f.doi}**: ${f.error}`);
+        lines.push(`- **${f.doi}**: ${f.error} (${f.reason}, retryable: ${f.retryable})`);
       }
     }
 
