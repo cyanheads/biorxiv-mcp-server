@@ -29,7 +29,7 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, htmlExtractor, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
-import { asRc, SERVER_VERSION } from '@/services/shared.js';
+import { asRc, parseRetryAfterSeconds, SERVER_VERSION } from '@/services/shared.js';
 
 /**
  * bioRxiv/medRxiv render their article pages on the Highwire platform, whose
@@ -128,22 +128,6 @@ const CHALLENGE_MARKERS = [
 
 function isChallengePage(html: string): boolean {
   return CHALLENGE_MARKERS.some((marker) => html.includes(marker));
-}
-
-/**
- * Reads a `Retry-After` header value as a wait in whole seconds. RFC 9110 §10.2.3
- * allows either delta-seconds or an HTTP-date; the date form is converted to a
- * wait from now and clamped at zero. Returns undefined for an absent, malformed,
- * or unparseable value so callers fall back to generic wording rather than
- * echoing an uninterpretable header into agent-facing prose.
- */
-function parseRetryAfterSeconds(raw: unknown): number | undefined {
-  if (typeof raw !== 'string') return;
-  const trimmed = raw.trim();
-  if (/^\d+$/.test(trimmed)) return Number(trimmed);
-  const dateMs = Date.parse(trimmed);
-  if (Number.isNaN(dateMs)) return;
-  return Math.max(0, Math.round((dateMs - Date.now()) / 1000));
 }
 
 /**

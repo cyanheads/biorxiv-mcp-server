@@ -11,6 +11,10 @@
  * A server that never answered is a separate condition: it has no pagination
  * state at all, so it is named in failed[] and in the notice rather than
  * dropped, which would leave a partial result reading as a complete one.
+ * When NO server answered there is nothing to qualify — an empty page is a
+ * claim about what the servers reported, and none of them reported — so the
+ * call raises a retryable error instead of returning an empty success, which a
+ * caller branching on success-vs-error cannot tell from an empty interval.
  * @module mcp-server/tools/definitions/biorxiv-list-recent.tool
  */
 
@@ -18,7 +22,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
-import { isValidCalendarDate } from '@/services/shared.js';
+import { describeWait, findRateLimit, isValidCalendarDate } from '@/services/shared.js';
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -58,7 +62,7 @@ function formatPreprint(p: PreprintRevision): string {
 export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   title: 'List Recent Preprints',
   description:
-    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. A server that fails to answer under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Call biorxiv_list_categories for valid category strings.',
+    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -152,7 +156,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           .describe('A server that did not answer.'),
       )
       .describe(
-        'Servers that did not answer, so their records are missing from "preprints" and they have no "pagination" entry. Non-empty means this result set is partial — retry to include them. Only populated when server="both"; a single-server failure surfaces as a tool error. Distinct from an exhausted pagination entry, where the server answered.',
+        'Servers that did not answer, so their records are missing from "preprints" and they have no "pagination" entry. Non-empty means this result set is partial — retry to include them. Only populated when server="both", and never holding every attempted server: when none answered, the call fails with upstream_unavailable or rate_limited instead of returning a page. A single-server failure likewise surfaces as a tool error. Distinct from an exhausted pagination entry, where the server answered.',
       ),
   }),
 
@@ -186,6 +190,22 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied category string is not in the taxonomy.',
       recovery: 'Call biorxiv_list_categories to get valid category strings and retry.',
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      retryable: true,
+      when: 'Every attempted server failed against api.biorxiv.org, so no page was retrieved and an empty interval could not be established.',
+      recovery:
+        'Retry the request after a short delay — the interval may well hold preprints; api.biorxiv.org did not answer.',
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      retryable: true,
+      when: 'Every attempted server failed and at least one was rejected with HTTP 429 by api.biorxiv.org.',
+      recovery:
+        'Wait the retryAfter seconds before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
     },
   ],
 
@@ -248,6 +268,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     } = {};
 
     const failed: { server: BiorxivServer; error: string }[] = [];
+    // Raw rejection values alongside failed[], so the all-failed branch can tell
+    // a rate limit from a generic outage and preserve the original as `cause`.
+    const rejections: unknown[] = [];
 
     // ctx.enrich.notice is last-wins, so every qualification that applies to this
     // result set is collected here and flushed as one string before returning.
@@ -336,6 +359,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       } else {
         ctx.log.warning('bioRxiv listing failed', { error: String(bxResult.reason) });
         failed.push({ server: 'biorxiv', error: errorMessage(bxResult.reason) });
+        rejections.push(bxResult.reason);
       }
 
       if (mxResult.status === 'fulfilled') {
@@ -344,6 +368,42 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       } else {
         ctx.log.warning('medRxiv listing failed', { error: String(mxResult.reason) });
         failed.push({ server: 'medrxiv', error: errorMessage(mxResult.reason) });
+        rejections.push(mxResult.reason);
+      }
+
+      // Nothing answered. An empty page here is not a result — it is the absence
+      // of one — and a caller branching on success-vs-error cannot tell the two
+      // apart from a notice string. Raise the same retryable error the other
+      // DOI-resolving tools raise for their own nothing-answered case.
+      if (failed.length === SERVERS.length) {
+        const message = `Neither bioRxiv nor medRxiv answered — ${failed
+          .map((f) => `${SERVER_LABEL[f.server]}: ${f.error}`)
+          .join('; ')}`;
+        const servers = failed.map((f) => f.server);
+        // A rate limit outranks a generic outage: both say "retry", but only one
+        // says when, and retrying sooner would land inside the same limit.
+        const rateLimit = findRateLimit(rejections);
+        if (rateLimit) {
+          const wait = describeWait(rateLimit.retryAfter);
+          throw ctx.fail(
+            'rate_limited',
+            message,
+            {
+              servers,
+              ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
+              recovery: {
+                hint: `Wait ${wait} before retrying — api.biorxiv.org is rate-limiting this host, and every preprint metadata tool queries the same origin.`,
+              },
+            },
+            { cause: rejections[0] },
+          );
+        }
+        throw ctx.fail(
+          'upstream_unavailable',
+          message,
+          { servers, ...ctx.recoveryFor('upstream_unavailable') },
+          { cause: rejections[0] },
+        );
       }
 
       // A server that never answered contributes no pagination entry, so nothing
@@ -353,9 +413,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       if (failed.length > 0) {
         const labels = serverLabels(failed.map((f) => f.server));
         notices.push(
-          failed.length === SERVERS.length
-            ? `${labels} did not answer, so nothing was retrieved — this is not an empty interval. See failed[] for the errors and retry.`
-            : `${labels} did not answer, so this result set is partial — it holds no ${labels} records. See failed[] for the error and retry to include them.`,
+          `${labels} did not answer, so this result set is partial — it holds no ${labels} records. See failed[] for the error and retry to include them.`,
         );
       }
 
@@ -381,13 +439,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       allPreprints = r.preprints;
     }
 
-    // "Nothing here" is a claim about what the servers reported, so it is only made
-    // when a server actually answered — every server having failed is already
-    // covered by the failure notice above, and re-reading it as an empty interval
-    // is the misread this whole path exists to prevent.
-    const someServerAnswered = SERVERS.some((s) => pagination[s] !== undefined);
-
-    if (allPreprints.length === 0 && someServerAnswered) {
+    // "Nothing here" is a claim about what the servers reported, and by this point
+    // one has: every branch above either records a pagination entry or throws.
+    if (allPreprints.length === 0) {
       // Detect cursor-overshoot: cursor > 0 but zero results — filters are fine, cursor is past the end
       if (input.cursor > 0) {
         notices.push(

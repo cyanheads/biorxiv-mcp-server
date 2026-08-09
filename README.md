@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -42,7 +42,8 @@ Fetch preprint metadata by DOI — all revisions in one call.
 - Each DOI returns the full revision history in `collection[]` — one API call per DOI, no enumeration loop
 - Includes title, authors, abstract, category, license, JATS XML full-text link (`jatsxml`), and published journal DOI when the preprint has been accepted
 - Scope to `biorxiv`, `medrxiv`, or `both`; when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
-- Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`) and a `retryable` flag — a DOI is only reported as not found when every attempted server answered
+- Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag — a DOI is only reported as not found when every attempted server answered
+- A lookup the origin rate-limited (HTTP 429) reports as `rate_limited` rather than folding into `upstream_unavailable`, and carries `retryAfter` — the wait in seconds `api.biorxiv.org` asked for
 
 ---
 
@@ -55,7 +56,8 @@ Page through preprints in a date interval.
 - Response includes `total` count per server for calculating remaining pages
 - When `server="both"`, each server paginates independently; response surfaces per-server pagination state (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`)
 - A server whose cursor is past its last page is marked `exhausted: true` — the API reports `total: 0` for an out-of-range cursor, so that count is an artifact rather than the interval total
-- A server that does not answer under `server="both"` is named in `failed[]` rather than dropped; the other server's page is still returned, and a non-empty `failed[]` marks the result set as partial
+- One server not answering under `server="both"` is named in `failed[]` rather than dropped; the other server's page is still returned, and a non-empty `failed[]` marks the result set as partial
+- Every attempted server failing raises a retryable `upstream_unavailable` (or `rate_limited`) error instead of returning an empty page — nothing answered, so an empty interval was never established
 
 ---
 
@@ -67,7 +69,8 @@ Keyword and/or author search with relevance ranking.
 - Optional `author` maps to an EuropePMC `AUTH:"…"` field query, ANDed with the keyword query — supply `query`, `author`, or both
 - Covers both servers by default; scope down with `server`
 - Optional date range filters (`date_from`, `date_to`)
-- Enrichment failures degrade gracefully to EuropePMC-only metadata, surfaced via `partial_results`
+- Enriched results carry the same latest-revision fields `biorxiv_get_preprint` returns — including `type`, `license`, `funder`, and `authorCorrespondingInstitution`
+- Enrichment failures degrade gracefully to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`)
 
 ---
 
@@ -79,6 +82,7 @@ Resolve a preprint DOI to its journal publication crosswalk.
 - Returns journal DOI, journal name, published date, and corresponding author institution
 - Use when the preprint's `publishedJournalDoi` field is present and you need the full crosswalk record
 - Scope to `biorxiv`, `medrxiv`, or `both`; `both` is the default because the two servers share the `10.1101/` DOI prefix, and the output `server` field names the one that answered
+- No server answering raises a retryable `upstream_unavailable`, or `rate_limited` with the origin's wait when the failure was an HTTP 429 — never `doi_not_found`, which would assert an absence nothing established
 
 ---
 
@@ -91,7 +95,7 @@ Retrieve a preprint's full text as best-effort Markdown.
 - Scope to `biorxiv`, `medrxiv`, or `both`; `both` is the default because the two servers share the `10.1101/` DOI prefix. Only the DOI resolution fans out — the full-text fetch targets the single server that answered, named in the output `server` field
 - Long articles page via `offset`/`limit` character chunking (`totalChars`, `remainingChars`, `hasMore`); the extracted article is cached per version, so paging costs one origin fetch rather than one per chunk
 - PDF-only preprints and blocked/challenge pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`
-- An origin rate limit (HTTP 429) returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, rather than a bare fetch failure
+- An origin rate limit (HTTP 429) returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, rather than a bare fetch failure. Both origins this tool touches can hit it — the article page during the full-text fetch, `api.biorxiv.org` during version resolution — and the recovery hint names which of them are limiting, since `biorxiv_get_preprint` is only a useful fallback while the metadata origin is answering
 
 ---
 
@@ -115,7 +119,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 
 bioRxiv-specific:
 
-- `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff
+- `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff. An origin rate limit (HTTP 429) is classified as a retryable `rate_limited` error carrying the parsed `Retry-After` wait; the upstream response body never reaches the error payload
 - `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword and/or author results
 - `BiorxivFullTextService` fetches and extracts Markdown from the rendered HTML article pages on `www.biorxiv.org` / `www.medrxiv.org` — a distinct origin from the JSON API
 - Two-server fan-out via `Promise.allSettled` — both `biorxiv` and `medrxiv` queried in parallel when `server="both"`, results merged and deduplicated by DOI

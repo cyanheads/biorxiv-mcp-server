@@ -1,11 +1,14 @@
 /**
  * @fileoverview Shared utilities for biorxiv-mcp-server service layer. Provides
- * the Context→RequestContext cast, HTML error detection, and the server version
- * string used in User-Agent headers across all services.
+ * the Context→RequestContext cast, HTML error detection, calendar-date and
+ * upstream-text normalization, `Retry-After` parsing and rate-limit rejection
+ * lookup shared by both fetch paths, and the server version string used in
+ * User-Agent headers across all services.
  * @module services/shared
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import packageJson from '../../package.json' with { type: 'json' };
 
@@ -87,6 +90,64 @@ export function normalizeUpstreamText(text: string | undefined): string | undefi
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned || undefined;
+}
+
+/**
+ * Reads a `Retry-After` header value as a wait in whole seconds. RFC 9110 §10.2.3
+ * allows either delta-seconds or an HTTP-date; the date form is converted to a
+ * wait from now and clamped at zero. Returns undefined for an absent, malformed,
+ * or unparseable value so callers fall back to generic wording rather than
+ * echoing an uninterpretable header into agent-facing prose.
+ *
+ * Shared by both fetch paths — the JSON API and the full-text article origin
+ * each surface the same header and must read it identically.
+ */
+export function parseRetryAfterSeconds(raw: unknown): number | undefined {
+  if (typeof raw !== 'string') return;
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const dateMs = Date.parse(trimmed);
+  if (Number.isNaN(dateMs)) return;
+  return Math.max(0, Math.round((dateMs - Date.now()) / 1000));
+}
+
+/**
+ * Finds an origin rate limit among a set of rejections, recognising the
+ * `reason: 'rate_limited'` marker this server's services attach when they
+ * classify an HTTP 429. Returns the wait the caller should honor — the longest
+ * of the reported ones, since a shorter wait would still land inside whichever
+ * origin asked for the longer one — or an empty object when a rate limit fired
+ * without a usable `Retry-After`. Returns undefined when no rejection was a
+ * rate limit, so callers fall through to their generic upstream-failure
+ * contract entry.
+ */
+export function findRateLimit(errors: readonly unknown[]): { retryAfter?: number } | undefined {
+  let found = false;
+  let longest: number | undefined;
+  for (const err of errors) {
+    if (!(err instanceof McpError)) continue;
+    const data = err.data as { reason?: unknown; retryAfter?: unknown } | undefined;
+    if (data?.reason !== 'rate_limited') continue;
+    found = true;
+    if (
+      typeof data.retryAfter === 'number' &&
+      (longest === undefined || data.retryAfter > longest)
+    ) {
+      longest = data.retryAfter;
+    }
+  }
+  if (!found) return;
+  return longest === undefined ? {} : { retryAfter: longest };
+}
+
+/**
+ * Renders a `Retry-After` wait as the phrase every rate-limit recovery hint
+ * interpolates, so the wording an agent reads is identical whichever origin or
+ * tool produced the limit — including the fallback for a 429 whose response
+ * named no usable wait.
+ */
+export function describeWait(seconds: number | undefined): string {
+  return seconds === undefined ? 'a minute or two' : `${seconds} seconds`;
 }
 
 /**

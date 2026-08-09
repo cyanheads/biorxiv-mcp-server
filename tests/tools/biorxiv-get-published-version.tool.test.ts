@@ -8,6 +8,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
 import type { PublishedVersion } from '@/services/biorxiv/types.js';
+import { rateLimitError } from '../helpers/rate-limit.js';
 
 const mockGetPublishedVersion = vi.fn();
 
@@ -221,6 +222,59 @@ describe('biorxivGetPublishedVersionTool', () => {
     const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
     expect(err.data.recovery.hint).toMatch(/both/i);
     expect(err.data.recovery.hint).not.toMatch(/has not been accepted/i);
+  });
+
+  it('throws retryable rate_limited with the origin wait when the lookup was rate-limited', async () => {
+    const upstream = rateLimitError(30);
+    mockGetPublishedVersion.mockRejectedValue(upstream);
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.01.000001',
+      server: 'both',
+    });
+    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'rate_limited',
+        retryable: true,
+        retryAfter: 30,
+        doi: '10.1101/2024.01.01.000001',
+        servers: ['biorxiv', 'medrxiv'],
+      },
+    });
+    expect(err.data.recovery.hint).toContain('30 seconds');
+    expect(err.cause).toBe(upstream);
+  });
+
+  it('prefers rate_limited over upstream_unavailable when only one server was rate-limited', async () => {
+    mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+      Promise.reject(server === 'biorxiv' ? rateLimitError(45) : new Error('network error')),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.01.000001',
+      server: 'both',
+    });
+    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: 45 },
+    });
+    expect(err.message).toContain('network error');
+  });
+
+  it('still resolves when one server is rate-limited and the other holds the record', async () => {
+    mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv' ? Promise.reject(rateLimitError(30)) : Promise.resolve(PUBLISHED),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.15.575123',
+    });
+    const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
+    expect(result.server).toBe('medrxiv');
   });
 
   it('doi_not_found error does not leak internal details', async () => {

@@ -1,14 +1,18 @@
 /**
  * @fileoverview Tests for BiorxivApiService — details, listing, and crosswalk
- * endpoints with normalization and partial-failure handling.
+ * endpoints with normalization, partial-failure handling, and HTTP 429
+ * classification.
  * @module tests/services/biorxiv/biorxiv-service.test
  */
 
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
+import { findRateLimit } from '@/services/shared.js';
+import { rateLimitError } from '../../helpers/rate-limit.js';
 
 // Stub out fetchWithTimeout and withRetry so no real HTTP calls are made
 const mockFetch = vi.fn();
@@ -35,14 +39,51 @@ function makeResponse(body: unknown): Response {
   } as unknown as Response;
 }
 
-/** Make a fake response whose body is an HTML error page */
+/**
+ * Make a fake response whose body is an HTML error page. `ok`/`status` are
+ * cosmetic here: the real `fetchWithTimeout` throws on non-2xx before the
+ * service reads the body, so a response that reaches `detectHtmlError` is by
+ * definition a 2xx one carrying an HTML error page.
+ */
 function makeHtmlResponse(html = '<!DOCTYPE html><html><body>Error</body></html>'): Response {
   return {
     text: () => Promise.resolve(html),
-    ok: false,
-    status: 429,
+    ok: true,
+    status: 200,
   } as unknown as Response;
 }
+
+/** The upstream 429 body — must never reach the caller-visible error payload. */
+const RATE_LIMIT_BODY = '<html><body>429 Too Many Requests — api.biorxiv.org</body></html>';
+
+/**
+ * McpError shaped like the one `fetchWithTimeout` throws on a non-2xx response:
+ * canonical `status`/`body`, the legacy `statusCode`/`responseBody` aliases, and
+ * `retryAfter` when the origin sent the header. The service never sees a
+ * `Response` for a non-2xx — it sees this rejection.
+ */
+function httpError(status: number, retryAfter?: string): McpError {
+  const code = status === 429 ? JsonRpcErrorCode.RateLimited : JsonRpcErrorCode.ServiceUnavailable;
+  return new McpError(code, `Fetch failed for api.biorxiv.org. Status: ${status}`, {
+    status,
+    statusText: 'Too Many Requests',
+    body: RATE_LIMIT_BODY,
+    statusCode: status,
+    responseBody: RATE_LIMIT_BODY,
+    ...(retryAfter !== undefined && { retryAfter }),
+    errorSource: 'FetchHttpError',
+  });
+}
+
+/** Every call BiorxivApiService makes against api.biorxiv.org, by name. */
+const API_CALLS = {
+  getDetails: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
+    s.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx),
+  getListing: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
+    s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, undefined, ctx),
+  getPublishedVersion: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
+    s.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
+} as const;
 
 const MOCK_CONFIG = {} as AppConfig;
 const MOCK_STORAGE = {} as StorageService;
@@ -465,6 +506,127 @@ describe('BiorxivApiService', () => {
       const first = service.getCategories();
       const second = service.getCategories();
       expect(first).toEqual(second);
+    });
+  });
+
+  // ── HTTP 429 classification ─────────────────────────────────────────────────
+
+  describe('rate-limit classification', () => {
+    for (const [name, call] of Object.entries(API_CALLS)) {
+      it(`${name} classifies a 429 as rate_limited carrying the parsed Retry-After`, async () => {
+        mockFetch.mockRejectedValue(httpError(429, '30'));
+        const ctx = createMockContext();
+        const err = await call(service, ctx).catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(McpError);
+        expect((err as McpError).code).toBe(JsonRpcErrorCode.RateLimited);
+        expect((err as McpError).data).toMatchObject({
+          reason: 'rate_limited',
+          retryable: true,
+          retryAfter: 30,
+        });
+      });
+
+      it(`${name} keeps the upstream 429 body out of the caller-visible payload`, async () => {
+        mockFetch.mockRejectedValue(httpError(429, '30'));
+        const ctx = createMockContext();
+        const err = await call(service, ctx).catch((e: unknown) => e);
+
+        // `data` is what reaches the client as structuredContent.error.data.
+        const data = (err as McpError).data ?? {};
+        expect(JSON.stringify(data)).not.toContain('429 Too Many Requests');
+        expect(data).not.toHaveProperty('body');
+        expect(data).not.toHaveProperty('responseBody');
+        expect(data).not.toHaveProperty('statusCode');
+        expect(data).not.toHaveProperty('status');
+        expect((err as McpError).message).not.toContain('<html>');
+      });
+
+      it(`${name} passes 429 as an expected status so it logs at debug`, async () => {
+        mockFetch.mockRejectedValue(httpError(429, '30'));
+        const ctx = createMockContext();
+        await call(service, ctx).catch(() => undefined);
+
+        const options = (mockFetch.mock.calls[0] as unknown[])[3] as {
+          expectedStatuses?: number[];
+        };
+        expect(options.expectedStatuses).toEqual([429]);
+      });
+    }
+
+    it('reads an HTTP-date Retry-After as a wait in seconds', async () => {
+      mockFetch.mockRejectedValue(httpError(429, new Date(Date.now() + 120_000).toUTCString()));
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      const retryAfter = (err as McpError).data?.retryAfter as number;
+      expect(retryAfter).toBeGreaterThan(110);
+      expect(retryAfter).toBeLessThanOrEqual(120);
+    });
+
+    it('leaves retryAfter absent when the origin sent no Retry-After header', async () => {
+      mockFetch.mockRejectedValue(httpError(429));
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.RateLimited);
+      expect((err as McpError).data?.retryAfter).toBeUndefined();
+      expect((err as McpError).data?.reason).toBe('rate_limited');
+    });
+
+    it('names the wait in a recovery hint the caller can act on', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '30'));
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      const hint = ((err as McpError).data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+      expect(hint).toContain('30 seconds');
+      expect(hint).toContain('api.biorxiv.org');
+    });
+
+    it('preserves the upstream rejection as cause for diagnosis', async () => {
+      const upstream = httpError(429, '30');
+      mockFetch.mockRejectedValue(upstream);
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      expect((err as Error).cause).toBe(upstream);
+    });
+
+    it('leaves a non-429 upstream failure untouched for the framework to classify', async () => {
+      const upstream = httpError(503);
+      mockFetch.mockRejectedValue(upstream);
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      expect(err).toBe(upstream);
+    });
+
+    it('leaves a plain network rejection untouched', async () => {
+      const upstream = new Error('ECONNREFUSED');
+      mockFetch.mockRejectedValue(upstream);
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      expect(err).toBe(upstream);
+    });
+
+    it('throws a rejection findRateLimit recognizes — the seam every tool branches on', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '30'));
+      const ctx = createMockContext();
+      const err = await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e);
+      expect(findRateLimit([err])).toEqual({ retryAfter: 30 });
+    });
+
+    it('throws the shape the shared tool-test fixture stands in for', async () => {
+      // The tool suites mock this service away and drive `rateLimitError()`
+      // instead. If the real throw and that fixture drift apart, every one of
+      // those suites keeps passing while the tools mis-branch in production.
+      mockFetch.mockRejectedValue(httpError(429, '30'));
+      const ctx = createMockContext();
+      const err = (await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e)) as McpError;
+      const fixture = rateLimitError(30);
+      const contractFields = (e: McpError) => ({
+        code: e.code,
+        reason: e.data?.reason,
+        retryable: e.data?.retryable,
+        retryAfter: e.data?.retryAfter,
+      });
+      expect(contractFields(err)).toEqual(contractFields(fixture));
     });
   });
 });

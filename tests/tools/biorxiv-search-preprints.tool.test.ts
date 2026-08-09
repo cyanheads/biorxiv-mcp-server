@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
+import { rateLimitError } from '../helpers/rate-limit.js';
 
 const mockEpmcSearch = vi.fn();
 const mockGetDetails = vi.fn();
@@ -47,6 +48,24 @@ const REVISION: PreprintRevision = {
   category: 'Neuroscience',
   server: 'biorxiv',
   abstract: 'A study on CRISPR applications.',
+};
+
+/**
+ * A revision carrying every latest-revision metadata field the details endpoint
+ * exposes. Field values mirror the live v2 record for 10.64898/2026.01.24.701325,
+ * whose upstream payload populates all four of the fields search used to drop
+ * (`funder` arrives as an array upstream and is joined by the service).
+ */
+const RICH_REVISION: PreprintRevision = {
+  ...REVISION,
+  type: 'new results',
+  license: 'cc_no',
+  authorCorresponding: 'Qun Lu',
+  authorCorrespondingInstitution: 'University of South Carolina',
+  funder:
+    "NIH Director's Transformative Research Award; Smart State Center for Economic Excellence of South Carolina",
+  jatsxmlUrl: 'https://www.biorxiv.org/content/early/2026/07/01/2026.01.24.701325.source.xml',
+  publishedJournalDoi: '10.1038/s41586-026-00001-0',
 };
 
 describe('biorxivSearchPreprintsTool', () => {
@@ -359,6 +378,140 @@ describe('biorxivSearchPreprintsTool', () => {
     const serialized = JSON.stringify(err);
     // Secrets and credentials should never appear in error output
     expect(serialized).not.toMatch(/password|api_key|secret|Bearer [A-Za-z0-9]/i);
+  });
+
+  it('labels a rate-limited enrichment rate_limited while still degrading to EuropePMC metadata', async () => {
+    mockGetDetails.mockRejectedValue(rateLimitError(30));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+
+    expect(result.partial_results).toBe(true);
+    expect(result.preprints[0]).toMatchObject({
+      enriched: false,
+      enrichment_error: 'rate_limited',
+      // EuropePMC metadata still stands in, exactly as for any other failure
+      title: 'CRISPR gene editing in neural circuits',
+      authors: 'Smith J, Jones A',
+    });
+
+    const text = (biorxivSearchPreprintsTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('enrichment_error: rate_limited');
+    expect(text).toContain('rate-limited by api.biorxiv.org');
+  });
+
+  it('labels a rate-limited both-server enrichment rate_limited, not service_error', async () => {
+    // Non-biorxiv DOI prefix routes through the Promise.allSettled branch
+    mockEpmcSearch.mockResolvedValue(
+      epmcSearchResult(1, [{ doi: '10.5678/some.other.preprint', title: 'Some other preprint' }]),
+    );
+    mockGetDetails.mockRejectedValue(rateLimitError(30));
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]?.enrichment_error).toBe('rate_limited');
+  });
+
+  it('does not report not_found when one server came back empty and the other never answered', async () => {
+    // "Not indexed on the target server" is a claim about what the servers
+    // reported, and only one of them reported.
+    mockEpmcSearch.mockResolvedValue(
+      epmcSearchResult(1, [{ doi: '10.5678/some.other.preprint', title: 'Some other preprint' }]),
+    );
+    mockGetDetails.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv' ? Promise.resolve([]) : Promise.reject(new Error('medrxiv down')),
+    );
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]).toMatchObject({
+      enriched: false,
+      enrichment_error: 'service_error',
+    });
+  });
+
+  it('labels that same half-answered case rate_limited when the silent server was 429ed', async () => {
+    mockEpmcSearch.mockResolvedValue(
+      epmcSearchResult(1, [{ doi: '10.5678/some.other.preprint', title: 'Some other preprint' }]),
+    );
+    mockGetDetails.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv' ? Promise.resolve([]) : Promise.reject(rateLimitError(30)),
+    );
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]?.enrichment_error).toBe('rate_limited');
+  });
+
+  it('still reports not_found when every attempted server answered with nothing', async () => {
+    mockGetDetails.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+    expect(result.preprints[0]).toMatchObject({
+      enriched: false,
+      enrichment_error: 'not_found',
+    });
+  });
+
+  // ── Enrichment completeness ─────────────────────────────────────────────────
+
+  it('carries every latest-revision metadata field into structuredContent and content[]', async () => {
+    // The same DOI must not describe less through search than through
+    // biorxiv_get_preprint — these four were dropped by the enriched projection.
+    mockGetDetails.mockResolvedValue([RICH_REVISION]);
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR', server: 'biorxiv' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+
+    expect(result.preprints[0]).toMatchObject({
+      enriched: true,
+      type: 'new results',
+      license: 'cc_no',
+      authorCorrespondingInstitution: 'University of South Carolina',
+      funder:
+        "NIH Director's Transformative Research Award; Smart State Center for Economic Excellence of South Carolina",
+    });
+
+    const text = (biorxivSearchPreprintsTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('**Type:** new results');
+    expect(text).toContain('**License:** cc_no');
+    expect(text).toContain('**Institution:** University of South Carolina');
+    expect(text).toContain("**Funder:** NIH Director's Transformative Research Award");
+  });
+
+  it('leaves the new metadata fields absent when the revision does not carry them', async () => {
+    mockGetDetails.mockResolvedValue([REVISION]);
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR', server: 'biorxiv' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+
+    expect(result.preprints[0]?.type).toBeUndefined();
+    expect(result.preprints[0]?.license).toBeUndefined();
+    expect(result.preprints[0]?.funder).toBeUndefined();
+    expect(result.preprints[0]?.authorCorrespondingInstitution).toBeUndefined();
+
+    const text = (biorxivSearchPreprintsTool.format!(result)[0] as { text: string }).text;
+    expect(text).not.toContain('**Type:**');
+    expect(text).not.toContain('**Funder:**');
+    expect(text).not.toContain('undefined');
+  });
+
+  it('validates the enriched result against the declared output schema', async () => {
+    // The four added fields have to be in the Zod output too, not just the
+    // handler's return type — structuredContent is validated against it.
+    mockGetDetails.mockResolvedValue([RICH_REVISION]);
+    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+    const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR', server: 'biorxiv' });
+    const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+
+    const parsed = biorxivSearchPreprintsTool.output.parse(result);
+    expect(parsed.preprints[0]).toMatchObject({
+      type: 'new results',
+      license: 'cc_no',
+      authorCorrespondingInstitution: 'University of South Carolina',
+    });
+    expect(parsed.preprints[0]?.funder).toContain('Smart State Center');
   });
 
   // ── Edge cases ──────────────────────────────────────────────────────────────

@@ -2,17 +2,27 @@
  * @fileoverview BiorxivApiService — wraps api.biorxiv.org endpoints for
  * preprint details (/details), date-range listing (/details with date interval),
  * and crosswalk (/pubs). All methods retry with exponential backoff. Parses
- * and normalizes raw JSON into domain types. Detects HTML error pages.
+ * and normalizes raw JSON into domain types. Detects HTML error pages, and
+ * classifies an origin rate limit (HTTP 429) as its own retryable
+ * `rate_limited` condition carrying the parsed `Retry-After` wait — never the
+ * upstream response body.
  * @module services/biorxiv/biorxiv-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, rateLimited, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { asRc, detectHtmlError, normalizeUpstreamText, SERVER_VERSION } from '@/services/shared.js';
+import {
+  asRc,
+  describeWait,
+  detectHtmlError,
+  normalizeUpstreamText,
+  parseRetryAfterSeconds,
+  SERVER_VERSION,
+} from '@/services/shared.js';
 import type {
   BiorxivServer,
   CategoryTaxonomy,
@@ -117,6 +127,51 @@ const BIORXIV_CATEGORIES = new Set(CATEGORIES.biorxiv);
 const MEDRXIV_CATEGORIES = new Set(CATEGORIES.medrxiv);
 const ALL_CATEGORIES = new Set([...CATEGORIES.biorxiv, ...CATEGORIES.medrxiv]);
 
+/**
+ * The one status this service classifies itself rather than treating as a bug.
+ * Passing it to `fetchWithTimeout` only lowers the log severity from `error` to
+ * `debug`; the thrown error and its classification are unchanged.
+ */
+const EXPECTED_STATUSES = [429];
+
+/**
+ * Re-throws a failed api.biorxiv.org call, classifying HTTP 429 as its own
+ * retryable `rate_limited` condition. Everything else — 5xx, timeout, network
+ * error, the HTML-error guard below — re-throws untouched for the framework's
+ * auto-classifier.
+ *
+ * `fetchWithTimeout` attaches the upstream response body to `err.data`
+ * (`body`/`responseBody`), so the replacement payload is built from scratch
+ * rather than spread: only the parsed `Retry-After` crosses into it. Retry is
+ * not this function's concern — `withRetry` already honors `data.retryAfter`
+ * and fails fast when the requested wait exceeds its cap, so by the time a 429
+ * reaches here the waiting is over and only classification is left.
+ */
+function rethrowClassified(err: unknown): never {
+  const data =
+    err instanceof McpError
+      ? (err.data as { status?: unknown; retryAfter?: unknown } | undefined)
+      : undefined;
+  if (data?.status !== 429) throw err;
+
+  const retryAfter = parseRetryAfterSeconds(data.retryAfter);
+  const wait = describeWait(retryAfter);
+  throw rateLimited(
+    retryAfter === undefined
+      ? 'api.biorxiv.org is rate-limiting this host (HTTP 429).'
+      : `api.biorxiv.org is rate-limiting this host (HTTP 429) and asked for a ${retryAfter}-second wait before the next request.`,
+    {
+      reason: 'rate_limited',
+      retryable: true,
+      ...(retryAfter !== undefined && { retryAfter }),
+      recovery: {
+        hint: `Wait ${wait} before querying api.biorxiv.org again — every preprint metadata tool shares this origin, so they are all limited together.`,
+      },
+    },
+    { cause: err },
+  );
+}
+
 // ─── Normalization helpers ───────────────────────────────────────────────────
 
 function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
@@ -184,39 +239,47 @@ export class BiorxivApiService {
   /**
    * Fetch all revisions for a DOI from a single server.
    * Returns an empty collection if the DOI is not found on this server.
+   * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getDetails(doi: string, server: BiorxivServer, ctx: Context): Promise<PreprintRevision[]> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/details/${server}/${encodedDoi}/0/json`;
     const rc = asRc(ctx);
-    return await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(url, 15_000, rc, {
-          signal: ctx.signal,
-          headers: { 'User-Agent': this.userAgent },
-        });
-        const text = await response.text();
-        if (detectHtmlError(text)) {
-          throw serviceUnavailable('api.biorxiv.org returned HTML — likely rate-limited or down.', {
-            url,
+    try {
+      return await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, 15_000, rc, {
+            signal: ctx.signal,
+            headers: { 'User-Agent': this.userAgent },
+            expectedStatuses: EXPECTED_STATUSES,
           });
-        }
-        const data = JSON.parse(text) as RawDetailsResponse;
-        return (data.collection ?? []).map(normalizeRevision);
-      },
-      {
-        operation: 'BiorxivApiService.getDetails',
-        context: rc,
-        baseDelayMs: 500,
-        signal: ctx.signal,
-      },
-    );
+          const text = await response.text();
+          if (detectHtmlError(text)) {
+            throw serviceUnavailable(
+              'api.biorxiv.org returned HTML — likely rate-limited or down.',
+              { url },
+            );
+          }
+          const data = JSON.parse(text) as RawDetailsResponse;
+          return (data.collection ?? []).map(normalizeRevision);
+        },
+        {
+          operation: 'BiorxivApiService.getDetails',
+          context: rc,
+          baseDelayMs: 500,
+          signal: ctx.signal,
+        },
+      );
+    } catch (err) {
+      rethrowClassified(err);
+    }
   }
 
   /**
    * Fetch preprints posted or revised within a date interval from a single server.
    * `cursor` is an integer offset (0, 30, 60, …). Page size is always 30.
    * Returns listing result with pagination state.
+   * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getListing(
     server: BiorxivServer,
@@ -232,45 +295,52 @@ export class BiorxivApiService {
     }
 
     const rc = asRc(ctx);
-    return await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(url, 20_000, rc, {
-          signal: ctx.signal,
-          headers: { 'User-Agent': this.userAgent },
-        });
-        const text = await response.text();
-        if (detectHtmlError(text)) {
-          throw serviceUnavailable('api.biorxiv.org returned HTML — likely rate-limited or down.', {
-            url,
+    try {
+      return await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, 20_000, rc, {
+            signal: ctx.signal,
+            headers: { 'User-Agent': this.userAgent },
+            expectedStatuses: EXPECTED_STATUSES,
           });
-        }
-        const data = JSON.parse(text) as RawDetailsResponse;
-        const msg = data.messages?.[0];
-        const rawTotal = msg?.total;
-        const total =
-          typeof rawTotal === 'number'
-            ? rawTotal
-            : typeof rawTotal === 'string'
-              ? parseInt(rawTotal, 10) || 0
-              : 0;
-        const preprints = (data.collection ?? []).map(normalizeRevision);
-        return {
-          preprints,
-          pagination: { cursor, total },
-        };
-      },
-      {
-        operation: 'BiorxivApiService.getListing',
-        context: rc,
-        baseDelayMs: 500,
-        signal: ctx.signal,
-      },
-    );
+          const text = await response.text();
+          if (detectHtmlError(text)) {
+            throw serviceUnavailable(
+              'api.biorxiv.org returned HTML — likely rate-limited or down.',
+              { url },
+            );
+          }
+          const data = JSON.parse(text) as RawDetailsResponse;
+          const msg = data.messages?.[0];
+          const rawTotal = msg?.total;
+          const total =
+            typeof rawTotal === 'number'
+              ? rawTotal
+              : typeof rawTotal === 'string'
+                ? parseInt(rawTotal, 10) || 0
+                : 0;
+          const preprints = (data.collection ?? []).map(normalizeRevision);
+          return {
+            preprints,
+            pagination: { cursor, total },
+          };
+        },
+        {
+          operation: 'BiorxivApiService.getListing',
+          context: rc,
+          baseDelayMs: 500,
+          signal: ctx.signal,
+        },
+      );
+    } catch (err) {
+      rethrowClassified(err);
+    }
   }
 
   /**
    * Resolve a preprint DOI to its published journal record via /pubs endpoint.
    * Returns undefined when the preprint is not yet published.
+   * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getPublishedVersion(
     doi: string,
@@ -280,46 +350,52 @@ export class BiorxivApiService {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/pubs/${server}/${encodedDoi}/json`;
     const rc = asRc(ctx);
-    return await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(url, 15_000, rc, {
-          signal: ctx.signal,
-          headers: { 'User-Agent': this.userAgent },
-        });
-        const text = await response.text();
-        if (detectHtmlError(text)) {
-          throw serviceUnavailable('api.biorxiv.org returned HTML — likely rate-limited or down.', {
-            url,
+    try {
+      return await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, 15_000, rc, {
+            signal: ctx.signal,
+            headers: { 'User-Agent': this.userAgent },
+            expectedStatuses: EXPECTED_STATUSES,
           });
-        }
-        const data = JSON.parse(text) as RawPublishedResponse;
-        const record = data.collection?.[0];
-        if (!record?.preprint_doi) return;
-        const pv: PublishedVersion = { preprintDoi: record.preprint_doi };
-        if (record.published_doi) pv.publishedDoi = record.published_doi;
-        if (record.published_journal) pv.publishedJournal = record.published_journal;
-        if (record.published_date) pv.publishedDate = record.published_date;
-        const preprintTitle = normalizeUpstreamText(record.preprint_title);
-        if (preprintTitle) pv.preprintTitle = preprintTitle;
-        if (record.preprint_authors) pv.preprintAuthors = record.preprint_authors;
-        if (record.preprint_category) pv.preprintCategory = record.preprint_category;
-        if (record.preprint_date) pv.preprintDate = record.preprint_date;
-        const preprintAbstract = normalizeUpstreamText(record.preprint_abstract);
-        if (preprintAbstract) pv.preprintAbstract = preprintAbstract;
-        if (record.preprint_author_corresponding)
-          pv.preprintAuthorCorresponding = record.preprint_author_corresponding;
-        if (record.preprint_author_corresponding_institution)
-          pv.preprintAuthorCorrespondingInstitution =
-            record.preprint_author_corresponding_institution;
-        return pv;
-      },
-      {
-        operation: 'BiorxivApiService.getPublishedVersion',
-        context: rc,
-        baseDelayMs: 500,
-        signal: ctx.signal,
-      },
-    );
+          const text = await response.text();
+          if (detectHtmlError(text)) {
+            throw serviceUnavailable(
+              'api.biorxiv.org returned HTML — likely rate-limited or down.',
+              { url },
+            );
+          }
+          const data = JSON.parse(text) as RawPublishedResponse;
+          const record = data.collection?.[0];
+          if (!record?.preprint_doi) return;
+          const pv: PublishedVersion = { preprintDoi: record.preprint_doi };
+          if (record.published_doi) pv.publishedDoi = record.published_doi;
+          if (record.published_journal) pv.publishedJournal = record.published_journal;
+          if (record.published_date) pv.publishedDate = record.published_date;
+          const preprintTitle = normalizeUpstreamText(record.preprint_title);
+          if (preprintTitle) pv.preprintTitle = preprintTitle;
+          if (record.preprint_authors) pv.preprintAuthors = record.preprint_authors;
+          if (record.preprint_category) pv.preprintCategory = record.preprint_category;
+          if (record.preprint_date) pv.preprintDate = record.preprint_date;
+          const preprintAbstract = normalizeUpstreamText(record.preprint_abstract);
+          if (preprintAbstract) pv.preprintAbstract = preprintAbstract;
+          if (record.preprint_author_corresponding)
+            pv.preprintAuthorCorresponding = record.preprint_author_corresponding;
+          if (record.preprint_author_corresponding_institution)
+            pv.preprintAuthorCorrespondingInstitution =
+              record.preprint_author_corresponding_institution;
+          return pv;
+        },
+        {
+          operation: 'BiorxivApiService.getPublishedVersion',
+          context: rc,
+          baseDelayMs: 500,
+          signal: ctx.signal,
+        },
+      );
+    } catch (err) {
+      rethrowClassified(err);
+    }
   }
 }
 

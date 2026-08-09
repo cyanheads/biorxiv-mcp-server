@@ -5,6 +5,13 @@
  * explicit ("biorxiv" or "medrxiv"), enrichment routes to that server directly.
  * When server="both", the 10.1101/ prefix is used as a routing hint but is not
  * treated as definitive — both bioRxiv and medRxiv share this prefix.
+ *
+ * Enrichment carries every latest-revision field biorxiv_get_preprint exposes,
+ * so the same DOI does not describe less through search than through lookup.
+ * Every enrichment failure degrades to EuropePMC-only metadata rather than
+ * failing the search, including an origin rate limit (HTTP 429) — which gets
+ * its own enrichment_error value so a caller can tell a wait-and-retry from a
+ * generic upstream error without parsing prose.
  * @module mcp-server/tools/definitions/biorxiv-search-preprints.tool
  */
 
@@ -14,27 +21,40 @@ import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
-import { isValidCalendarDate } from '@/services/shared.js';
+import { findRateLimit, isValidCalendarDate } from '@/services/shared.js';
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+type EnrichmentError = 'service_error' | 'not_found' | 'rate_limited';
 
 type EnrichedPreprint = {
   doi: string;
   title?: string | undefined;
   authors?: string | undefined;
   authorCorresponding?: string | undefined;
+  authorCorrespondingInstitution?: string | undefined;
   date?: string | undefined;
   version?: string | undefined;
+  type?: string | undefined;
+  license?: string | undefined;
   category?: string | undefined;
   server?: string | undefined;
   jatsxmlUrl?: string | undefined;
+  funder?: string | undefined;
   publishedJournalDoi?: string | undefined;
   abstract?: string | undefined;
   enriched: boolean;
-  enrichment_error?: 'service_error' | 'not_found' | undefined;
+  enrichment_error?: EnrichmentError | undefined;
   revisionCount?: number | undefined;
+};
+
+const ENRICHMENT_ERROR_NOTES: Record<EnrichmentError, string> = {
+  service_error: 'bioRxiv enrichment failed (service error — retry may help).',
+  rate_limited:
+    'bioRxiv enrichment was rate-limited by api.biorxiv.org (HTTP 429) — wait and retry to enrich this record.',
+  not_found: 'DOI not indexed on target server — EuropePMC metadata shown.',
 };
 
 function formatResult(p: EnrichedPreprint): string {
@@ -45,11 +65,16 @@ function formatResult(p: EnrichedPreprint): string {
 
   if (p.enriched) {
     if (p.server) lines.push(`**Server:** ${p.server}`);
+    if (p.type) lines.push(`**Type:** ${p.type}`);
     if (p.category) lines.push(`**Category:** ${p.category}`);
+    if (p.license) lines.push(`**License:** ${p.license}`);
     if (p.date) lines.push(`**Date:** ${p.date}`);
     if (p.version) lines.push(`**Version:** ${p.version}`);
     if (p.authors) lines.push(`**Authors:** ${p.authors}`);
     if (p.authorCorresponding) lines.push(`**Corresponding:** ${p.authorCorresponding}`);
+    if (p.authorCorrespondingInstitution)
+      lines.push(`**Institution:** ${p.authorCorrespondingInstitution}`);
+    if (p.funder) lines.push(`**Funder:** ${p.funder}`);
     if (p.publishedJournalDoi) lines.push(`**Published DOI:** ${p.publishedJournalDoi}`);
     if (p.jatsxmlUrl) lines.push(`**JATS XML:** ${p.jatsxmlUrl}`);
     if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
@@ -60,11 +85,7 @@ function formatResult(p: EnrichedPreprint): string {
     if (p.authors) lines.push(`**Authors:** ${p.authors}`);
     if (p.date) lines.push(`**Date:** ${p.date}`);
     if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
-    const reason =
-      p.enrichment_error === 'service_error'
-        ? 'bioRxiv enrichment failed (service error — retry may help).'
-        : 'DOI not indexed on target server — EuropePMC metadata shown.';
-    lines.push(`\n*${reason}*`);
+    lines.push(`\n*${ENRICHMENT_ERROR_NOTES[p.enrichment_error ?? 'not_found']}*`);
   }
 
   return lines.join('\n');
@@ -126,11 +147,18 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
             title: z.string().optional().describe('Preprint title.'),
             authors: z.string().optional().describe('Author list.'),
             authorCorresponding: z.string().optional().describe('Corresponding author.'),
+            authorCorrespondingInstitution: z
+              .string()
+              .optional()
+              .describe('Corresponding author institution.'),
             date: z.string().optional().describe('Posting or revision date.'),
             version: z.string().optional().describe('Latest revision version.'),
+            type: z.string().optional().describe('Preprint type.'),
+            license: z.string().optional().describe('License identifier.'),
             category: z.string().optional().describe('Subject category.'),
             server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
             jatsxmlUrl: z.string().optional().describe('URL to the JATS XML full-text.'),
+            funder: z.string().optional().describe('Funder information.'),
             publishedJournalDoi: z
               .string()
               .optional()
@@ -142,10 +170,10 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
                 'True when full bioRxiv metadata was available; false for EuropePMC-only fallback.',
               ),
             enrichment_error: z
-              .enum(['service_error', 'not_found'])
+              .enum(['service_error', 'not_found', 'rate_limited'])
               .optional()
               .describe(
-                'Reason enrichment was unavailable: "service_error" (transient — retry may help) or "not_found" (DOI not indexed on target server — EuropePMC fallback is authoritative). Only present when enriched is false.',
+                'Reason enrichment was unavailable: "service_error" (transient — retry may help), "rate_limited" (api.biorxiv.org returned HTTP 429 — wait before retrying, and expect the other preprint metadata tools to be limited too), or "not_found" (DOI not indexed on target server — EuropePMC fallback is authoritative). Only present when enriched is false.',
               ),
             revisionCount: z
               .number()
@@ -359,8 +387,10 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
         // Determine which server(s) to enrich against
         let revisions: PreprintRevision[] = [];
-        let enrichmentFailed = false;
-        let enrichmentErrorReason: 'service_error' | 'not_found' | undefined;
+        // Every rejection from whichever enrichment path ran. A DOI that came back
+        // empty from one server while the other never answered is not "not indexed"
+        // — that is an absence neither server established.
+        const rejections: unknown[] = [];
 
         try {
           if (input.server === 'biorxiv') {
@@ -383,20 +413,27 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
                 biorxiv.getDetails(doi, 'medrxiv', ctx),
               ]);
               if (bxR.status === 'fulfilled') revisions.push(...bxR.value);
+              else rejections.push(bxR.reason);
               if (mxR.status === 'fulfilled') revisions.push(...mxR.value);
-              if (bxR.status === 'rejected' && mxR.status === 'rejected') {
-                enrichmentErrorReason = 'service_error';
-              }
+              else rejections.push(mxR.reason);
             }
           }
-        } catch {
-          enrichmentFailed = true;
-          enrichmentErrorReason = 'service_error';
+        } catch (err) {
+          rejections.push(err);
         }
 
         const latest = revisions.at(-1);
-        if (enrichmentFailed || !latest) {
+        if (!latest) {
           hasPartial = true;
+          // A rate limit still degrades to EuropePMC metadata like every other
+          // enrichment failure — it is only labelled apart, so the caller knows a
+          // wait (not a different query) is what makes the retry succeed.
+          const enrichmentError: EnrichmentError =
+            rejections.length === 0
+              ? 'not_found'
+              : findRateLimit(rejections)
+                ? 'rate_limited'
+                : 'service_error';
           return {
             doi,
             ...(epResult.title && { title: epResult.title }),
@@ -404,7 +441,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
             ...(epResult.publishedDate && { date: epResult.publishedDate }),
             ...(epResult.abstract && { abstract: epResult.abstract }),
             enriched: false,
-            enrichment_error: enrichmentErrorReason ?? 'not_found',
+            enrichment_error: enrichmentError,
           };
         }
         return {
@@ -412,11 +449,17 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           ...(latest.title && { title: latest.title }),
           ...(latest.authors && { authors: latest.authors }),
           ...(latest.authorCorresponding && { authorCorresponding: latest.authorCorresponding }),
+          ...(latest.authorCorrespondingInstitution && {
+            authorCorrespondingInstitution: latest.authorCorrespondingInstitution,
+          }),
           ...(latest.date && { date: latest.date }),
           ...(latest.version && { version: latest.version }),
+          ...(latest.type && { type: latest.type }),
+          ...(latest.license && { license: latest.license }),
           ...(latest.category && { category: latest.category }),
           ...(latest.server && { server: latest.server }),
           ...(latest.jatsxmlUrl && { jatsxmlUrl: latest.jatsxmlUrl }),
+          ...(latest.funder && { funder: latest.funder }),
           ...(latest.publishedJournalDoi && { publishedJournalDoi: latest.publishedJournalDoi }),
           ...(latest.abstract && { abstract: latest.abstract }),
           enriched: true,

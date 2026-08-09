@@ -1,12 +1,21 @@
 /**
  * @fileoverview Tests for shared service utilities — detectHtmlError,
- * SERVER_VERSION, and normalizeUpstreamText.
+ * SERVER_VERSION, normalizeUpstreamText, parseRetryAfterSeconds, and
+ * findRateLimit.
  * @module tests/services/shared.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
-import { detectHtmlError, normalizeUpstreamText, SERVER_VERSION } from '@/services/shared.js';
+import {
+  detectHtmlError,
+  findRateLimit,
+  normalizeUpstreamText,
+  parseRetryAfterSeconds,
+  SERVER_VERSION,
+} from '@/services/shared.js';
 import packageJson from '../../package.json' with { type: 'json' };
+import { rateLimitError } from '../helpers/rate-limit.js';
 
 describe('detectHtmlError', () => {
   // ── True cases ──────────────────────────────────────────────────────────────
@@ -130,5 +139,65 @@ describe('normalizeUpstreamText', () => {
   it('returns undefined when input reduces to nothing after stripping', () => {
     expect(normalizeUpstreamText('   ')).toBeUndefined();
     expect(normalizeUpstreamText('O_FIG SRC="x.gif" C_FIG')).toBeUndefined();
+  });
+});
+
+describe('parseRetryAfterSeconds', () => {
+  it('reads the RFC 9110 delta-seconds form as a whole-second wait', () => {
+    expect(parseRetryAfterSeconds('94')).toBe(94);
+    expect(parseRetryAfterSeconds('  30  ')).toBe(30);
+    expect(parseRetryAfterSeconds('0')).toBe(0);
+  });
+
+  it('converts the RFC 9110 HTTP-date form to a wait from now', () => {
+    const twoMinutesOut = new Date(Date.now() + 120_000).toUTCString();
+    const seconds = parseRetryAfterSeconds(twoMinutesOut);
+    expect(seconds).toBeGreaterThan(110);
+    expect(seconds).toBeLessThanOrEqual(120);
+  });
+
+  it('clamps an HTTP-date already in the past to zero rather than a negative wait', () => {
+    const past = new Date(Date.now() - 60_000).toUTCString();
+    expect(parseRetryAfterSeconds(past)).toBe(0);
+  });
+
+  it('returns undefined for an unparseable or absent value so callers word it generically', () => {
+    expect(parseRetryAfterSeconds('soon')).toBeUndefined();
+    expect(parseRetryAfterSeconds(undefined)).toBeUndefined();
+    expect(parseRetryAfterSeconds(94)).toBeUndefined();
+  });
+});
+
+describe('findRateLimit', () => {
+  it('returns the wait when a rejection was classified as a rate limit', () => {
+    expect(findRateLimit([rateLimitError(30)])).toEqual({ retryAfter: 30 });
+  });
+
+  it('returns an empty object when the rate limit carried no usable Retry-After', () => {
+    expect(findRateLimit([rateLimitError()])).toEqual({});
+  });
+
+  it('takes the longest wait so a retry does not land inside the other origin limit', () => {
+    expect(findRateLimit([rateLimitError(15), rateLimitError(90)])).toEqual({ retryAfter: 90 });
+  });
+
+  it('finds a rate limit mixed in with unrelated failures', () => {
+    expect(findRateLimit([new Error('ECONNREFUSED'), rateLimitError(45)])).toEqual({
+      retryAfter: 45,
+    });
+  });
+
+  it('returns undefined when no rejection was a rate limit', () => {
+    const other = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'down', {
+      reason: 'upstream_unavailable',
+    });
+    expect(findRateLimit([new Error('network error'), other])).toBeUndefined();
+    expect(findRateLimit([])).toBeUndefined();
+  });
+
+  it('ignores a bare RateLimited error that this server did not classify itself', () => {
+    // No `reason` marker — the framework's own status mapping, not our contract.
+    const bare = new McpError(JsonRpcErrorCode.RateLimited, 'Status: 429', { status: 429 });
+    expect(findRateLimit([bare])).toBeUndefined();
   });
 });

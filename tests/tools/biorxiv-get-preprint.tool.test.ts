@@ -8,6 +8,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
+import { rateLimitError } from '../helpers/rate-limit.js';
 
 const mockGetDetails = vi.fn();
 
@@ -292,6 +293,105 @@ describe('biorxivGetPreprintTool', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'upstream_unavailable', retryable: true },
     });
+  });
+
+  // ── Rate limiting ───────────────────────────────────────────────────────────
+
+  it('marks a rate-limited DOI rate_limited in failed[] and carries the wait, keeping the batch alive', async () => {
+    mockGetDetails.mockImplementation((doi: string) =>
+      doi === '10.1101/2024.01.15.575123'
+        ? Promise.resolve([REVISION])
+        : Promise.reject(rateLimitError(30)),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.01.01.000001'],
+      server: 'biorxiv',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+
+    expect(result.preprints).toHaveLength(1);
+    expect(result.failed[0]).toMatchObject({
+      doi: '10.1101/2024.01.01.000001',
+      reason: 'rate_limited',
+      retryable: true,
+      retryAfter: 30,
+    });
+
+    // The wait has to reach content[] too — a format()-only client would
+    // otherwise see a retryable failure with no interval attached to it.
+    const text = (biorxivGetPreprintTool.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('rate_limited, retryable: true, retry after: 30s');
+  });
+
+  it('leaves a generic upstream failure classified upstream_unavailable with no wait', async () => {
+    mockGetDetails.mockImplementation((doi: string) =>
+      doi === '10.1101/2024.01.15.575123'
+        ? Promise.resolve([REVISION])
+        : Promise.reject(new Error('ECONNREFUSED')),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.15.575123', '10.1101/2024.01.01.000001'],
+      server: 'biorxiv',
+    });
+    const result = await biorxivGetPreprintTool.handler(input, ctx);
+    expect(result.failed[0]?.reason).toBe('upstream_unavailable');
+    expect(result.failed[0]?.retryAfter).toBeUndefined();
+  });
+
+  it('throws retryable rate_limited when every DOI was rate-limited', async () => {
+    mockGetDetails.mockRejectedValue(rateLimitError(30));
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001'],
+      server: 'both',
+    });
+    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 30 },
+    });
+    expect(err.data.recovery.hint).toContain('30 seconds');
+    expect(err.data.recovery.hint).toContain('api.biorxiv.org');
+  });
+
+  it('prefers rate_limited over upstream_unavailable when the batch mixes the two', async () => {
+    // Both say "retry"; only the rate limit says when, and retrying sooner would
+    // land straight back inside the origin's limit.
+    mockGetDetails.mockImplementation((doi: string) =>
+      doi === '10.1101/2024.01.01.000001'
+        ? Promise.reject(rateLimitError(45))
+        : Promise.reject(new Error('ECONNREFUSED')),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001', '10.1101/2024.02.02.000002'],
+      server: 'biorxiv',
+    });
+    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: 45 },
+    });
+    // Both failures still reach the message, so the outage is not hidden
+    expect(err.message).toContain('ECONNREFUSED');
+    expect(err.message).toContain('rate-limiting');
+  });
+
+  it('omits retryAfter when the rate limit carried no usable Retry-After', async () => {
+    mockGetDetails.mockRejectedValue(rateLimitError());
+    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+    const input = biorxivGetPreprintTool.input.parse({
+      dois: ['10.1101/2024.01.01.000001'],
+      server: 'biorxiv',
+    });
+    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(err.data.retryAfter).toBeUndefined();
+    expect(err.data.recovery.hint).toContain('a minute or two');
   });
 
   // ── Edge cases ──────────────────────────────────────────────────────────────

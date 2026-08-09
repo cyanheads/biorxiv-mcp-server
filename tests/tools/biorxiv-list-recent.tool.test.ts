@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-list-recent.tool.js';
 import type { ListingResult, PreprintRevision } from '@/services/biorxiv/types.js';
+import { rateLimitError } from '../helpers/rate-limit.js';
 
 const mockGetListing = vi.fn();
 const mockIsValidCategory = vi.fn();
@@ -427,9 +428,12 @@ describe('biorxivListRecentTool', () => {
     expect(notice).toMatch(/No preprints found/);
   });
 
-  it('does not report an empty interval when neither server answered', async () => {
+  it('throws retryable upstream_unavailable when neither server answered, not an empty success', async () => {
+    // An empty page here would be indistinguishable from an interval that holds
+    // nothing, for a caller that branches on success-vs-error rather than prose.
+    const bxDown = new Error('biorxiv down');
     mockGetListing.mockImplementation((server: string) =>
-      Promise.reject(new Error(`${server} down`)),
+      Promise.reject(server === 'biorxiv' ? bxDown : new Error('medrxiv down')),
     );
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
     const input = biorxivListRecentTool.input.parse({
@@ -437,17 +441,70 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-31',
       server: 'both',
     });
-    const result = await biorxivListRecentTool.handler(input, ctx);
+    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
 
-    expect(result.preprints).toHaveLength(0);
-    expect(result.failed).toEqual([
-      { server: 'biorxiv', error: 'biorxiv down' },
-      { server: 'medrxiv', error: 'medrxiv down' },
-    ]);
-    // No server reported anything, so absence was never established
-    const notice = getEnrichment(ctx).notice;
-    expect(notice).toMatch(/not an empty interval/);
-    expect(notice).not.toMatch(/No preprints found/);
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true, servers: ['biorxiv', 'medrxiv'] },
+    });
+    // Both underlying failures reach the message, and the first is kept as cause
+    expect(err.message).toContain('biorxiv down');
+    expect(err.message).toContain('medrxiv down');
+    expect(err.cause).toBe(bxDown);
+    expect(err.data.recovery.hint).toMatch(/retry/i);
+    // The empty-interval guidance must not ride along on the failure
+    expect(JSON.stringify(err.data)).not.toMatch(/No preprints found/);
+  });
+
+  it('throws rate_limited instead of upstream_unavailable when one of the two failures is a 429', async () => {
+    // Both mean "retry", but only the rate limit says when — and retrying sooner
+    // than the origin asked would land straight back inside the same limit.
+    mockGetListing.mockImplementation((server: string) =>
+      Promise.reject(server === 'biorxiv' ? rateLimitError(45) : new Error('medrxiv down')),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 45 },
+    });
+    expect(err.data.recovery.hint).toContain('45 seconds');
+  });
+
+  it('carries the longer of two 429 waits so the retry clears both origins', async () => {
+    mockGetListing.mockImplementation((server: string) =>
+      Promise.reject(rateLimitError(server === 'biorxiv' ? 15 : 90)),
+    );
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'both',
+    });
+    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.retryAfter).toBe(90);
+  });
+
+  it('surfaces a single-server 429 as a retryable rate_limited tool error', async () => {
+    mockGetListing.mockRejectedValue(rateLimitError(30));
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+    });
+    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 30 },
+    });
   });
 
   // ── Category routing for server="both" ──────────────────────────────────────

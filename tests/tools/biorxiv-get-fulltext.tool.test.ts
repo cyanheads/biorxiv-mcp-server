@@ -10,6 +10,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import type { FullTextFetchResult } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
+import { rateLimitError } from '../helpers/rate-limit.js';
 
 const mockGetDetails = vi.fn();
 const mockFetchFullText = vi.fn();
@@ -251,6 +252,91 @@ describe('biorxivGetFulltextTool', () => {
     expect((err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint).toContain(
       'biorxiv_get_preprint',
     );
+  });
+
+  it('throws rate_limited when the metadata origin rate-limits version resolution', async () => {
+    const upstream = rateLimitError(30);
+    mockGetDetails.mockRejectedValue(upstream);
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'rate_limited',
+        retryable: true,
+        retryAfter: 30,
+        servers: ['biorxiv', 'medrxiv'],
+      },
+    });
+    expect(err.cause).toBe(upstream);
+    expect(mockFetchFullText).not.toHaveBeenCalled();
+  });
+
+  it('names api.biorxiv.org in the resolution rate-limit hint and withholds the metadata fallback', async () => {
+    // biorxiv_get_preprint queries the same origin, so recommending it here — as
+    // the article-page rate limit does — would send the caller into the limit.
+    mockGetDetails.mockRejectedValue(rateLimitError(30));
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    expect(hint).toContain('30 seconds');
+    expect(hint).toContain('api.biorxiv.org');
+    expect(hint).toMatch(/same origin/i);
+    expect(hint).not.toContain('article-page');
+  });
+
+  it('names the article-page origin in the full-text rate-limit hint and keeps the metadata fallback', async () => {
+    mockFetchFullText.mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'rate_limited',
+      detail: 'The full-text origin is rate-limiting this host (HTTP 429).',
+      retryAfter: 94,
+      sourceUrl: SOURCE_URL,
+    } satisfies FullTextFetchResult);
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    expect(hint).toContain('94 seconds');
+    expect(hint).toContain('article-page origin');
+    expect(hint).toContain('biorxiv_get_preprint');
+    // Same reason, two origins — the payloads stay structurally distinguishable
+    expect((err as { data: Record<string, unknown> }).data.sourceUrl).toBe(SOURCE_URL);
+    expect((err as { data: Record<string, unknown> }).data.servers).toBeUndefined();
+  });
+
+  it('withholds the metadata fallback when the surviving server masked a resolution 429', async () => {
+    // One server answering resolution does not mean api.biorxiv.org let the other
+    // one through. Recommending biorxiv_get_preprint here would send the caller
+    // straight back into the metadata origin's limit.
+    mockGetDetails.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv'
+        ? Promise.reject(rateLimitError(45))
+        : Promise.resolve([{ doi: DOI, version: '2', server: 'medrxiv' }]),
+    );
+    mockFetchFullText.mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'rate_limited',
+      detail: 'The full-text origin is rate-limiting this host (HTTP 429).',
+      retryAfter: 20,
+      sourceUrl: SOURCE_URL,
+    } satisfies FullTextFetchResult);
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI, server: 'both' });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    // A retry re-runs resolution, so the wait has to clear the longer of the two.
+    expect((err as { data: { retryAfter?: number } }).data.retryAfter).toBe(45);
+    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    expect(hint).toContain('45 seconds');
+    expect(hint).toContain('api.biorxiv.org');
+    expect(hint).toMatch(/not answer sooner/i);
+    expect(hint).not.toMatch(/unaffected|still serves/i);
   });
 
   it('throws fulltext_unavailable when the page is blocked or PDF-only', async () => {

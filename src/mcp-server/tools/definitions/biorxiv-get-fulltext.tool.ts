@@ -12,6 +12,17 @@
  * PDF-only or whose page is blocked return a typed `fulltext_unavailable` error
  * routing to biorxiv_get_preprint, while an origin rate limit (HTTP 429) routes to
  * a retryable `rate_limited` error carrying the origin's Retry-After wait.
+ *
+ * This tool touches two origins that can each rate-limit independently — the
+ * article-page host during the full-text fetch, and api.biorxiv.org during
+ * version resolution — and both raise the single `rate_limited` reason. A
+ * caller's move is the same either way (wait the stated interval, then retry),
+ * so a second reason would only add a branch with no distinct action behind it;
+ * what does differ is the fallback advice, since biorxiv_get_preprint shares the
+ * metadata origin and is therefore useless while that one is the limited one.
+ * The recovery hint names the limiting origins — either, or both, since one
+ * server answering resolution does not establish that the metadata origin let
+ * the other one through — and adapts the fallback to them.
  * @module mcp-server/tools/definitions/biorxiv-get-fulltext.tool
  */
 
@@ -20,6 +31,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import { getBiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
+import { describeWait, findRateLimit } from '@/services/shared.js';
 
 const DOI_REGEX = /^10\.\d{4,}\//;
 
@@ -152,9 +164,9 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
-      when: 'The full-text origin (www.biorxiv.org / www.medrxiv.org) returned HTTP 429 for this host.',
+      when: 'Either origin returned HTTP 429 for this host — the article page (www.biorxiv.org / www.medrxiv.org) during the full-text fetch, or api.biorxiv.org during version resolution.',
       recovery:
-        'Wait the retryAfter seconds before calling again, and use biorxiv_get_preprint for the title, abstract, and metadata in the meantime.',
+        'Wait the retryAfter seconds before calling again; the recovery hint names which origins are limiting and what still works meanwhile.',
     },
     {
       reason: 'fulltext_unavailable',
@@ -219,6 +231,26 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
             (f) => `${f.server}: ${f.error instanceof Error ? f.error.message : String(f.error)}`,
           )
           .join('; ');
+        // The metadata origin rate-limiting resolution is the one case where the
+        // usual "fall back to biorxiv_get_preprint" advice is wrong — that tool
+        // queries this same origin — so the hint names the origin and says so.
+        const rateLimit = findRateLimit(rejections.map((f) => f.error));
+        if (rateLimit) {
+          const wait = describeWait(rateLimit.retryAfter);
+          throw ctx.fail(
+            'rate_limited',
+            `Version lookup for ${input.doi} failed — ${detail}`,
+            {
+              doi: input.doi,
+              servers: rejections.map((f) => f.server),
+              ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
+              recovery: {
+                hint: `Wait ${wait} before retrying — api.biorxiv.org is rate-limiting this host, and biorxiv_get_preprint queries the same origin, so it will not answer sooner either.`,
+              },
+            },
+            { cause: rejections[0]?.error },
+          );
+        }
         throw ctx.fail(
           'upstream_unavailable',
           `Version lookup for ${input.doi} failed — ${detail}`,
@@ -243,16 +275,32 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       if (result.reason === 'rate_limited') {
         // Dynamic recovery — the origin's own wait is more actionable than the
         // contract's static hint. The block-page HTML never leaves the service.
-        const wait =
-          result.retryAfter === undefined ? 'a minute or two' : `${result.retryAfter} seconds`;
+        //
+        // A server that answered resolution can mask a 429 the other one got from
+        // the same metadata origin, so whether api.biorxiv.org is still serving is
+        // read off the resolution rejections rather than assumed from the fact
+        // that resolution succeeded. Pointing the caller at biorxiv_get_preprint
+        // while that origin is limiting too sends them back into the limit, and a
+        // retry re-runs resolution, so the wait must clear whichever origin asked
+        // for the longer one.
+        const metadataLimit = findRateLimit(
+          settled.flatMap((r) => (r.status === 'rejected' ? [r.reason] : [])),
+        );
+        const waits = [result.retryAfter, metadataLimit?.retryAfter].filter(
+          (n): n is number => n !== undefined,
+        );
+        const retryAfter = waits.length > 0 ? Math.max(...waits) : undefined;
+        const wait = describeWait(retryAfter);
         throw ctx.fail('rate_limited', result.detail, {
           doi: input.doi,
           server,
           version,
           sourceUrl: result.sourceUrl,
-          ...(result.retryAfter !== undefined && { retryAfter: result.retryAfter }),
+          ...(retryAfter !== undefined && { retryAfter }),
           recovery: {
-            hint: `Wait ${wait} before calling biorxiv_get_fulltext again for this origin, and use biorxiv_get_preprint for the title, abstract, and metadata in the meantime.`,
+            hint: metadataLimit
+              ? `Wait ${wait} before calling biorxiv_get_fulltext again — the ${server} article-page origin and api.biorxiv.org are both rate-limiting this host, so biorxiv_get_preprint will not answer sooner either.`
+              : `Wait ${wait} before calling biorxiv_get_fulltext again — the ${server} article-page origin is rate-limiting this host. api.biorxiv.org answered this call, so biorxiv_get_preprint still serves the title, abstract, and metadata meanwhile.`,
           },
         });
       }

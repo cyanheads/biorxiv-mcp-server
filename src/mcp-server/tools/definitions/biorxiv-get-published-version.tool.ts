@@ -6,7 +6,10 @@
  * bioRxiv and medRxiv share the 10.1101/ DOI prefix, so the DOI alone does not
  * identify the server: the default server="both" resolves against both in
  * parallel and the output names the server that answered. Not-found is reported
- * only when every attempted server answered with an empty collection.
+ * only when every attempted server answered with an empty collection. A lookup
+ * the origin rate-limited (HTTP 429) raises a retryable `rate_limited` error
+ * carrying the origin's Retry-After wait rather than the generic
+ * upstream-unavailable one, which carries no wait at all.
  * @module mcp-server/tools/definitions/biorxiv-get-published-version.tool
  */
 
@@ -14,6 +17,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
+import { describeWait, findRateLimit } from '@/services/shared.js';
 
 const DOI_REGEX = /^10\.\d{4,}\//;
 
@@ -80,6 +84,14 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       recovery:
         'Retry the request after a short delay — a published version may well exist; api.biorxiv.org did not answer.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      retryable: true,
+      when: 'No attempted server returned a record and at least one lookup was rejected with HTTP 429 by api.biorxiv.org.',
+      recovery:
+        'Wait the retryAfter seconds before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -117,6 +129,25 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       const detail = rejections
         .map((f) => `${f.server}: ${f.error instanceof Error ? f.error.message : String(f.error)}`)
         .join('; ');
+      // A rate limit outranks a generic upstream failure: both say "retry", but
+      // only one says when, and retrying sooner would land inside the same limit.
+      const rateLimit = findRateLimit(rejections.map((f) => f.error));
+      if (rateLimit) {
+        const wait = describeWait(rateLimit.retryAfter);
+        throw ctx.fail(
+          'rate_limited',
+          `Crosswalk lookup for ${input.doi} failed — ${detail}`,
+          {
+            doi: input.doi,
+            servers: rejections.map((f) => f.server),
+            ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
+            recovery: {
+              hint: `Wait ${wait} before retrying — api.biorxiv.org is rate-limiting this host, and every preprint metadata tool queries the same origin.`,
+            },
+          },
+          { cause: rejections[0]?.error },
+        );
+      }
       throw ctx.fail(
         'upstream_unavailable',
         `Crosswalk lookup for ${input.doi} failed — ${detail}`,
