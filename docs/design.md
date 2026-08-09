@@ -9,7 +9,7 @@
 | `biorxiv_get_preprint` | Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI call returns all revisions in a single response; includes the published journal DOI and journal name when the preprint has been accepted. | `dois: string[]` (1–10, DOI format `10.1101/YYYY.MM.DD.NNNNNN`); `server?: "biorxiv" \| "medrxiv" \| "both"` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
 | `biorxiv_list_recent` | List preprints posted or updated within a date interval, optionally scoped to one server or subject category. Returns 30 preprints per page (fixed by the API); use `cursor` to step through additional pages. Response includes `total` count for calculating remaining pages. | `start_date: string` (YYYY-MM-DD); `end_date: string`; `server?: "biorxiv" \| "medrxiv" \| "both"`; `category?: string` (server-side filter); `cursor?: number` (integer offset, default 0) | `readOnlyHint: true`, `openWorldHint: true` |
 | `biorxiv_search_preprints` | Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Covers both servers by default. Surfaces preprints that may not yet have a PubMed record. EuropePMC indexes new preprints within 1–2 days of posting. | `query?: string`; `author?: string` (at least one of `query`/`author`; author maps to an EuropePMC `AUTH:` clause); `server?: "biorxiv" \| "medrxiv" \| "both"`; `date_from?: string` (YYYY-MM-DD); `date_to?: string`; `limit?: number` | `readOnlyHint: true`, `openWorldHint: true` |
-| `biorxiv_get_published_version` | Resolve a preprint DOI to its full journal publication record (journal DOI, journal name, published date), or confirm a preprint is not yet published. Use when the preprint's `published` field is non-null and you need richer crosswalk metadata than `biorxiv_get_preprint` provides. | `doi: string`; `server?: "biorxiv" \| "medrxiv"` (defaults to `biorxiv`) | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
+| `biorxiv_get_published_version` | Resolve a preprint DOI to its full journal publication record (journal DOI, journal name, published date), or confirm a preprint is not yet published. Use when the preprint's `publishedJournalDoi` field is present and you need richer crosswalk metadata than `biorxiv_get_preprint` provides. Both servers share the `10.1101/` prefix, so `"both"` fans out across them and the output `server` field names the one that answered. | `doi: string`; `server?: "biorxiv" \| "medrxiv" \| "both"` (defaults to `both`) | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
 | `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown, extracted from its rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`). Resolves the latest version via the details API, then fetches and extracts the body via the framework HTML extractor. Long articles page via offset/limit character chunking. HTML→Markdown, not JATS — section structure is approximate. PDF-only preprints or blocked pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`. | `doi: string`; `server?: "biorxiv" \| "medrxiv"` (defaults to `biorxiv`); `offset?: number` (default 0); `limit?: number` (max 50000, default 20000) | `readOnlyHint: true`, `openWorldHint: true` |
 | `biorxiv_list_categories` | List valid subject category strings for bioRxiv and medRxiv, usable as the `category` filter in `biorxiv_list_recent`. Returns the static taxonomy for both servers. | _(none)_ | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` |
 
@@ -93,7 +93,7 @@ Pairs naturally with **pubmed-mcp-server** (post-publication side), **openalex-m
 4. **`biorxiv_list_categories`** — trivial static-data tool; validates service wiring without a live call
 5. **`biorxiv_list_recent`** — date-range listing; exercises BiorxivApiService pagination
 6. **`biorxiv_get_preprint`** — batch DOI lookup; exercises revision and details endpoints
-7. **`biorxiv_get_published_version`** — crosswalk endpoint; single-call tool
+7. **`biorxiv_get_published_version`** — crosswalk endpoint; fans out across both servers by default
 8. **`biorxiv_search_preprints`** — fan-out: EuropePMC search → DOI list → BiorxivApiService enrichment
 
 Each step is independently testable against the live API.
@@ -113,6 +113,10 @@ Each step is independently testable against the live API.
 The bioRxiv API uses `{server}` as either `biorxiv` or `medrxiv`; no multi-server single call exists. Fan-out to both servers happens in the service layer via `Promise.all`, results merged and deduplicated by DOI.
 
 **`biorxiv_list_recent` pagination with `server="both"`:** when fanning out across both servers, each server has its own independent `total` and `cursor`. The response must surface per-server pagination state (e.g., `{ biorxiv: { cursor: 30, total: 550 }, medrxiv: { cursor: 30, total: 210 } }`) so callers know how to advance each server's cursor independently. A single merged `cursor` number is ambiguous and wrong here.
+
+Because the two servers hold different result counts for the same interval, one cursor can be valid for one server and past the end for the other. The API answers an out-of-range cursor with an empty collection and `total: 0`, which would otherwise read as "this server has nothing in the interval". Each per-server entry therefore carries an `exhausted` flag (`true` when zero records came back at a non-zero cursor); `total` stays present and required, and a `notice` names the exhausted server when the other still returned records.
+
+A server that never answered is the other half of that problem and is kept distinct from it. It has no cursor and no total, so it gets no `pagination` entry at all — and an omitted entry is invisible, leaving a partial result indistinguishable from a complete one. It is therefore reported in a top-level `failed[]` (`{ server, error }`), rendered as its own line in the per-server summary, and named in the `notice`. `exhausted` stays reserved for a server that answered; `failed[]` for one that did not. The call still returns the surviving server's page — a partial result beats none, provided the caller is told it is partial. Because `ctx.enrich.notice` is last-wins, every qualification that applies (failed servers, exhausted cursors, zero results) is composed into a single notice string with the partial-result sentence first, since it changes how every other number in the response reads. The zero-results guidance is withheld when no server answered at all: "nothing found here" is a claim about what the servers reported, and none of them reported.
 
 ---
 
@@ -140,18 +144,22 @@ Steps 2a/2b run in parallel via `Promise.allSettled`; enrichment failures degrad
 
 When `server="both"`, each DOI generates two calls (biorxiv + medrxiv) run in parallel via `Promise.allSettled`. When `server` is specified, one call per DOI. Partial success reported per-DOI in `failed[]`. Note: if a DOI exists only on bioRxiv, the medrxiv call returns an empty collection (not an error) — this is not a failure.
 
+"Not found" is a claim about what the servers reported, so it requires every attempted server to have answered. A DOI whose lookup failed on any server it needed is classified `upstream_unavailable` (retryable), not `not_found` — on the per-DOI `failed[]` entry and, when nothing in the batch resolved, on the thrown error. The same rule governs the single-server path, where one failed call leaves absence equally unestablished.
+
 ---
 
 ## Error Contracts
 
 | Tool | Reason | Code | When | Retryable? |
 |:-----|:-------|:-----|:-----|:-----------|
-| `biorxiv_get_preprint` | `doi_not_found` | `NotFound` | DOI resolves to empty collection on all requested servers | No — verify DOI format (must be `10.1101/…`) |
+| `biorxiv_get_preprint` | `doi_not_found` | `NotFound` | Every requested DOI resolves to an empty collection and every requested server answered | No — verify DOI format (must be `10.1101/…`) |
 | `biorxiv_get_preprint` | `invalid_doi_format` | `InvalidParams` | Input DOI does not match `10.\d{4}/` pattern | No — fix and retry |
+| `biorxiv_get_preprint` | `upstream_unavailable` | `ServiceUnavailable` | No DOI resolved and at least one lookup failed, so absence was never established | Yes — retry after a delay |
 | `biorxiv_list_recent` | `invalid_date_range` | `InvalidParams` | `end_date` is before `start_date`, or either date is malformed | No — fix and retry |
 | `biorxiv_list_recent` | `invalid_category` | `InvalidParams` | Category string not in taxonomy (server returns empty with no error) | No — use `biorxiv_list_categories` to get valid values |
 | `biorxiv_search_preprints` | `search_unavailable` | `ServiceUnavailable` | EuropePMC search endpoint is unreachable or returns 5xx | Yes — retry after delay |
-| `biorxiv_get_published_version` | `doi_not_found` | `NotFound` | Crosswalk endpoint returns empty collection — preprint may not be published yet | No — check `published` field in `biorxiv_get_preprint` first |
+| `biorxiv_get_published_version` | `doi_not_found` | `NotFound` | Crosswalk endpoint returns an empty collection on every attempted server | No — retry with `server="both"` if scoped to one, or check `publishedJournalDoi` in `biorxiv_get_preprint` |
+| `biorxiv_get_published_version` | `upstream_unavailable` | `ServiceUnavailable` | No attempted server returned a record and at least one lookup failed | Yes — retry after a delay |
 | `biorxiv_get_fulltext` | `invalid_doi_format` | `ValidationError` | Input DOI does not match `10.NNNN/` pattern | No — fix and retry |
 | `biorxiv_get_fulltext` | `doi_not_found` | `NotFound` | DOI resolves to no preprint on the requested server | No — find the DOI via `biorxiv_search_preprints` or try the other server |
 | `biorxiv_get_fulltext` | `fulltext_unavailable` | `NotFound` | Preprint exists but its full-text HTML page is blocked, missing, or yields no extractable text (PDF-only) | No — use `biorxiv_get_preprint` for title, abstract, and metadata |

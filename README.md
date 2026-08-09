@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -42,6 +42,7 @@ Fetch preprint metadata by DOI — all revisions in one call.
 - Each DOI returns the full revision history in `collection[]` — one API call per DOI, no enumeration loop
 - Includes title, authors, abstract, category, license, JATS XML full-text link (`jatsxml`), and published journal DOI when the preprint has been accepted
 - Scope to `biorxiv`, `medrxiv`, or `both`; when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
+- Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`) and a `retryable` flag — a DOI is only reported as not found when every attempted server answered
 
 ---
 
@@ -53,6 +54,8 @@ Page through preprints in a date interval.
 - Fixed page size of 30 (API constraint); advance with integer `cursor` (0, 30, 60, …)
 - Response includes `total` count per server for calculating remaining pages
 - When `server="both"`, each server paginates independently; response surfaces per-server pagination state (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`)
+- A server whose cursor is past its last page is marked `exhausted: true` — the API reports `total: 0` for an out-of-range cursor, so that count is an artifact rather than the interval total
+- A server that does not answer under `server="both"` is named in `failed[]` rather than dropped; the other server's page is still returned, and a non-empty `failed[]` marks the result set as partial
 
 ---
 
@@ -72,9 +75,10 @@ Keyword and/or author search with relevance ranking.
 
 Resolve a preprint DOI to its journal publication crosswalk.
 
-- Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `published` field in `biorxiv_get_preprint`
+- Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `publishedJournalDoi` field in `biorxiv_get_preprint`
 - Returns journal DOI, journal name, published date, and corresponding author institution
-- Use when the preprint's `published` field is non-null and you need the full crosswalk record
+- Use when the preprint's `publishedJournalDoi` field is present and you need the full crosswalk record
+- Scope to `biorxiv`, `medrxiv`, or `both`; `both` is the default because the two servers share the `10.1101/` DOI prefix, and the output `server` field names the one that answered
 
 ---
 

@@ -1,10 +1,10 @@
 # Agent Protocol
 
 **Server:** biorxiv-mcp-server
-**Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.14`
-**Engines:** Bun ≥1.3.2, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
+**Version:** 0.2.1
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.1`
+**Engines:** Bun ≥1.3.0, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
 **Zod:** ^4.4.3
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -198,7 +198,7 @@ src/
 ## Domain Conventions
 
 - **DOI format:** `10.1101/YYYY.MM.DD.NNNNNN`. Validate on input — the bioRxiv API returns empty collections for malformed DOIs without an error code.
-- **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"` for discovery tools, `"biorxiv"` for resolution tools. Fan-out via `Promise.allSettled` when `"both"`.
+- **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"`, including for DOI-resolution tools — both servers issue `10.1101/` DOIs, so the DOI never identifies the server and a single-server default silently misses records held by the other. Fan out via `Promise.allSettled` when `"both"` and name the answering server in the output.
 - **Pagination:** integer `cursor` offset (0, 30, 60, …). Page size is fixed at 30 by the API — do not expose a `limit` parameter.
 - **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous.
 - **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. Enrichment routes based on `input.server` — when explicit ("biorxiv" or "medrxiv"), always use that server. `10.1101/` prefix is used as a hint only within `server="both"` to prefer bioRxiv first, but is not a reliable discriminator (both servers share this prefix).
