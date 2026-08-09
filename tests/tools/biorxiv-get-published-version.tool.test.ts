@@ -62,9 +62,48 @@ describe('biorxivGetPublishedVersionTool', () => {
     );
   });
 
-  it('defaults server to biorxiv when omitted', () => {
+  it('defaults server to "both" when omitted', () => {
     const input = biorxivGetPublishedVersionTool.input.parse({ doi: '10.1101/2024.01.15.575123' });
-    expect(input.server).toBe('biorxiv');
+    expect(input.server).toBe('both');
+  });
+
+  it('resolves a medRxiv-only DOI when server is omitted, naming medrxiv as the answering server', async () => {
+    const mxPublished: PublishedVersion = {
+      ...PUBLISHED,
+      preprintDoi: '10.1101/2024.11.21.24317726',
+      publishedDoi: '10.1172/JCI192052',
+      publishedJournal: 'Journal of Clinical Investigation',
+    };
+    mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+      server === 'medrxiv' ? Promise.resolve(mxPublished) : Promise.resolve(undefined),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.11.21.24317726',
+    });
+    const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
+    expect(result.publishedDoi).toBe('10.1172/JCI192052');
+    expect(result.server).toBe('medrxiv');
+    expect(mockGetPublishedVersion).toHaveBeenCalledWith(
+      '10.1101/2024.11.21.24317726',
+      'biorxiv',
+      expect.anything(),
+    );
+    expect(mockGetPublishedVersion).toHaveBeenCalledWith(
+      '10.1101/2024.11.21.24317726',
+      'medrxiv',
+      expect.anything(),
+    );
+  });
+
+  it('names biorxiv as the answering server when the DOI resolves there', async () => {
+    mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv' ? Promise.resolve(PUBLISHED) : Promise.resolve(undefined),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({ doi: '10.1101/2024.01.15.575123' });
+    const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
+    expect(result.server).toBe('biorxiv');
   });
 
   it('accepts the alternative 10.64898/ DOI prefix', async () => {
@@ -113,6 +152,77 @@ describe('biorxivGetPublishedVersionTool', () => {
     });
   });
 
+  it('keeps doi_not_found when both servers answer with no record', async () => {
+    mockGetPublishedVersion.mockReset();
+    mockGetPublishedVersion.mockResolvedValue(undefined);
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.01.000001',
+      server: 'both',
+    });
+    await expect(biorxivGetPublishedVersionTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'doi_not_found' },
+    });
+    expect(mockGetPublishedVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws retryable upstream_unavailable instead of doi_not_found when both servers fail', async () => {
+    const upstream = new Error('network error');
+    mockGetPublishedVersion.mockRejectedValue(upstream);
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.01.000001',
+      server: 'both',
+    });
+    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true },
+    });
+    // The upstream error is what a maintainer needs to diagnose the outage; the
+    // wrapper carries it as `cause` rather than discarding it at the boundary.
+    expect(err.cause).toBe(upstream);
+  });
+
+  it('throws retryable upstream_unavailable when the single requested server fails', async () => {
+    mockGetPublishedVersion.mockRejectedValue(new Error('network error'));
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.01.000001',
+      server: 'biorxiv',
+    });
+    await expect(biorxivGetPublishedVersionTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true },
+    });
+  });
+
+  it('still resolves when one server fails and the other holds the record', async () => {
+    mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv'
+        ? Promise.reject(new Error('network error'))
+        : Promise.resolve({ ...PUBLISHED, publishedJournal: 'Lancet' }),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({ doi: '10.1101/2024.01.15.575123' });
+    const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
+    expect(result.publishedJournal).toBe('Lancet');
+    expect(result.server).toBe('medrxiv');
+  });
+
+  it('doi_not_found recovery routes to the other server rather than asserting the preprint is unpublished', async () => {
+    mockGetPublishedVersion.mockResolvedValue(undefined);
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({
+      doi: '10.1101/2024.01.01.000001',
+      server: 'biorxiv',
+    });
+    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.recovery.hint).toMatch(/both/i);
+    expect(err.data.recovery.hint).not.toMatch(/has not been accepted/i);
+  });
+
   it('doi_not_found error does not leak internal details', async () => {
     mockGetPublishedVersion.mockResolvedValue(undefined);
     const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
@@ -138,7 +248,7 @@ describe('biorxivGetPublishedVersionTool', () => {
   // ── format ──────────────────────────────────────────────────────────────────
 
   it('formats output with journal and crosswalk fields', () => {
-    const blocks = biorxivGetPublishedVersionTool.format!(PUBLISHED);
+    const blocks = biorxivGetPublishedVersionTool.format!({ ...PUBLISHED, server: 'biorxiv' });
     expect(blocks[0]?.type).toBe('text');
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('10.1101/2024.01.15.575123');
@@ -146,9 +256,16 @@ describe('biorxivGetPublishedVersionTool', () => {
     expect(text).toContain('10.1038/s41586-024-00001-0');
   });
 
+  it('renders the answering server so a both-server caller knows which one resolved', () => {
+    const blocks = biorxivGetPublishedVersionTool.format!({ ...PUBLISHED, server: 'medrxiv' });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('medrxiv');
+  });
+
   it('formats full crosswalk record including all optional fields', () => {
-    const full: PublishedVersion = {
+    const full: PublishedVersion & { server: 'biorxiv' } = {
       ...PUBLISHED,
+      server: 'biorxiv',
       preprintDate: '2024-01-15',
       preprintAbstract: 'The full abstract text here.',
       preprintAuthorCorresponding: 'Smith J',
@@ -162,7 +279,10 @@ describe('biorxivGetPublishedVersionTool', () => {
   });
 
   it('formats sparse published record without fabricating absent fields', () => {
-    const sparse: PublishedVersion = { preprintDoi: '10.1101/2024.01.15.575123' };
+    const sparse: PublishedVersion & { server: 'biorxiv' } = {
+      preprintDoi: '10.1101/2024.01.15.575123',
+      server: 'biorxiv',
+    };
     const blocks = biorxivGetPublishedVersionTool.format!(sparse);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('10.1101/2024.01.15.575123');

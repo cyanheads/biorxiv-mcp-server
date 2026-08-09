@@ -3,19 +3,24 @@
  * to its full journal publication record using the /pubs endpoint. Use when
  * you need richer crosswalk metadata than biorxiv_get_preprint provides
  * (journal name, published date, full abstract, corresponding author details).
+ * bioRxiv and medRxiv share the 10.1101/ DOI prefix, so the DOI alone does not
+ * identify the server: the default server="both" resolves against both in
+ * parallel and the output names the server that answered. Not-found is reported
+ * only when every attempted server answered with an empty collection.
  * @module mcp-server/tools/definitions/biorxiv-get-published-version.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
+import type { BiorxivServer } from '@/services/biorxiv/types.js';
 
 const DOI_REGEX = /^10\.\d{4,}\//;
 
 export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_version', {
   title: 'Get Published Journal Version',
   description:
-    "Resolve a preprint DOI to its full journal publication record — journal DOI, journal name, published date, and corresponding author details. Use when the preprint's `publishedJournalDoi` field from biorxiv_get_preprint is present and you need the full crosswalk metadata. Returns a not-found error when the preprint is not yet published. Check biorxiv_get_preprint first to confirm the publishedJournalDoi field is populated.",
+    'Resolve a preprint DOI to its full journal publication record — journal DOI, journal name, published date, and corresponding author details. Use when the preprint\'s `publishedJournalDoi` field from biorxiv_get_preprint is present and you need the full crosswalk metadata. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) checks both in parallel and the response reports which server answered. Returns a not-found error when no attempted server holds a published record — check biorxiv_get_preprint if you need to confirm the preprint is published at all.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -25,13 +30,18 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
         'Preprint DOI to resolve (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463).',
       ),
     server: z
-      .enum(['biorxiv', 'medrxiv'])
-      .default('biorxiv')
-      .describe('Server the preprint was posted on. Defaults to biorxiv.'),
+      .enum(['biorxiv', 'medrxiv', 'both'])
+      .default('both')
+      .describe(
+        'Server the preprint was posted on. "both" (default) checks bioRxiv and medRxiv in parallel — use it when the DOI alone does not tell you which server holds the preprint.',
+      ),
   }),
 
   output: z.object({
     preprintDoi: z.string().describe('The preprint DOI that was resolved.'),
+    server: z
+      .enum(['biorxiv', 'medrxiv'])
+      .describe('The server that returned this published record — never "both".'),
     publishedDoi: z.string().optional().describe('The journal publication DOI.'),
     publishedJournal: z.string().optional().describe('Name of the publishing journal.'),
     publishedDate: z.string().optional().describe('Journal publication date (YYYY-MM-DD).'),
@@ -51,9 +61,9 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     {
       reason: 'doi_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Crosswalk endpoint returns empty collection — preprint may not be published yet.',
+      when: 'Crosswalk endpoint returns an empty collection on every attempted server.',
       recovery:
-        'Use biorxiv_get_preprint to confirm the preprint is published — if publishedJournalDoi is absent, the preprint has not been accepted to a journal yet.',
+        'Retry with server="both" if you scoped to one server, or check publishedJournalDoi in biorxiv_get_preprint — when it is absent the preprint has no journal version yet.',
     },
     {
       reason: 'invalid_doi_format',
@@ -61,6 +71,14 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       when: 'The input DOI does not match the 10.NNNN/ pattern.',
       recovery:
         'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
+    },
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      retryable: true,
+      when: 'No attempted server returned a record and at least one lookup failed against api.biorxiv.org.',
+      recovery:
+        'Retry the request after a short delay — a published version may well exist; api.biorxiv.org did not answer.',
     },
   ],
 
@@ -77,23 +95,52 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     }
 
     const service = getBiorxivApiService();
-    const result = await service.getPublishedVersion(input.doi, input.server, ctx);
+    const servers: BiorxivServer[] =
+      input.server === 'both' ? ['biorxiv', 'medrxiv'] : [input.server];
 
-    if (!result) {
+    const settled = await Promise.allSettled(
+      servers.map((server) => service.getPublishedVersion(input.doi, server, ctx)),
+    );
+
+    for (const [i, settledResult] of settled.entries()) {
+      if (settledResult.status === 'fulfilled' && settledResult.value) {
+        return { ...settledResult.value, server: servers[i] as BiorxivServer };
+      }
+    }
+
+    // Nothing resolved. "Not published" is a claim about what the crosswalk endpoint
+    // reported, so a server that never answered leaves it unestablished and retryable.
+    const rejections = settled.flatMap((r, i) =>
+      r.status === 'rejected' ? [{ server: servers[i] as BiorxivServer, error: r.reason }] : [],
+    );
+    if (rejections.length > 0) {
+      const detail = rejections
+        .map((f) => `${f.server}: ${f.error instanceof Error ? f.error.message : String(f.error)}`)
+        .join('; ');
       throw ctx.fail(
-        'doi_not_found',
-        `No published version found for ${input.doi} on ${input.server}.`,
-        { doi: input.doi, server: input.server, ...ctx.recoveryFor('doi_not_found') },
+        'upstream_unavailable',
+        `Crosswalk lookup for ${input.doi} failed — ${detail}`,
+        {
+          doi: input.doi,
+          servers: rejections.map((f) => f.server),
+          ...ctx.recoveryFor('upstream_unavailable'),
+        },
+        { cause: rejections[0]?.error },
       );
     }
 
-    return result;
+    throw ctx.fail(
+      'doi_not_found',
+      `No published version found for ${input.doi} on ${servers.join(' or ')}.`,
+      { doi: input.doi, servers, ...ctx.recoveryFor('doi_not_found') },
+    );
   },
 
   format: (result) => {
     const lines: string[] = [];
     lines.push(`## Published Version`);
     lines.push(`**Preprint DOI:** ${result.preprintDoi}`);
+    lines.push(`**Resolved on server:** ${result.server}`);
     if (result.publishedDoi) lines.push(`**Published DOI:** ${result.publishedDoi}`);
     if (result.publishedJournal) lines.push(`**Journal:** ${result.publishedJournal}`);
     if (result.publishedDate) lines.push(`**Published Date:** ${result.publishedDate}`);
