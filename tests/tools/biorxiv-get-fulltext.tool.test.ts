@@ -1,6 +1,7 @@
 /**
- * @fileoverview Tests for biorxiv_get_fulltext tool — version resolution, the
- * typed error contract, offset/limit chunking, and format rendering.
+ * @fileoverview Tests for biorxiv_get_fulltext tool — both-server DOI resolution,
+ * version resolution, the typed error contract (including rate_limited and
+ * upstream_unavailable), offset/limit chunking, and format rendering.
  * @module tests/tools/biorxiv-get-fulltext.tool.test
  */
 
@@ -64,11 +65,62 @@ describe('biorxivGetFulltextTool', () => {
     expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', DOI, '2', expect.anything());
   });
 
-  it('defaults server to biorxiv, offset to 0, limit to 20000', () => {
+  it('defaults server to both, offset to 0, limit to 20000', () => {
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    expect(input.server).toBe('biorxiv');
+    expect(input.server).toBe('both');
     expect(input.offset).toBe(0);
     expect(input.limit).toBe(20000);
+  });
+
+  // ── Both-server DOI resolution ───────────────────────────────────────────────
+
+  it('resolves the DOI against both servers by default and prefers bioRxiv on a tie', async () => {
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const result = await biorxivGetFulltextTool.handler(input, ctx);
+
+    expect(mockGetDetails).toHaveBeenCalledTimes(2);
+    expect(mockGetDetails).toHaveBeenCalledWith(DOI, 'biorxiv', expect.anything());
+    expect(mockGetDetails).toHaveBeenCalledWith(DOI, 'medrxiv', expect.anything());
+    expect(result.server).toBe('biorxiv');
+    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', DOI, '2', expect.anything());
+  });
+
+  it('fetches from medRxiv when only medRxiv resolves the DOI', async () => {
+    mockGetDetails.mockImplementation((_doi: string, server: string) =>
+      Promise.resolve(server === 'medrxiv' ? [{ doi: DOI, version: '3', server: 'medrxiv' }] : []),
+    );
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const result = await biorxivGetFulltextTool.handler(input, ctx);
+
+    expect(result.server).toBe('medrxiv');
+    expect(result.version).toBe('3');
+    expect(mockFetchFullText).toHaveBeenCalledWith('medrxiv', DOI, '3', expect.anything());
+  });
+
+  it('resolves against one server only when the caller scopes the request', async () => {
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI, server: 'medrxiv' });
+    const result = await biorxivGetFulltextTool.handler(input, ctx);
+
+    expect(mockGetDetails).toHaveBeenCalledTimes(1);
+    expect(mockGetDetails).toHaveBeenCalledWith(DOI, 'medrxiv', expect.anything());
+    expect(result.server).toBe('medrxiv');
+  });
+
+  it('serves the article from the server that answered when the other one fails', async () => {
+    mockGetDetails.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv'
+        ? Promise.reject(new Error('api.biorxiv.org unreachable'))
+        : Promise.resolve([{ doi: DOI, version: '1', server: 'medrxiv' }]),
+    );
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const result = await biorxivGetFulltextTool.handler(input, ctx);
+
+    expect(result.server).toBe('medrxiv');
+    expect(mockFetchFullText).toHaveBeenCalledWith('medrxiv', DOI, '1', expect.anything());
   });
 
   it('falls back to version "1" when the latest revision lacks a version field', async () => {
@@ -132,15 +184,73 @@ describe('biorxivGetFulltextTool', () => {
     expect(mockGetDetails).not.toHaveBeenCalled();
   });
 
-  it('throws doi_not_found when the DOI resolves to no preprint', async () => {
+  it('throws doi_not_found when every attempted server answers empty', async () => {
     mockGetDetails.mockResolvedValue([]);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
     await expect(biorxivGetFulltextTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'doi_not_found' },
+      data: { reason: 'doi_not_found', servers: ['biorxiv', 'medrxiv'] },
     });
     expect(mockFetchFullText).not.toHaveBeenCalled();
+  });
+
+  it('throws retryable upstream_unavailable when every lookup fails, not doi_not_found', async () => {
+    mockGetDetails.mockRejectedValue(new Error('api.biorxiv.org unreachable'));
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true, servers: ['biorxiv', 'medrxiv'] },
+    });
+    expect((err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint).toContain(
+      'Retry',
+    );
+    expect(err.cause).toBeInstanceOf(Error);
+    expect(mockFetchFullText).not.toHaveBeenCalled();
+  });
+
+  it('throws retryable rate_limited with the origin Retry-After wait and the metadata fallback', async () => {
+    mockFetchFullText.mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'rate_limited',
+      detail:
+        'The full-text origin is rate-limiting this host (HTTP 429) and asked for a 94-second wait before the next request.',
+      retryAfter: 94,
+      sourceUrl: SOURCE_URL,
+    } satisfies FullTextFetchResult);
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 94 },
+    });
+    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    expect(hint).toContain('94 seconds');
+    expect(hint).toContain('biorxiv_get_preprint');
+    expect(JSON.stringify(err)).not.toMatch(/Cloudflare|DOCTYPE/i);
+  });
+
+  it('falls back to a generic wait in the rate_limited hint when the origin sent no Retry-After', async () => {
+    mockFetchFullText.mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'rate_limited',
+      detail: 'The full-text origin is rate-limiting this host (HTTP 429).',
+      sourceUrl: SOURCE_URL,
+    } satisfies FullTextFetchResult);
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+
+    expect(err).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    expect((err as { data: { retryAfter?: number } }).data.retryAfter).toBeUndefined();
+    expect((err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint).toContain(
+      'biorxiv_get_preprint',
+    );
   });
 
   it('throws fulltext_unavailable when the page is blocked or PDF-only', async () => {
@@ -191,6 +301,8 @@ describe('biorxivGetFulltextTool', () => {
     });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain(DOI);
+    // The server that answered the DOI resolution reaches the content[] surface too
+    expect(text).toContain('**Server:** biorxiv');
     expect(text).toContain('A Title');
     expect(text).toContain('The article body.');
     expect(text).toContain(SOURCE_URL);
