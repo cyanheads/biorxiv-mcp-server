@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -88,8 +88,10 @@ Retrieve a preprint's full text as best-effort Markdown.
 
 - Fetches the rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`) and extracts Markdown — there is no keyless JATS source
 - Resolves the latest version via the details API first, for the URL version and clean not-found handling
-- Long articles page via `offset`/`limit` character chunking (`totalChars`, `remainingChars`, `hasMore`)
+- Scope to `biorxiv`, `medrxiv`, or `both`; `both` is the default because the two servers share the `10.1101/` DOI prefix. Only the DOI resolution fans out — the full-text fetch targets the single server that answered, named in the output `server` field
+- Long articles page via `offset`/`limit` character chunking (`totalChars`, `remainingChars`, `hasMore`); the extracted article is cached per version, so paging costs one origin fetch rather than one per chunk
 - PDF-only preprints and blocked/challenge pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`
+- An origin rate limit (HTTP 429) returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, rather than a bare fetch failure
 
 ---
 

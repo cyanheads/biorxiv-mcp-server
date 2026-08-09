@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "biorxiv-mcp-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"
@@ -22,7 +22,9 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "BIORXIV_MAILTO": "${user_config.BIORXIV_MAILTO}"
+        "BIORXIV_MAILTO": "${user_config.BIORXIV_MAILTO}",
+        "BIORXIV_WEB_BASE_URL": "${user_config.BIORXIV_WEB_BASE_URL}",
+        "MEDRXIV_WEB_BASE_URL": "${user_config.MEDRXIV_WEB_BASE_URL}"
       }
     }
   },
@@ -40,6 +42,20 @@
       "type": "string",
       "required": false,
       "default": ""
+    },
+    "BIORXIV_WEB_BASE_URL": {
+      "title": "bioRxiv Website Base URL",
+      "description": "Source of rendered full-text HTML pages for biorxiv_get_fulltext. Change only to point at a mirror.",
+      "type": "string",
+      "required": false,
+      "default": "https://www.biorxiv.org"
+    },
+    "MEDRXIV_WEB_BASE_URL": {
+      "title": "medRxiv Website Base URL",
+      "description": "Source of rendered full-text HTML pages for biorxiv_get_fulltext. Change only to point at a mirror.",
+      "type": "string",
+      "required": false,
+      "default": "https://www.medrxiv.org"
     }
   }
 }

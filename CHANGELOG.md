@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-08-09
+
+biorxiv_get_fulltext caches extracted articles for offset paging, classifies HTTP 429 as a retryable rate_limited error, and resolves DOIs against both servers by default (#36, #37, #38)
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-08-09
 
 biorxiv_get_preprint and biorxiv_get_published_version distinguish upstream failures from not-found; biorxiv_list_recent surfaces exhausted cursors and failed servers (#32, #34, #35, #39)
