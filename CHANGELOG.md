@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-08-25
+
+Fixes the GHCR build stage that made 0.2.5 ship with no container image — this is the first tagged image, carrying everything 0.2.5 shipped elsewhere
+
 ## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-08-25
 
 Adopts @cyanheads/mcp-ts-core 0.12.3 (MCP SDK v2): HTTP now serves protocol revision 2026-07-28, tool inputs reject undeclared keys, and a source run defaults MCP_SESSION_MODE to stateless
