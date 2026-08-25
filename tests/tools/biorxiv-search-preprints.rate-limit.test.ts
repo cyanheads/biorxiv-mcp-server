@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import { initEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import { EUROPE_PMC_RATE_LIMIT_BODY } from '../helpers/rate-limit.js';
+import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockFetch = vi.fn();
 
@@ -75,9 +76,7 @@ describe('biorxivSearchPreprintsTool over the real EuropePmcService', () => {
     mockFetch.mockRejectedValue(httpError(429, '45'));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
     expect(err.data).toMatchObject({
@@ -85,7 +84,7 @@ describe('biorxivSearchPreprintsTool over the real EuropePmcService', () => {
       retryable: true,
       retryAfter: 45,
     });
-    const hint = (err.data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+    const hint = recoveryHint(err);
     expect(hint).toContain('45 seconds');
     expect(hint).toContain('biorxiv_list_recent');
 
@@ -103,33 +102,25 @@ describe('biorxivSearchPreprintsTool over the real EuropePmcService', () => {
     mockFetch.mockRejectedValue(httpError(429, new Date(Date.now() + 120_000).toUTCString()));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
     const retryAfter = err.data?.retryAfter as number;
     expect(retryAfter).toBeGreaterThan(110);
     expect(retryAfter).toBeLessThanOrEqual(120);
-    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toContain(
-      `${retryAfter} seconds`,
-    );
+    expect(recoveryHint(err)).toContain(`${retryAfter} seconds`);
   });
 
   it('falls back to a generic wait when the 429 carried no Retry-After', async () => {
     mockFetch.mockRejectedValue(httpError(429));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
     expect(err.data?.reason).toBe('rate_limited');
     expect(err.data?.retryAfter).toBeUndefined();
-    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toContain(
-      'a minute or two',
-    );
+    expect(recoveryHint(err)).toContain('a minute or two');
   });
 
   it('leaves a non-429 origin failure as search_unavailable', async () => {
@@ -140,9 +131,7 @@ describe('biorxivSearchPreprintsTool over the real EuropePmcService', () => {
     );
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(err.data?.reason).toBe('search_unavailable');

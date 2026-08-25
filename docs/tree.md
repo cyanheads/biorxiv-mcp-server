@@ -1,11 +1,9 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-08-09 15:02:44
+Generated on: 2026-08-25 06:54:51
 
 ```text
 biorxiv-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -16,6 +14,8 @@ biorxiv-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -162,7 +162,8 @@ biorxiv-mcp-server/
 │   ├── config/
 │   │   └── server-config.test.ts
 │   ├── helpers/
-│   │   └── rate-limit.ts
+│   │   ├── rate-limit.ts
+│   │   └── rejection.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/

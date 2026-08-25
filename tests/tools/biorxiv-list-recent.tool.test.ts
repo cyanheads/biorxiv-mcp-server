@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-list-recent.tool.js';
 import type { ListingResult, PreprintRevision } from '@/services/biorxiv/types.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
+import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetListing = vi.fn();
 const mockIsValidCategory = vi.fn();
@@ -441,7 +442,7 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-31',
       server: 'both',
     });
-    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivListRecentTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -451,7 +452,7 @@ describe('biorxivListRecentTool', () => {
     expect(err.message).toContain('biorxiv down');
     expect(err.message).toContain('medrxiv down');
     expect(err.cause).toBe(bxDown);
-    expect(err.data.recovery.hint).toMatch(/retry/i);
+    expect(recoveryHint(err)).toMatch(/retry/i);
     // The empty-interval guidance must not ride along on the failure
     expect(JSON.stringify(err.data)).not.toMatch(/No preprints found/);
   });
@@ -468,13 +469,13 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-31',
       server: 'both',
     });
-    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivListRecentTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       data: { reason: 'rate_limited', retryable: true, retryAfter: 45 },
     });
-    expect(err.data.recovery.hint).toContain('45 seconds');
+    expect(recoveryHint(err)).toContain('45 seconds');
   });
 
   it('carries the longer of two 429 waits so the retry clears both origins', async () => {
@@ -487,8 +488,8 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-31',
       server: 'both',
     });
-    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.retryAfter).toBe(90);
+    const err = await rejection(biorxivListRecentTool.handler(input, ctx));
+    expect(err.data?.retryAfter).toBe(90);
   });
 
   it('surfaces a single-server 429 as a retryable rate_limited tool error', async () => {
@@ -499,7 +500,7 @@ describe('biorxivListRecentTool', () => {
       end_date: '2024-01-31',
       server: 'biorxiv',
     });
-    const err = await biorxivListRecentTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivListRecentTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,

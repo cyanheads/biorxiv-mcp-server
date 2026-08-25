@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-08-25
+
+Adopts @cyanheads/mcp-ts-core 0.12.3 (MCP SDK v2): HTTP now serves protocol revision 2026-07-28, tool inputs reject undeclared keys, and a source run defaults MCP_SESSION_MODE to stateless
+
 ## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-08-09
 
 EuropePmcService classifies HTTP 429 as a retryable rate_limited error instead of surfacing it as search_unavailable with the wait dropped (#42)

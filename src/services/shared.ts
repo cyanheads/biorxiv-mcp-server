@@ -1,24 +1,14 @@
 /**
  * @fileoverview Shared utilities for biorxiv-mcp-server service layer. Provides
- * the Context→RequestContext cast, HTML error detection, calendar-date and
- * upstream-text normalization, `Retry-After` parsing and rate-limit rejection
- * lookup shared by every fetch path, and the server version string used in
- * User-Agent headers across all services.
+ * HTML error detection, calendar-date and upstream-text normalization,
+ * `Retry-After` parsing and rate-limit rejection lookup shared by every fetch
+ * path, and the server version string used in User-Agent headers across all
+ * services.
  * @module services/shared
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
-import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import packageJson from '../../package.json' with { type: 'json' };
-
-/**
- * Cast Context to RequestContext for fetchWithTimeout / withRetry.
- * Context is structurally assignable but lacks the index signature — cast once per call site.
- */
-export function asRc(ctx: Context): RequestContext {
-  return ctx as unknown as RequestContext;
-}
 
 /** Detect HTML error pages returned instead of JSON by upstream APIs. */
 export function detectHtmlError(text: string): boolean {

@@ -9,7 +9,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
 
@@ -69,29 +69,19 @@ const MOCK_CONFIG = {} as AppConfig;
 const MOCK_STORAGE = {} as StorageService;
 const DOI = '10.1101/2024.05.28.596311';
 
-/** Context whose ctx.state is usable — the cache is skipped without a tenant. */
+/**
+ * Context whose `ctx.state` runs through the real `StorageService` over an
+ * in-memory provider, so cache keys face the same validation
+ * (`[a-zA-Z0-9_.\-/]`, no `..`) and TTL handling a deployed server applies.
+ */
 const tenantCtx = () => createMockContext({ tenantId: 'test-tenant' });
 
 /**
- * Context whose `ctx.state` runs through the real `StorageService`, so cache keys
- * face the same validation (`[a-zA-Z0-9_.\-/]`, no `..`) and TTL handling a
- * deployed server applies. `createMockContext`'s state is a bare `Map` that
- * accepts any key, so a key the storage layer would reject passes there silently.
+ * Context resolving no tenant — an HTTP request under a JWT whose token carries
+ * no `tid` claim. `createMockContext` defaults `tenantId` to `'default'`, so the
+ * uncached branch has to be produced explicitly.
  */
-function storageBackedCtx(): Context {
-  const storage = createInMemoryStorage();
-  const ctx = createMockContext({ tenantId: 'test-tenant' });
-  const rc = { requestId: ctx.requestId, timestamp: ctx.timestamp, tenantId: ctx.tenantId };
-  return {
-    ...ctx,
-    state: {
-      ...ctx.state,
-      get: <T>(key: string) => storage.get<T>(key, rc),
-      set: (key: string, value: unknown, options?: { ttl?: number }) =>
-        storage.set(key, value, rc, options),
-    },
-  };
-}
+const tenantlessCtx = (): Context => ({ ...createMockContext(), tenantId: undefined });
 
 describe('BiorxivFullTextService', () => {
   let service: BiorxivFullTextService;
@@ -325,8 +315,8 @@ describe('BiorxivFullTextService', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
-    it('hits the cache through the real StorageService, whose key validation the mock skips', async () => {
-      const ctx = storageBackedCtx();
+    it('hits the cache through the real StorageService, which validates the key', async () => {
+      const ctx = tenantCtx();
       const first = await service.fetchFullText('biorxiv', DOI, '2', ctx);
       const second = await service.fetchFullText('biorxiv', DOI, '2', ctx);
 
@@ -337,7 +327,7 @@ describe('BiorxivFullTextService', () => {
     });
 
     it('refetches once the cached extraction has outlived its TTL', async () => {
-      const ctx = storageBackedCtx();
+      const ctx = tenantCtx();
       vi.useFakeTimers();
       try {
         await service.fetchFullText('biorxiv', DOI, '2', ctx);
@@ -366,7 +356,7 @@ describe('BiorxivFullTextService', () => {
     });
 
     it('still returns full text for a tenant-less caller, uncached', async () => {
-      const ctx = createMockContext();
+      const ctx = tenantlessCtx();
       const first = await service.fetchFullText('biorxiv', DOI, '2', ctx);
       const second = await service.fetchFullText('biorxiv', DOI, '2', ctx);
       expect(first.kind).toBe('article');

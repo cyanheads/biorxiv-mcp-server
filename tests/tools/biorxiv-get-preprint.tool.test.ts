@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
+import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
 
@@ -273,9 +274,9 @@ describe('biorxivGetPreprintTool', () => {
       dois: ['10.1101/2024.01.01.000001'],
       server: 'both',
     });
-    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.recovery.hint).toMatch(/retry/i);
-    expect(err.data.recovery.hint).not.toMatch(/verify the doi/i);
+    const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
+    expect(recoveryHint(err)).toMatch(/retry/i);
+    expect(recoveryHint(err)).not.toMatch(/verify the doi/i);
   });
 
   it('throws upstream_unavailable when one DOI is a service error and the rest are not found', async () => {
@@ -347,14 +348,14 @@ describe('biorxivGetPreprintTool', () => {
       dois: ['10.1101/2024.01.01.000001'],
       server: 'both',
     });
-    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       data: { reason: 'rate_limited', retryable: true, retryAfter: 30 },
     });
-    expect(err.data.recovery.hint).toContain('30 seconds');
-    expect(err.data.recovery.hint).toContain('api.biorxiv.org');
+    expect(recoveryHint(err)).toContain('30 seconds');
+    expect(recoveryHint(err)).toContain('api.biorxiv.org');
   });
 
   it('prefers rate_limited over upstream_unavailable when the batch mixes the two', async () => {
@@ -370,7 +371,7 @@ describe('biorxivGetPreprintTool', () => {
       dois: ['10.1101/2024.01.01.000001', '10.1101/2024.02.02.000002'],
       server: 'biorxiv',
     });
-    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
@@ -388,10 +389,10 @@ describe('biorxivGetPreprintTool', () => {
       dois: ['10.1101/2024.01.01.000001'],
       server: 'biorxiv',
     });
-    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
-    expect(err.data.retryAfter).toBeUndefined();
-    expect(err.data.recovery.hint).toContain('a minute or two');
+    expect(err.data?.retryAfter).toBeUndefined();
+    expect(recoveryHint(err)).toContain('a minute or two');
   });
 
   // ── Edge cases ──────────────────────────────────────────────────────────────
@@ -439,7 +440,7 @@ describe('biorxivGetPreprintTool', () => {
   it('error message for invalid_doi_format does not expose env vars or secrets', async () => {
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({ dois: ['not-a-doi'] });
-    const err = await biorxivGetPreprintTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
     const serialized = JSON.stringify(err);
     expect(serialized).not.toMatch(/password|secret|key|token|BIORXIV_MAILTO/i);
   });

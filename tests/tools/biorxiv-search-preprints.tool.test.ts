@@ -3,13 +3,14 @@
  * @module tests/tools/biorxiv-search-preprints.tool.test
  */
 
-import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
 import { europePmcRateLimitError, rateLimitError } from '../helpers/rate-limit.js';
+import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockEpmcSearch = vi.fn();
 const mockGetDetails = vi.fn();
@@ -322,7 +323,7 @@ describe('biorxivSearchPreprintsTool', () => {
     mockEpmcSearch.mockRejectedValue(europePmcRateLimitError(45));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = await biorxivSearchPreprintsTool.handler(input, ctx).catch((e: unknown) => e);
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
@@ -334,11 +335,9 @@ describe('biorxivSearchPreprintsTool', () => {
     mockEpmcSearch.mockRejectedValue(europePmcRateLimitError(45));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
-    const hint = (err.data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+    const hint = recoveryHint(err);
     expect(hint).toContain('45 seconds');
     // The fallback must be a different origin — pointing back at EuropePMC
     // would send the caller straight into the same limit.
@@ -350,25 +349,19 @@ describe('biorxivSearchPreprintsTool', () => {
     mockEpmcSearch.mockRejectedValue(europePmcRateLimitError());
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
     expect(err.data?.reason).toBe('rate_limited');
     expect(err.data?.retryAfter).toBeUndefined();
-    expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toContain(
-      'a minute or two',
-    );
+    expect(recoveryHint(err)).toContain('a minute or two');
   });
 
   it('keeps the upstream 429 response body out of the rate_limited payload', async () => {
     mockEpmcSearch.mockRejectedValue(europePmcRateLimitError(45));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     const data = err.data ?? {};
     expect(JSON.stringify(data)).not.toContain('429 Too Many Requests');
@@ -383,9 +376,7 @@ describe('biorxivSearchPreprintsTool', () => {
     mockEpmcSearch.mockRejectedValue(new Error('Fetch failed for EuropePMC. Status: 503'));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = (await biorxivSearchPreprintsTool
-      .handler(input, ctx)
-      .catch((e: unknown) => e)) as McpError;
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
 
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(err.data?.reason).toBe('search_unavailable');
@@ -448,7 +439,7 @@ describe('biorxivSearchPreprintsTool', () => {
     mockEpmcSearch.mockRejectedValue(new Error('connection refused'));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR' });
-    const err = await biorxivSearchPreprintsTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
     const serialized = JSON.stringify(err);
     // Secrets and credentials should never appear in error output
     expect(serialized).not.toMatch(/password|api_key|secret|Bearer [A-Za-z0-9]/i);
@@ -667,7 +658,7 @@ describe('biorxivSearchPreprintsTool', () => {
     mockEpmcSearch.mockRejectedValue(new Error('ECONNREFUSED /var/run/internal.sock'));
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
-    const err = await biorxivSearchPreprintsTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivSearchPreprintsTool.handler(input, ctx));
     // The thrown error is a classified McpError with a generic message — internal socket
     // path may appear in message but no secret/credential/key should be present
     const serialized = JSON.stringify(err);
@@ -718,7 +709,11 @@ describe('biorxivSearchPreprintsTool', () => {
   it('format renders "not_found" reason for unenriched result with enrichment_error not_found', () => {
     const output = {
       preprints: [
-        { doi: '10.1101/2024.01.15.575123', enriched: false, enrichment_error: 'not_found' },
+        {
+          doi: '10.1101/2024.01.15.575123',
+          enriched: false,
+          enrichment_error: 'not_found' as const,
+        },
       ],
       partial_results: true,
     };
@@ -730,7 +725,11 @@ describe('biorxivSearchPreprintsTool', () => {
   it('format renders "service_error" reason for unenriched result with enrichment_error service_error', () => {
     const output = {
       preprints: [
-        { doi: '10.1101/2024.01.15.575123', enriched: false, enrichment_error: 'service_error' },
+        {
+          doi: '10.1101/2024.01.15.575123',
+          enriched: false,
+          enrichment_error: 'service_error' as const,
+        },
       ],
       partial_results: true,
     };

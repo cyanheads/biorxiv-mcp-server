@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import type { FullTextFetchResult } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
+import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
 const mockFetchFullText = vi.fn();
@@ -200,15 +201,13 @@ describe('biorxivGetFulltextTool', () => {
     mockGetDetails.mockRejectedValue(new Error('api.biorxiv.org unreachable'));
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'upstream_unavailable', retryable: true, servers: ['biorxiv', 'medrxiv'] },
     });
-    expect((err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint).toContain(
-      'Retry',
-    );
+    expect(recoveryHint(err)).toContain('Retry');
     expect(err.cause).toBeInstanceOf(Error);
     expect(mockFetchFullText).not.toHaveBeenCalled();
   });
@@ -224,13 +223,13 @@ describe('biorxivGetFulltextTool', () => {
     } satisfies FullTextFetchResult);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       data: { reason: 'rate_limited', retryable: true, retryAfter: 94 },
     });
-    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    const hint = recoveryHint(err);
     expect(hint).toContain('94 seconds');
     expect(hint).toContain('biorxiv_get_preprint');
     expect(JSON.stringify(err)).not.toMatch(/Cloudflare|DOCTYPE/i);
@@ -245,13 +244,11 @@ describe('biorxivGetFulltextTool', () => {
     } satisfies FullTextFetchResult);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
     expect(err).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
-    expect((err as { data: { retryAfter?: number } }).data.retryAfter).toBeUndefined();
-    expect((err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint).toContain(
-      'biorxiv_get_preprint',
-    );
+    expect(err.data?.retryAfter).toBeUndefined();
+    expect(recoveryHint(err)).toContain('biorxiv_get_preprint');
   });
 
   it('throws rate_limited when the metadata origin rate-limits version resolution', async () => {
@@ -259,7 +256,7 @@ describe('biorxivGetFulltextTool', () => {
     mockGetDetails.mockRejectedValue(upstream);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
@@ -280,9 +277,9 @@ describe('biorxivGetFulltextTool', () => {
     mockGetDetails.mockRejectedValue(rateLimitError(30));
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
-    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    const hint = recoveryHint(err);
     expect(hint).toContain('30 seconds');
     expect(hint).toContain('api.biorxiv.org');
     expect(hint).toMatch(/same origin/i);
@@ -299,15 +296,15 @@ describe('biorxivGetFulltextTool', () => {
     } satisfies FullTextFetchResult);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
-    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    const hint = recoveryHint(err);
     expect(hint).toContain('94 seconds');
     expect(hint).toContain('article-page origin');
     expect(hint).toContain('biorxiv_get_preprint');
     // Same reason, two origins — the payloads stay structurally distinguishable
-    expect((err as { data: Record<string, unknown> }).data.sourceUrl).toBe(SOURCE_URL);
-    expect((err as { data: Record<string, unknown> }).data.servers).toBeUndefined();
+    expect(err.data?.sourceUrl).toBe(SOURCE_URL);
+    expect(err.data?.servers).toBeUndefined();
   });
 
   it('withholds the metadata fallback when the surviving server masked a resolution 429', async () => {
@@ -328,11 +325,11 @@ describe('biorxivGetFulltextTool', () => {
     } satisfies FullTextFetchResult);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI, server: 'both' });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
 
     // A retry re-runs resolution, so the wait has to clear the longer of the two.
-    expect((err as { data: { retryAfter?: number } }).data.retryAfter).toBe(45);
-    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    expect(err.data?.retryAfter).toBe(45);
+    const hint = recoveryHint(err);
     expect(hint).toContain('45 seconds');
     expect(hint).toContain('api.biorxiv.org');
     expect(hint).toMatch(/not answer sooner/i);
@@ -363,7 +360,7 @@ describe('biorxivGetFulltextTool', () => {
     } satisfies FullTextFetchResult);
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
-    const err = await biorxivGetFulltextTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toMatch(/password|secret|token|BIORXIV_MAILTO/i);
   });
 

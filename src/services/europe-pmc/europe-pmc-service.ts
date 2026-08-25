@@ -16,7 +16,6 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
-  asRc,
   describeWait,
   detectHtmlError,
   normalizeUpstreamText,
@@ -155,11 +154,10 @@ export class EuropePmcService {
 
     const url = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
 
-    const rc = asRc(ctx);
     try {
       return await withRetry(
         async () => {
-          const response = await fetchWithTimeout(url, 20_000, rc, {
+          const response = await fetchWithTimeout(url, 20_000, ctx, {
             signal: ctx.signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
@@ -195,7 +193,7 @@ export class EuropePmcService {
         },
         {
           operation: 'EuropePmcService.search',
-          context: rc,
+          context: ctx,
           baseDelayMs: 300,
           signal: ctx.signal,
         },

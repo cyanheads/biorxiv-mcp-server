@@ -16,7 +16,6 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
-  asRc,
   describeWait,
   detectHtmlError,
   normalizeUpstreamText,
@@ -244,11 +243,10 @@ export class BiorxivApiService {
   async getDetails(doi: string, server: BiorxivServer, ctx: Context): Promise<PreprintRevision[]> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/details/${server}/${encodedDoi}/0/json`;
-    const rc = asRc(ctx);
     try {
       return await withRetry(
         async () => {
-          const response = await fetchWithTimeout(url, 15_000, rc, {
+          const response = await fetchWithTimeout(url, 15_000, ctx, {
             signal: ctx.signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
@@ -265,7 +263,7 @@ export class BiorxivApiService {
         },
         {
           operation: 'BiorxivApiService.getDetails',
-          context: rc,
+          context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
         },
@@ -294,11 +292,10 @@ export class BiorxivApiService {
       url += `?category=${encodeURIComponent(category)}`;
     }
 
-    const rc = asRc(ctx);
     try {
       return await withRetry(
         async () => {
-          const response = await fetchWithTimeout(url, 20_000, rc, {
+          const response = await fetchWithTimeout(url, 20_000, ctx, {
             signal: ctx.signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
@@ -327,7 +324,7 @@ export class BiorxivApiService {
         },
         {
           operation: 'BiorxivApiService.getListing',
-          context: rc,
+          context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
         },
@@ -349,11 +346,10 @@ export class BiorxivApiService {
   ): Promise<PublishedVersion | undefined> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/pubs/${server}/${encodedDoi}/json`;
-    const rc = asRc(ctx);
     try {
       return await withRetry(
         async () => {
-          const response = await fetchWithTimeout(url, 15_000, rc, {
+          const response = await fetchWithTimeout(url, 15_000, ctx, {
             signal: ctx.signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
@@ -388,7 +384,7 @@ export class BiorxivApiService {
         },
         {
           operation: 'BiorxivApiService.getPublishedVersion',
-          context: rc,
+          context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
         },

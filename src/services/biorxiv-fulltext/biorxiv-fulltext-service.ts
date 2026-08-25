@@ -29,7 +29,7 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, htmlExtractor, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
-import { asRc, parseRetryAfterSeconds, SERVER_VERSION } from '@/services/shared.js';
+import { parseRetryAfterSeconds, SERVER_VERSION } from '@/services/shared.js';
 
 /**
  * bioRxiv/medRxiv render their article pages on the Highwire platform, whose
@@ -197,7 +197,6 @@ export class BiorxivFullTextService {
   ): Promise<FullTextFetchResult> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const sourceUrl = `${this.webBaseUrls[server]}/content/${encodedDoi}v${version}.full`;
-    const rc = asRc(ctx);
 
     // ctx.state is tenant-scoped and throws without a tenant (HTTP + JWT whose
     // token carries no `tid` claim), so a tenant-less caller runs uncached rather
@@ -215,7 +214,7 @@ export class BiorxivFullTextService {
     try {
       html = await withRetry(
         async () => {
-          const response = await fetchWithTimeout(sourceUrl, 30_000, rc, {
+          const response = await fetchWithTimeout(sourceUrl, 30_000, ctx, {
             signal: ctx.signal,
             headers: { 'User-Agent': this.userAgent, Accept: 'text/html' },
             expectedStatuses: EXPECTED_STATUSES,
@@ -224,7 +223,7 @@ export class BiorxivFullTextService {
         },
         {
           operation: 'BiorxivFullTextService.fetchFullText',
-          context: rc,
+          context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
         },

@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
 import type { PublishedVersion } from '@/services/biorxiv/types.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
+import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetPublishedVersion = vi.fn();
 
@@ -176,7 +177,7 @@ describe('biorxivGetPublishedVersionTool', () => {
       doi: '10.1101/2024.01.01.000001',
       server: 'both',
     });
-    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'upstream_unavailable', retryable: true },
@@ -219,9 +220,9 @@ describe('biorxivGetPublishedVersionTool', () => {
       doi: '10.1101/2024.01.01.000001',
       server: 'biorxiv',
     });
-    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.recovery.hint).toMatch(/both/i);
-    expect(err.data.recovery.hint).not.toMatch(/has not been accepted/i);
+    const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
+    expect(recoveryHint(err)).toMatch(/both/i);
+    expect(recoveryHint(err)).not.toMatch(/has not been accepted/i);
   });
 
   it('throws retryable rate_limited with the origin wait when the lookup was rate-limited', async () => {
@@ -232,7 +233,7 @@ describe('biorxivGetPublishedVersionTool', () => {
       doi: '10.1101/2024.01.01.000001',
       server: 'both',
     });
-    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
@@ -244,7 +245,7 @@ describe('biorxivGetPublishedVersionTool', () => {
         servers: ['biorxiv', 'medrxiv'],
       },
     });
-    expect(err.data.recovery.hint).toContain('30 seconds');
+    expect(recoveryHint(err)).toContain('30 seconds');
     expect(err.cause).toBe(upstream);
   });
 
@@ -257,7 +258,7 @@ describe('biorxivGetPublishedVersionTool', () => {
       doi: '10.1101/2024.01.01.000001',
       server: 'both',
     });
-    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
       data: { reason: 'rate_limited', retryAfter: 45 },
@@ -281,7 +282,7 @@ describe('biorxivGetPublishedVersionTool', () => {
     mockGetPublishedVersion.mockResolvedValue(undefined);
     const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
     const input = biorxivGetPublishedVersionTool.input.parse({ doi: '10.1101/2024.01.01.000001' });
-    const err = await biorxivGetPublishedVersionTool.handler(input, ctx).catch((e) => e);
+    const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
     const serialized = JSON.stringify(err);
     expect(serialized).not.toMatch(/password|secret|key|token|BIORXIV_MAILTO/i);
   });

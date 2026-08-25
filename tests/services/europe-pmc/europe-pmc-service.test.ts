@@ -28,6 +28,13 @@ vi.mock('@/config/server-config.js', () => ({
   }),
 }));
 
+/** The URL the mocked fetch was called with on its first call. */
+function firstCalledUrl(): string {
+  const url = (mockFetch.mock.calls[0] as string[] | undefined)?.[0];
+  if (url === undefined) throw new Error('EuropePMC fetch was never called.');
+  return url;
+}
+
 function makeResponse(body: unknown): Response {
   return {
     text: () => Promise.resolve(JSON.stringify(body)),
@@ -223,7 +230,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'CRISPR', server: 'biorxiv' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     expect(decodeURIComponent(calledUrl).replace(/\+/g, ' ')).toContain('PUBLISHER:bioRxiv');
   });
 
@@ -231,7 +238,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'COVID', server: 'medrxiv' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     expect(decodeURIComponent(calledUrl).replace(/\+/g, ' ')).toContain('PUBLISHER:medRxiv');
   });
 
@@ -239,7 +246,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'test', server: 'both' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     const decoded = decodeURIComponent(calledUrl).replace(/\+/g, ' ');
     expect(decoded).toContain('PUBLISHER:bioRxiv');
     expect(decoded).toContain('PUBLISHER:medRxiv');
@@ -249,7 +256,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'test', dateFrom: '2024-01-01', dateTo: '2024-06-30' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     // URLSearchParams encodes spaces as '+' — normalise before asserting
     const decoded = decodeURIComponent(calledUrl).replace(/\+/g, ' ');
     expect(decoded).toContain('FIRST_PDATE:[2024-01-01 TO 2024-06-30]');
@@ -259,7 +266,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'test', dateFrom: '2024-01-01' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     const decoded = decodeURIComponent(calledUrl).replace(/\+/g, ' ');
     expect(decoded).toContain('FIRST_PDATE:[2024-01-01 TO');
   });
@@ -268,7 +275,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'test', limit: 999 }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     expect(calledUrl).toContain('pageSize=100');
   });
 
@@ -276,7 +283,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'test' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     expect(calledUrl).toContain('pageSize=25');
   });
 
@@ -286,10 +293,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'CRISPR', author: 'Jennifer Doudna' }, ctx);
-    const decoded = decodeURIComponent((mockFetch.mock.calls[0] as string[])[0]).replace(
-      /\+/g,
-      ' ',
-    );
+    const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
     expect(decoded).toContain('CRISPR AND AUTH:"Jennifer Doudna"');
   });
 
@@ -297,10 +301,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ author: 'Doudna J' }, ctx);
-    const decoded = decodeURIComponent((mockFetch.mock.calls[0] as string[])[0]).replace(
-      /\+/g,
-      ' ',
-    );
+    const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
     expect(decoded).toContain('AUTH:"Doudna J"');
     // No stray leading " AND " when there is no keyword query
     expect(decoded).not.toContain(' AND AUTH:"Doudna J"');
@@ -310,10 +311,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ author: 'Sm"ith' }, ctx);
-    const decoded = decodeURIComponent((mockFetch.mock.calls[0] as string[])[0]).replace(
-      /\+/g,
-      ' ',
-    );
+    const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
     expect(decoded).toContain('AUTH:"Smith"');
   });
 
@@ -323,7 +321,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'CRISPR' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     expect(decodeURIComponent(calledUrl)).toContain('cursorMark=*');
   });
 
@@ -331,7 +329,7 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'CRISPR', cursorMark: 'AoJ8y7Wd0S8' }, ctx);
-    const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
+    const calledUrl = firstCalledUrl();
     expect(decodeURIComponent(calledUrl)).toContain('cursorMark=AoJ8y7Wd0S8');
   });
 
