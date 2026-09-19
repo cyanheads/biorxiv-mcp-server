@@ -3,8 +3,8 @@
     "command": "npx",
     "args": ["-y", "@cyanheads/biorxiv-mcp-server"],
     "env": {
-      "MCP_TRANSPORT_TYPE": "stdio",
-      "BIORXIV_MAILTO": ""
-    }
+      "MCP_TRANSPORT_TYPE": "stdio"
+    },
+    "env_vars": ["BIORXIV_MAILTO"]
   }
 }
