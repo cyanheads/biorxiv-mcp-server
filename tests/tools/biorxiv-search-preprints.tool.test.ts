@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
@@ -77,6 +77,19 @@ describe('biorxivSearchPreprintsTool', () => {
   });
 
   // ── Happy path ──────────────────────────────────────────────────────────────
+
+  it('accepts start_date / end_date, the date-bound spelling biorxiv_list_recent uses', async () => {
+    const result = await runToolContract(
+      biorxivSearchPreprintsTool,
+      { query: 'crispr', start_date: '2024-01-01', end_date: '2024-01-31' } as never,
+      { context: { errors: biorxivSearchPreprintsTool.errors } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(mockEpmcSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ dateFrom: '2024-01-01', dateTo: '2024-01-31' }),
+      expect.anything(),
+    );
+  });
 
   it('returns enriched results for a keyword query', async () => {
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });

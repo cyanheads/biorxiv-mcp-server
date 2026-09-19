@@ -65,6 +65,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
+  // biorxiv_search_preprints spells its date bounds date_from / date_to.
+  inputAliases: { date_from: 'start_date', date_to: 'end_date' },
+
   input: z.object({
     start_date: z.string().describe('Start of the date interval (YYYY-MM-DD).'),
     end_date: z.string().describe('End of the date interval (YYYY-MM-DD).'),

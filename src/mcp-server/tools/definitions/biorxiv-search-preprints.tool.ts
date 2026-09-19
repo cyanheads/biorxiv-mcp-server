@@ -102,6 +102,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. A EuropePMC rate limit (HTTP 429) fails the call with a retryable rate_limited error carrying the wait in seconds — a rate-limited metadata enrichment does not, and instead marks the affected record enrichment_error: "rate_limited".',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
+  // biorxiv_list_recent spells its date bounds start_date / end_date.
+  inputAliases: { start_date: 'date_from', end_date: 'date_to' },
+
   input: z
     .object({
       query: z
