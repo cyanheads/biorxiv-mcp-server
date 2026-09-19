@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tests for the server config schema — the MCPB placeholder strip
+ * @fileoverview Tests for the server config schema — blank and MCPB-placeholder values
  * and the web base URL defaults across deployment shapes. This runs at startup
  * before anything else, so a regression here takes the whole server down.
  * @module tests/config/server-config.test
@@ -58,6 +58,11 @@ describe('web base URLs', () => {
 describe('mailto', () => {
   it('falls back to undefined when MCPB leaves the placeholder unsubstituted', () => {
     vi.stubEnv('BIORXIV_MAILTO', mcpbPlaceholder('BIORXIV_MAILTO'));
+    expect(getServerConfig().mailto).toBeUndefined();
+  });
+
+  it('reads a blank value as unset', () => {
+    vi.stubEnv('BIORXIV_MAILTO', '');
     expect(getServerConfig().mailto).toBeUndefined();
   });
 
