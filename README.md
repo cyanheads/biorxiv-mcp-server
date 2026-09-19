@@ -19,11 +19,19 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://biorxiv.caseyjhand.com/mcp](https://biorxiv.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
-## Tools
+## Overview
 
-Six tools for working with bioRxiv and medRxiv preprint data:
+bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. Fetch preprints by DOI, browse by date interval or subject category, search by keyword and author, resolve journal-publication crosswalks, and extract full text from the rendered article page, from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -34,100 +42,102 @@ Six tools for working with bioRxiv and medRxiv preprint data:
 | `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown extracted from its rendered HTML article page |
 | `biorxiv_list_categories` | List valid subject category strings for bioRxiv and medRxiv |
 
-### `biorxiv_get_preprint`
+## Capability reference
 
-Fetch preprint metadata by DOI — all revisions in one call.
+### `biorxiv_get_preprint` <sub>tool</sub>
 
 - Batch fetch up to 10 DOIs in a single request
-- Each DOI returns the full revision history in `collection[]` — one API call per DOI, no enumeration loop
-- Includes title, authors, abstract, category, license, JATS XML full-text link (`jatsxml`), and published journal DOI when the preprint has been accepted
-- Scope to `biorxiv`, `medrxiv`, or `both`; when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
-- Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag — a DOI is only reported as not found when every attempted server answered
-- A lookup the origin rate-limited (HTTP 429) reports as `rate_limited` rather than folding into `upstream_unavailable`, and carries `retryAfter` — the wait in seconds `api.biorxiv.org` asked for
+- Each DOI returns its full revision history in `revisions[]` — one API call per DOI, no enumeration loop
+- Includes title, authors, abstract, category, license, JATS XML full-text link (`jatsxmlUrl`), and published journal DOI (`publishedJournalDoi`) once accepted
+- Scope to `biorxiv`, `medrxiv`, or `both` (default `both`); when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
+- Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag — a DOI is only reported `not_found` when every attempted server answered
+- A rate-limited lookup (HTTP 429) reports `reason: "rate_limited"` rather than folding into `upstream_unavailable`, carrying `retryAfter` — the wait in seconds `api.biorxiv.org` asked for
 
 ---
 
-### `biorxiv_list_recent`
+### `biorxiv_list_recent` <sub>tool</sub>
 
-Page through preprints in a date interval.
-
-- Server-side category filtering via `?category=…` — pass a value from `biorxiv_list_categories`
+- Optional server-side category filter — pass a value from `biorxiv_list_categories`
 - Fixed page size of 30 (API constraint); advance with integer `cursor` (0, 30, 60, …)
-- Response includes `total` count per server for calculating remaining pages
-- When `server="both"`, each server paginates independently; response surfaces per-server pagination state (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`)
-- A server whose cursor is past its last page is marked `exhausted: true` — the API reports `total: 0` for an out-of-range cursor, so that count is an artifact rather than the interval total
-- One server not answering under `server="both"` is named in `failed[]` rather than dropped; the other server's page is still returned, and a non-empty `failed[]` marks the result set as partial
-- Every attempted server failing raises a retryable `upstream_unavailable` (or `rate_limited`) error instead of returning an empty page — nothing answered, so an empty interval was never established
+- Response includes a `total` count per server; a cursor past the last page is marked `exhausted: true` rather than reading as zero results in the interval
+- When `server="both"` (default), per-server pagination state is independent (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); one server not answering is named in `failed[]` while the other's page still returns
+- Every attempted server failing raises a retryable `upstream_unavailable` (or `rate_limited`) error instead of an empty page
 
 ---
 
-### `biorxiv_search_preprints`
+### `biorxiv_search_preprints` <sub>tool</sub>
 
-Keyword and/or author search with relevance ranking.
-
-- EuropePMC powers relevance ranking (indexes new preprints within 1–2 days of posting); bioRxiv/medRxiv API provides canonical metadata enrichment
-- Optional `author` maps to an EuropePMC `AUTH:"…"` field query, ANDed with the keyword query — supply `query`, `author`, or both
-- Covers both servers by default; scope down with `server`
-- Optional date range filters (`date_from`, `date_to`)
-- Enriched results carry the same latest-revision fields `biorxiv_get_preprint` returns — including `type`, `license`, `funder`, and `authorCorrespondingInstitution`
-- Enrichment failures degrade gracefully to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`)
-- A EuropePMC rate limit (HTTP 429) raises a retryable `rate_limited` error carrying the origin's `Retry-After` wait — the search is the primary call and has no metadata to fall back on, unlike the enrichment step
+- Query and/or author required (author maps to an EuropePMC `AUTH:"…"` field query, ANDed with the keyword query); optional `date_from`/`date_to` range and `server` scope (default `both`)
+- Up to 100 results per page (default 25); `cursor_mark` pages through the same ranked list
+- EuropePMC powers relevance ranking (indexes new preprints within 1–2 days of posting); the bioRxiv/medRxiv API enriches matches with canonical metadata
+- Enriched results carry the same latest-revision fields as `biorxiv_get_preprint`, including `type`, `license`, `funder`, and `authorCorrespondingInstitution`
+- Enrichment failures degrade to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`)
+- A EuropePMC rate limit (HTTP 429) raises a retryable `rate_limited` error carrying the origin's `Retry-After` wait — the search itself has no metadata to fall back on, unlike enrichment
 
 ---
 
-### `biorxiv_get_published_version`
+### `biorxiv_get_published_version` <sub>tool</sub>
 
-Resolve a preprint DOI to its journal publication crosswalk.
-
-- Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `publishedJournalDoi` field in `biorxiv_get_preprint`
-- Returns journal DOI, journal name, published date, and corresponding author institution
-- Use when the preprint's `publishedJournalDoi` field is present and you need the full crosswalk record
-- Scope to `biorxiv`, `medrxiv`, or `both`; `both` is the default because the two servers share the `10.1101/` DOI prefix, and the output `server` field names the one that answered
-- No server answering raises a retryable `upstream_unavailable`, or `rate_limited` with the origin's wait when the failure was an HTTP 429 — never `doi_not_found`, which would assert an absence nothing established
+- Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `publishedJournalDoi` field on `biorxiv_get_preprint`
+- Returns journal DOI, journal name, published date, and corresponding-author institution; the output `server` field names which server answered (never `"both"`)
+- Scope to `biorxiv`, `medrxiv`, or `both` (default `both`) — the two servers share the `10.1101/` DOI prefix, so a DOI alone doesn't identify one
+- No server answering raises a retryable `upstream_unavailable`, or `rate_limited` with the origin's wait on an HTTP 429 — never `doi_not_found`, which would assert an absence nothing established
 
 ---
 
-### `biorxiv_get_fulltext`
-
-Retrieve a preprint's full text as best-effort Markdown.
+### `biorxiv_get_fulltext` <sub>tool</sub>
 
 - Fetches the rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`) and extracts Markdown — there is no keyless JATS source
-- Resolves the latest version via the details API first, for the URL version and clean not-found handling
-- Scope to `biorxiv`, `medrxiv`, or `both`; `both` is the default because the two servers share the `10.1101/` DOI prefix. Only the DOI resolution fans out — the full-text fetch targets the single server that answered, named in the output `server` field
-- Long articles page via `offset`/`limit` character chunking (`totalChars`, `remainingChars`, `hasMore`); the extracted article is cached per version, so paging costs one origin fetch rather than one per chunk
+- Resolves the latest version via the details API first; only DOI resolution fans out across `biorxiv`/`medrxiv`/`both` (default `both`) — the full-text fetch itself targets whichever server answered, named in the output `server` field
+- Long articles page via `offset`/`limit` character chunking (default `limit` 20,000, max 50,000); response reports `totalChars`, `remainingChars`, and `hasMore`, and the extracted article is cached per version so paging costs one origin fetch
 - PDF-only preprints and blocked/challenge pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`
-- An origin rate limit (HTTP 429) returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, rather than a bare fetch failure. Both origins this tool touches can hit it — the article page during the full-text fetch, `api.biorxiv.org` during version resolution — and the recovery hint names which of them are limiting, since `biorxiv_get_preprint` is only a useful fallback while the metadata origin is answering
+- An origin rate limit (HTTP 429) — on either the article-page host or `api.biorxiv.org` during resolution — returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, with the recovery hint naming which origin is limiting
 
 ---
 
-### `biorxiv_list_categories`
-
-Return the static subject category taxonomy for both servers.
+### `biorxiv_list_categories` <sub>tool</sub>
 
 - No API call — hardcoded static list (~30 bioRxiv + ~50 medRxiv categories)
 - Use to validate category strings before passing to `biorxiv_list_recent`
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling across all tools
-- Pluggable auth (`none`, `jwt`, `oauth`)
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 bioRxiv-specific:
 
-- `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff. An origin rate limit (HTTP 429) is classified as a retryable `rate_limited` error carrying the parsed `Retry-After` wait; the upstream response body never reaches the error payload
-- `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword and/or author results. An origin rate limit (HTTP 429) is classified the same way as the JSON API's — a retryable `rate_limited` error carrying the parsed `Retry-After` wait, with the upstream response body kept out of the error payload
+- `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff; a 429 is classified as a retryable `rate_limited` error carrying the parsed `Retry-After` wait, with the upstream response body kept out of the payload
+- `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword and/or author results, classified the same way on a 429
 - `BiorxivFullTextService` fetches and extracts Markdown from the rendered HTML article pages on `www.biorxiv.org` / `www.medrxiv.org` — a distinct origin from the JSON API
 - Two-server fan-out via `Promise.allSettled` — both `biorxiv` and `medrxiv` queried in parallel when `server="both"`, results merged and deduplicated by DOI
 - Polite `User-Agent` header including a mailto address (`BIORXIV_MAILTO` env var) per Cold Spring Harbor Lab API guidelines
 - Pairs with **pubmed-mcp-server** (post-publication), **openalex-mcp-server** (citation analytics), and **crossref-mcp-server** (DOI metadata)
 
+Agent-friendly output:
+
+- Graceful partial failure — per-DOI and per-server failures land in `failed[]` with a typed `reason` and `retryable` flag instead of aborting the whole batch or listing call
+- Rate-limit transparency — a 429 from any upstream surfaces as `reason: "rate_limited"` carrying the origin's parsed `retryAfter` wait, distinguished from a generic `upstream_unavailable`
+- Discriminated enrichment outputs — `biorxiv_search_preprints` results carry `enriched` plus a typed `enrichment_error` (`service_error` / `rate_limited` / `not_found`) so callers branch on data, not string parsing
+- Paging and pagination state — `exhausted` cursors are flagged as an out-of-range artifact rather than an empty interval, and `biorxiv_get_fulltext` reports `totalChars` / `remainingChars` / `hasMore` for chunked reads
+
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://biorxiv.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "biorxiv-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://biorxiv.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 
@@ -190,7 +200,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 BIORXIV_MAILTO=your@email.com bun run
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 
 ### Installation
 
@@ -237,6 +247,8 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `OTEL_ENABLED` | Enable OpenTelemetry instrumentation. | `false` |
+
+See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ## Running the server
 
@@ -294,7 +306,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
