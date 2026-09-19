@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.7](changelog/0.2.x/0.2.7.md) — 2026-09-19
+
+Adopts mcp-ts-core 0.13.5 — date-key parameter aliases, richer tool-error text, and a stateless HTTP session default
+
 ## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-08-25
 
 Fixes the GHCR build stage that made 0.2.5 ship with no container image — this is the first tagged image, carrying everything 0.2.5 shipped elsewhere

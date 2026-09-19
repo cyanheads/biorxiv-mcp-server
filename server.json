@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/biorxiv-mcp-server",
     "source": "github"
   },
-  "version": "0.2.6",
+  "version": "0.2.7",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/biorxiv-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "packageArguments": [
         {
           "type": "positional",
@@ -68,7 +68,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/biorxiv-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "packageArguments": [
         {
           "type": "positional",
