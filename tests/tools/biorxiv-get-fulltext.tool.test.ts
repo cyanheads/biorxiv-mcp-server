@@ -32,10 +32,13 @@ function articleResult(markdown: string): FullTextFetchResult {
     kind: 'article',
     markdown,
     title: 'Bilateral integration in somatosensory cortex',
-    wordCount: 8000,
     sourceUrl: SOURCE_URL,
   };
 }
+
+/** Twenty whitespace-delimited words, 160 characters. */
+const TWENTY_WORDS =
+  'Macrophages drive limb regeneration in axolotls and their depletion blocks blastema formation entirely while fibroblasts persist unchanged throughout the wound.';
 
 describe('biorxivGetFulltextTool', () => {
   beforeEach(() => {
@@ -62,7 +65,8 @@ describe('biorxivGetFulltextTool', () => {
     expect(result.content).toHaveLength(100);
     expect(result.totalChars).toBe(100);
     expect(result.hasMore).toBe(false);
-    expect(result.wordCount).toBe(8000);
+    // One unbroken run of characters is one whitespace-delimited word.
+    expect(result.wordCount).toBe(1);
     // fetchFullText receives the resolved version
     expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', DOI, '2', expect.anything());
   });
@@ -162,6 +166,31 @@ describe('biorxivGetFulltextTool', () => {
     expect(result.length).toBe(10);
     expect(result.remainingChars).toBe(0);
     expect(result.hasMore).toBe(false);
+  });
+
+  // ── wordCount ────────────────────────────────────────────────────────────────
+
+  it('derives wordCount from the Markdown it pages over, ignoring any figure riding in with it', async () => {
+    const markdown = '# Results\n\nMacrophages drive limb regeneration in axolotls.';
+    // An extractor figure (or one read back from an older cache entry) must not
+    // override the count of the text actually served.
+    mockFetchFullText.mockResolvedValue({ ...articleResult(markdown), wordCount: 113 });
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+    const result = await biorxivGetFulltextTool.handler(input, ctx);
+    expect(result.content).toBe(markdown);
+    expect(result.wordCount).toBe(8);
+  });
+
+  it('reports the full-article wordCount on a middle chunk, not the chunk count', async () => {
+    mockFetchFullText.mockResolvedValue(articleResult(TWENTY_WORDS));
+    const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+    const input = biorxivGetFulltextTool.input.parse({ doi: DOI, offset: 40, limit: 30 });
+    const result = await biorxivGetFulltextTool.handler(input, ctx);
+    expect(result.length).toBe(30);
+    expect(result.hasMore).toBe(true);
+    expect(result.wordCount).toBe(20);
+    expect(biorxivGetFulltextTool.output.parse(result).wordCount).toBe(20);
   });
 
   it('throws offset_out_of_range when offset is past the end', async () => {
@@ -374,7 +403,7 @@ describe('biorxivGetFulltextTool', () => {
       title: 'A Title',
       content: 'The article body.',
       contentFormat: 'html-markdown',
-      wordCount: 8000,
+      wordCount: 3,
       sourceUrl: SOURCE_URL,
       offset: 0,
       length: 17,
@@ -384,6 +413,7 @@ describe('biorxivGetFulltextTool', () => {
     });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain(DOI);
+    expect(text).toContain('**Full-article word count:** 3');
     // The server that answered the DOI resolution reaches the content[] surface too
     expect(text).toContain('**Server:** biorxiv');
     expect(text).toContain('A Title');
@@ -401,6 +431,7 @@ describe('biorxivGetFulltextTool', () => {
       version: '1',
       content: 'chunk one',
       contentFormat: 'html-markdown',
+      wordCount: 7,
       sourceUrl: SOURCE_URL,
       offset: 0,
       length: 9,

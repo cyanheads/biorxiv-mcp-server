@@ -1,9 +1,11 @@
 /**
  * @fileoverview biorxiv_get_fulltext tool — retrieves a preprint's full text by
  * fetching its rendered HTML page (`www.{server}.org/content/{doi}v{N}.full`) and
- * extracting readable Markdown. The latest version is resolved via the details
- * API first (for the URL version and clean not-found handling), then the HTML is
- * fetched and run through the framework extractor. bioRxiv and medRxiv share the
+ * extracting readable Markdown. The version is the one requested — the version
+ * input or a vN suffix on the DOI, which must agree when both are given — or
+ * else the latest; either way the details API is queried first (to confirm the
+ * version exists and for clean not-found handling), then the HTML is fetched
+ * and run through the framework extractor. bioRxiv and medRxiv share the
  * 10.1101/ DOI prefix, so the default server="both" resolves the DOI against both
  * in parallel; the fan-out is narrower than biorxiv_get_published_version's — only
  * the resolution step fans out, and the full-text fetch targets the single server
@@ -31,21 +33,27 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import { getBiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
-import { describeWait, findRateLimit } from '@/services/shared.js';
-
-const DOI_REGEX = /^10\.\d{4,}\//;
+import { describeWait, findRateLimit, normalizeDoi } from '@/services/shared.js';
 
 export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
   title: 'Get Preprint Full Text',
   description:
-    'Retrieve a preprint\'s full text as best-effort Markdown, extracted from its rendered HTML article page. Resolves the latest version via the details API, then fetches and extracts the body — abstract, sections, and references. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) resolves the DOI against both in parallel and the response reports which server answered. This is HTML-to-Markdown extraction, not structured JATS: section structure is approximate and not guaranteed. Long articles exceed a single response, so use offset and limit to page through them (the response reports totalChars, remainingChars, and hasMore); paging is cheap because the extracted article is cached per version for an hour after the first read, so only the first chunk pays for a fetch. Not every preprint has an extractable HTML page — some are PDF-only and some origins block programmatic access — in which case a fulltext_unavailable error routes you to biorxiv_get_preprint for the title, abstract, and metadata. For a preprint that has been published in a journal, the journal\'s version may have richer full text elsewhere.',
+    'Retrieve a preprint\'s full text as best-effort Markdown, extracted from its rendered HTML article page. Reads the latest version unless one is requested (the version input, or a vN suffix on the DOI), confirms it via the details API, then fetches and extracts the body — abstract, sections, and references. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) resolves the DOI against both in parallel and the response reports which server answered. This is HTML-to-Markdown extraction, not structured JATS: section structure is approximate and not guaranteed. Long articles exceed a single response, so use offset and limit to page through them (the response reports totalChars, remainingChars, and hasMore); paging is cheap because the extracted article is cached per version for an hour after the first read, so only the first chunk pays for a fetch. Not every preprint has an extractable HTML page — some are PDF-only and some origins block programmatic access — in which case a fulltext_unavailable error routes you to biorxiv_get_preprint for the title, abstract, and metadata. For a preprint that has been published in a journal, the journal\'s version may have richer full text elsewhere.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
     doi: z
       .string()
       .describe(
-        'Preprint DOI (e.g. 10.1101/2024.05.28.596311 or 10.64898/2026.05.07.723463). The latest version is resolved automatically.',
+        'Preprint DOI (e.g. 10.1101/2024.05.28.596311 or 10.64898/2026.05.07.723463). A doi.org or biorxiv.org/medrxiv.org article URL, a doi: prefix, or a .full suffix is accepted and stripped; a trailing vN (…596311v2) requests that version. Without one, the latest version is resolved automatically.',
+      ),
+    version: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        'Preprint version to read (1, 2, …) — the revision numbers biorxiv_get_preprint lists. Omit for the latest version. Must match a vN suffix on the DOI when both are given.',
       ),
     server: z
       .enum(['biorxiv', 'medrxiv', 'both'])
@@ -73,11 +81,13 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
   }),
 
   output: z.object({
-    doi: z.string().describe('The resolved preprint DOI.'),
+    doi: z.string().describe('The resolved preprint DOI, in bare form.'),
     server: z.enum(['biorxiv', 'medrxiv']).describe('Server the preprint was resolved on.'),
     version: z
       .string()
-      .describe('Preprint version whose full text was retrieved (the latest revision).'),
+      .describe(
+        'Preprint version whose full text was retrieved — the requested one, or the latest revision when none was requested. Pass it back as version when paging.',
+      ),
     title: z
       .string()
       .optional()
@@ -94,9 +104,8 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       ),
     wordCount: z
       .number()
-      .optional()
       .describe(
-        'Approximate word count of the FULL extracted article as reported by the extractor (not just the returned chunk). Absent when the extractor reported none.',
+        'Approximate word count of the FULL extracted article, not just the returned chunk — whitespace-delimited tokens of the same Markdown text that totalChars measures, so Markdown markers such as # and - count too.',
       ),
     sourceUrl: z.string().describe('The full-text HTML page the content was extracted from.'),
     offset: z
@@ -141,9 +150,23 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
     {
       reason: 'invalid_doi_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The input DOI does not match the 10.NNNN/ pattern.',
+      when: 'The input DOI does not match the 10.NNNN/ pattern, even after URL, doi:, and suffix stripping.',
       recovery:
         'Correct the DOI format — bioRxiv/medRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
+    },
+    {
+      reason: 'version_conflict',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The DOI carries a vN suffix and the version input names a different version.',
+      recovery:
+        'Name the version once — drop the vN suffix from the DOI or the version input — or make the two agree.',
+    },
+    {
+      reason: 'version_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The preprint exists but has no revision with the requested version number.',
+      recovery:
+        'Request one of the available versions listed in the error, or omit the version to read the latest revision.',
     },
     {
       reason: 'doi_not_found',
@@ -192,28 +215,53 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       limit: input.limit,
     });
 
-    if (!DOI_REGEX.test(input.doi)) {
+    const parsed = normalizeDoi(input.doi);
+    if (!parsed) {
       throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.doi}`, {
         ...ctx.recoveryFor('invalid_doi_format'),
       });
     }
+    const { doi } = parsed;
 
-    // Resolve the preprint and its latest version via the JSON details API — this
-    // provides the version for the full-text URL and clean not-found handling.
-    // Only this step fans out; the full-text fetch targets the server that answered.
+    // A version can arrive two ways — a vN suffix on a pasted DOI or URL, and the
+    // version input. Agreeing is fine; disagreeing is ambiguous, and fetching
+    // either one would silently hand back text the caller did not ask for.
+    const inputVersion = input.version === undefined ? undefined : String(input.version);
+    if (
+      parsed.version !== undefined &&
+      inputVersion !== undefined &&
+      parsed.version !== inputVersion
+    ) {
+      throw ctx.fail(
+        'version_conflict',
+        `The DOI names version v${parsed.version} but the version input is ${inputVersion}.`,
+        {
+          doi,
+          doiVersion: parsed.version,
+          version: input.version,
+          ...ctx.recoveryFor('version_conflict'),
+        },
+      );
+    }
+    const requestedVersion = inputVersion ?? parsed.version;
+
+    // Resolve the preprint and its versions via the JSON details API — this
+    // confirms the requested version exists (or supplies the latest), and gives
+    // clean not-found handling. Only this step fans out; the full-text fetch
+    // targets the server that answered.
     const service = getBiorxivApiService();
     const servers: BiorxivServer[] =
       input.server === 'both' ? ['biorxiv', 'medrxiv'] : [input.server];
     const settled = await Promise.allSettled(
-      servers.map((server) => service.getDetails(input.doi, server, ctx)),
+      servers.map((server) => service.getDetails(doi, server, ctx)),
     );
 
-    let resolved: { server: BiorxivServer; version: string } | undefined;
+    let resolved: { server: BiorxivServer; versions: string[] } | undefined;
     for (const [i, settledResult] of settled.entries()) {
       if (settledResult.status === 'fulfilled' && settledResult.value.length > 0) {
         resolved = {
           server: servers[i] as BiorxivServer,
-          version: settledResult.value.at(-1)?.version ?? '1',
+          versions: settledResult.value.map((r) => r.version ?? '1'),
         };
         break;
       }
@@ -239,9 +287,9 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
           const wait = describeWait(rateLimit.retryAfter);
           throw ctx.fail(
             'rate_limited',
-            `Version lookup for ${input.doi} failed — ${detail}`,
+            `Version lookup for ${doi} failed — ${detail}`,
             {
-              doi: input.doi,
+              doi,
               servers: rejections.map((f) => f.server),
               ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
               recovery: {
@@ -253,24 +301,39 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
         }
         throw ctx.fail(
           'upstream_unavailable',
-          `Version lookup for ${input.doi} failed — ${detail}`,
+          `Version lookup for ${doi} failed — ${detail}`,
           {
-            doi: input.doi,
+            doi,
             servers: rejections.map((f) => f.server),
             ...ctx.recoveryFor('upstream_unavailable'),
           },
           { cause: rejections[0]?.error },
         );
       }
-      throw ctx.fail(
-        'doi_not_found',
-        `No preprint found for ${input.doi} on ${servers.join(' or ')}.`,
-        { doi: input.doi, servers, ...ctx.recoveryFor('doi_not_found') },
-      );
+      throw ctx.fail('doi_not_found', `No preprint found for ${doi} on ${servers.join(' or ')}.`, {
+        doi,
+        servers,
+        ...ctx.recoveryFor('doi_not_found'),
+      });
     }
 
-    const { server, version } = resolved;
-    const result = await getBiorxivFullTextService().fetchFullText(server, input.doi, version, ctx);
+    const { server, versions } = resolved;
+    const latestVersion = versions.at(-1) ?? '1';
+    if (requestedVersion !== undefined && !versions.includes(requestedVersion)) {
+      throw ctx.fail(
+        'version_not_found',
+        `${doi} has no version ${requestedVersion} on ${server} — available versions: ${versions.join(', ')}.`,
+        {
+          doi,
+          server,
+          version: requestedVersion,
+          availableVersions: versions,
+          ...ctx.recoveryFor('version_not_found'),
+        },
+      );
+    }
+    const version = requestedVersion ?? latestVersion;
+    const result = await getBiorxivFullTextService().fetchFullText(server, doi, version, ctx);
     if (result.kind === 'unavailable') {
       if (result.reason === 'rate_limited') {
         // Dynamic recovery — the origin's own wait is more actionable than the
@@ -292,7 +355,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
         const retryAfter = waits.length > 0 ? Math.max(...waits) : undefined;
         const wait = describeWait(retryAfter);
         throw ctx.fail('rate_limited', result.detail, {
-          doi: input.doi,
+          doi,
           server,
           version,
           sourceUrl: result.sourceUrl,
@@ -305,7 +368,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
         });
       }
       throw ctx.fail('fulltext_unavailable', result.detail, {
-        doi: input.doi,
+        doi,
         server,
         version,
         sourceUrl: result.sourceUrl,
@@ -313,7 +376,11 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       });
     }
 
+    // Both measure the one string this call pages over, so they cannot disagree
+    // with each other or with content. The service trims the Markdown and never
+    // returns it empty, so splitting yields no empty tokens.
     const totalChars = result.markdown.length;
+    const wordCount = result.markdown.split(/\s+/).length;
     if (input.offset >= totalChars) {
       throw ctx.fail(
         'offset_out_of_range',
@@ -332,18 +399,18 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       ctx.enrich.truncated({
         shown: length,
         cap: input.limit,
-        guidance: `Full text truncated at the ${input.limit}-character limit. Call biorxiv_get_fulltext again with offset=${end} to read the next chunk.`,
+        guidance: `Full text truncated at the ${input.limit}-character limit. Call biorxiv_get_fulltext again with version=${version}, offset=${end} to read the next chunk.`,
       });
     }
 
     return {
-      doi: input.doi,
+      doi,
       server,
       version,
       ...(result.title && { title: result.title }),
       content,
       contentFormat: 'html-markdown' as const,
-      ...(result.wordCount !== undefined && { wordCount: result.wordCount }),
+      wordCount,
       sourceUrl: result.sourceUrl,
       offset: input.offset,
       length,
@@ -363,8 +430,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
     lines.push(
       `**Characters ${result.offset.toLocaleString()}–${(end - 1).toLocaleString()} of ${result.totalChars.toLocaleString()}** | Length: ${result.length.toLocaleString()} | Remaining: ${result.remainingChars.toLocaleString()} | hasMore: ${result.hasMore}`,
     );
-    if (result.wordCount !== undefined)
-      lines.push(`**Full-article word count:** ${result.wordCount}`);
+    lines.push(`**Full-article word count:** ${result.wordCount}`);
     lines.push(`**Source:** ${result.sourceUrl}`);
     lines.push(`**Format:** ${result.contentFormat}`);
     lines.push(
@@ -374,7 +440,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
     lines.push(result.content);
     if (result.hasMore) {
       lines.push(
-        `\n---\n_Call biorxiv_get_fulltext again with doi=${result.doi}, offset=${end} to read the next chunk._`,
+        `\n---\n_Call biorxiv_get_fulltext again with doi=${result.doi}, version=${result.version}, offset=${end} to read the next chunk._`,
       );
     } else {
       lines.push('\n---\n_End of extracted text._');

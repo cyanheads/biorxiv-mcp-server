@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for shared service utilities — detectHtmlError,
- * SERVER_VERSION, normalizeUpstreamText, parseRetryAfterSeconds, and
- * findRateLimit.
+ * SERVER_VERSION, normalizeUpstreamText, normalizeDoi, parseRetryAfterSeconds,
+ * and findRateLimit.
  * @module tests/services/shared.test
  */
 
@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   detectHtmlError,
   findRateLimit,
+  normalizeDoi,
   normalizeUpstreamText,
   parseRetryAfterSeconds,
   SERVER_VERSION,
@@ -199,5 +200,92 @@ describe('findRateLimit', () => {
     // No `reason` marker — the framework's own status mapping, not our contract.
     const bare = new McpError(JsonRpcErrorCode.RateLimited, 'Status: 429', { status: 429 });
     expect(findRateLimit([bare])).toBeUndefined();
+  });
+});
+
+describe('normalizeDoi', () => {
+  const BARE = '10.64898/2026.03.11.711201';
+
+  it.each([
+    '10.1101/2024.01.15.575123',
+    '10.64898/2026.05.07.723463',
+    '10.1101/2020.03.26.20044651',
+    '10.1101/339853',
+  ])('returns an already-bare DOI unchanged with no version: %s', (doi) => {
+    expect(normalizeDoi(doi)).toEqual({ doi });
+  });
+
+  it.each([
+    [`https://doi.org/${BARE}`],
+    [`http://doi.org/${BARE}`],
+    [`http://dx.doi.org/${BARE}`],
+    [`https://dx.doi.org/${BARE}`],
+    [`doi:${BARE}`],
+    [`DOI: ${BARE}`],
+    [`https://www.biorxiv.org/content/${BARE}`],
+    [`https://www.medrxiv.org/content/${BARE}`],
+    [`http://biorxiv.org/content/${BARE}`],
+    [`medrxiv.org/content/${BARE}`],
+    [`${BARE}.full`],
+    [`${BARE}.full.pdf`],
+    [`${BARE}/`],
+    [`\t${BARE}\n`],
+  ])('strips the prefix or suffix from %s', (input) => {
+    expect(normalizeDoi(input)).toEqual({ doi: BARE });
+  });
+
+  it.each([
+    [`${BARE}v2`, '2'],
+    [`${BARE}v12.full`, '12'],
+    [`https://www.biorxiv.org/content/${BARE}v3.full.pdf`, '3'],
+    [`https://www.medrxiv.org/content/${BARE}v1.full?versioned=true#sec-2`, '1'],
+    [`https://www.biorxiv.org/content/${BARE}v02`, '2'],
+    [`${BARE}V2`, '2'],
+    [`${BARE}V3.FULL`, '3'],
+    [`https://www.biorxiv.org/content/${BARE}v1.article-metrics`, '1'],
+    [`https://www.biorxiv.org/content/${BARE}v2.supplementary-material`, '2'],
+    [`https://www.biorxiv.org/content/${BARE}v2.article-info`, '2'],
+    [`https://www.biorxiv.org/content/${BARE}v1.full-text`, '1'],
+    [`https://www.biorxiv.org/content/${BARE}v4.full.pdf+html`, '4'],
+  ])('reads the version suffix off %s', (input, version) => {
+    expect(normalizeDoi(input)).toEqual({ doi: BARE, version });
+  });
+
+  it.each([
+    `${BARE}.abstract`,
+    `${BARE}.Full.PDF`,
+    `https://www.medrxiv.org/content/${BARE}.article-metrics/`,
+  ])('strips an article-tab suffix with no version from %s', (input) => {
+    expect(normalizeDoi(input)).toEqual({ doi: BARE });
+  });
+
+  it('never strips a digit group of the identifier itself', () => {
+    expect(normalizeDoi('10.1101/2020.03.26.20044651.full')).toEqual({
+      doi: '10.1101/2020.03.26.20044651',
+    });
+    expect(normalizeDoi('10.1101/339853v1.full')).toEqual({
+      doi: '10.1101/339853',
+      version: '1',
+    });
+  });
+
+  it('leaves a v that does not follow a digit, or has no digits after it, in place', () => {
+    expect(normalizeDoi('10.1234/abcv2')).toEqual({ doi: '10.1234/abcv2' });
+    expect(normalizeDoi(`${BARE}v`)).toEqual({ doi: `${BARE}v` });
+  });
+
+  it.each([
+    'bad-doi',
+    '10notadoi',
+    '10.1101/',
+    '10.12/short-registrant',
+    'https://doi.org/',
+    'doi:',
+    '',
+    '   ',
+    '10.1101/2024.01.15 575123',
+    'not-a-doi; DROP TABLE preprints;--',
+  ])('returns undefined for %j', (input) => {
+    expect(normalizeDoi(input)).toBeUndefined();
   });
 });

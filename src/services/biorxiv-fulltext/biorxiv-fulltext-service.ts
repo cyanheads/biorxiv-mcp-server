@@ -11,7 +11,7 @@
  * the extractor.
  *
  * Extracted articles are cached in `ctx.state` under
- * `fulltext/v1/{server}/{doi}/{version}` for {@link FULLTEXT_CACHE_TTL_SECONDS}
+ * `fulltext/v2/{server}/{doi}/{version}` for {@link FULLTEXT_CACHE_TTL_SECONDS}
  * seconds, so paging a long article with offset/limit costs one origin fetch and
  * one extraction instead of one per chunk. `ctx.state` is tenant-scoped, which is
  * the intended blast radius — no cross-tenant or process-wide sharing. Only
@@ -67,15 +67,15 @@ const EXPECTED_STATUSES = [...DETERMINISTIC_UNAVAILABLE_STATUSES, 429];
 const FULLTEXT_CACHE_TTL_SECONDS = 3_600;
 
 /**
- * Cache key: `fulltext/v1/{server}/{doi}/{version}`. Slash-delimited because the
+ * Cache key: `fulltext/v2/{server}/{doi}/{version}`. Slash-delimited because the
  * storage layer validates keys against `[a-zA-Z0-9_.\-/]` — a colon separator is
  * rejected outright, and a DOI's own `/` and `.` are already inside the allowed
- * set. The `v1` segment is the cached-value schema generation — bump it when
+ * set. The `v2` segment is the cached-value schema generation — bump it when
  * {@link CachedArticle} changes so entries written by an older build are never
- * read back under the new shape.
+ * read back under the new shape. (`v2` dropped the extractor's `wordCount`.)
  */
 const cacheKeyFor = (server: BiorxivServer, doi: string, version: string): string =>
-  `fulltext/v1/${server}/${doi}/${version}`;
+  `fulltext/v2/${server}/${doi}/${version}`;
 
 /**
  * Reads a cached extraction, treating any storage failure as a miss. A key the
@@ -135,13 +135,16 @@ function isChallengePage(html: string): boolean {
  * Markdown plus best-effort metadata; `unavailable` records why no readable full
  * text was produced so the tool can raise a typed error and route the agent to
  * metadata instead of returning an empty or garbage body.
+ *
+ * No word count: the extractor's figure is taken from its intermediate HTML, not
+ * from `markdown`, so every measure of the article is derived from `markdown`
+ * where it is paged.
  */
 export type FullTextFetchResult =
   | {
       kind: 'article';
       markdown: string;
       title?: string;
-      wordCount?: number;
       sourceUrl: string;
     }
   | {
@@ -303,7 +306,6 @@ export class BiorxivFullTextService {
     const article: CachedArticle = {
       markdown,
       ...(extracted.title && { title: extracted.title }),
-      ...(typeof extracted.wordCount === 'number' && { wordCount: extracted.wordCount }),
       sourceUrl,
     };
     // Success path only — an unavailable result must recover on a later call.

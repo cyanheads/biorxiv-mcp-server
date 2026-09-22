@@ -104,7 +104,9 @@ describe('BiorxivFullTextService', () => {
     if (result.kind === 'article') {
       expect(result.markdown).toContain('Body paragraph.');
       expect(result.title).toBe('A Preprint Title');
-      expect(result.wordCount).toBe(1234);
+      // The extractor's figure measures its HTML, not this Markdown — the tool
+      // counts the Markdown it pages over instead.
+      expect(result).not.toHaveProperty('wordCount');
       expect(result.sourceUrl).toBe(`https://www.biorxiv.org/content/${DOI}v1.full`);
     }
   });
@@ -182,15 +184,30 @@ describe('BiorxivFullTextService', () => {
     );
   });
 
-  it('omits title and wordCount when the extractor does not report them', async () => {
+  it('omits title when the extractor does not report one', async () => {
     mockFetch.mockResolvedValue(makeHtmlResponse(ARTICLE_HTML));
     mockExtract.mockResolvedValue({ content: 'body only' });
     const result = await service.fetchFullText('biorxiv', DOI, '1', tenantCtx());
     expect(result.kind).toBe('article');
-    if (result.kind === 'article') {
-      expect(result.title).toBeUndefined();
-      expect(result.wordCount).toBeUndefined();
-    }
+    if (result.kind === 'article') expect(result.title).toBeUndefined();
+  });
+
+  it('caches under the v2 key generation, never reading a v1 entry back', async () => {
+    mockFetch.mockResolvedValue(makeHtmlResponse(ARTICLE_HTML));
+    mockExtract.mockResolvedValue({ content: 'Fresh extraction.' });
+    const ctx = tenantCtx();
+    await ctx.state.set(`fulltext/v1/biorxiv/${DOI}/1`, {
+      markdown: 'Stale body from an older build.',
+      wordCount: 113,
+      sourceUrl: `https://www.biorxiv.org/content/${DOI}v1.full`,
+    });
+
+    const result = await service.fetchFullText('biorxiv', DOI, '1', ctx);
+    expect(result.kind === 'article' && result.markdown).toBe('Fresh extraction.');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(await ctx.state.get(`fulltext/v2/biorxiv/${DOI}/1`)).toMatchObject({
+      markdown: 'Fresh extraction.',
+    });
   });
 
   // ── Rate limiting (429) ──────────────────────────────────────────────────────
@@ -254,7 +271,6 @@ describe('BiorxivFullTextService', () => {
       mockExtract.mockResolvedValue({
         content: 'Cached article body.',
         title: 'A Preprint Title',
-        wordCount: 42,
       });
     });
 

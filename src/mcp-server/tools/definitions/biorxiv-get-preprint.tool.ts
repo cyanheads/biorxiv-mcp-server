@@ -1,7 +1,9 @@
 /**
  * @fileoverview biorxiv_get_preprint tool — fetches full metadata, abstract,
  * all revision history, and published-journal DOI for one or more preprints
- * by DOI. Each DOI call returns all revisions in a single response. When
+ * by DOI. Each input is reduced to its bare DOI first (normalizeDoi strips
+ * resolver and article URLs, `doi:`, and version / `.full` suffixes), and each
+ * DOI call returns all revisions in a single response. When
  * server="both", each DOI fans out across bioRxiv and medRxiv in parallel;
  * per-DOI failures are reported in failed[] rather than aborting the batch.
  * A DOI is only reported as not found when every attempted server answered
@@ -17,9 +19,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
-import { describeWait, findRateLimit } from '@/services/shared.js';
-
-const DOI_REGEX = /^10\.\d{4,}\//;
+import { describeWait, findRateLimit, normalizeDoi } from '@/services/shared.js';
 
 function formatRevision(r: PreprintRevision): string {
   const lines: string[] = [];
@@ -82,7 +82,7 @@ const RevisionSchema = z.object({
 export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
   title: 'Get Preprint by DOI',
   description:
-    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable, rate_limited) and a retryable flag; a rate_limited entry also carries the wait in seconds the origin asked for. DOIs must match the pattern 10.NNNN/…',
+    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable, rate_limited) and a retryable flag; a rate_limited entry also carries the wait in seconds the origin asked for. DOIs must match the pattern 10.NNNN/…; a doi.org or article URL, a doi: label, and a trailing vN / .full suffix are stripped first, and results report the bare DOI.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -90,7 +90,9 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       .array(
         z
           .string()
-          .describe('Preprint DOI (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463).'),
+          .describe(
+            'Preprint DOI (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463). A doi.org or biorxiv.org/medrxiv.org article URL, a doi: prefix, or a vN / .full suffix is accepted and stripped to the bare DOI; every revision is returned either way.',
+          ),
       )
       .min(1)
       .max(10)
@@ -106,7 +108,11 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       .array(
         z
           .object({
-            doi: z.string().describe('The requested DOI.'),
+            doi: z
+              .string()
+              .describe(
+                'The requested DOI in bare form (any URL, doi: prefix, or suffix removed).',
+              ),
             revisions: z
               .array(RevisionSchema.describe('A single preprint revision.'))
               .describe('All revisions for this preprint, earliest first.'),
@@ -118,7 +124,11 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       .array(
         z
           .object({
-            doi: z.string().describe('DOI that failed to resolve.'),
+            doi: z
+              .string()
+              .describe(
+                'DOI that failed to resolve — in bare form, or exactly as sent for invalid_doi_format.',
+              ),
             error: z.string().describe('Error description.'),
             reason: z
               .enum(['not_found', 'invalid_doi_format', 'upstream_unavailable', 'rate_limited'])
@@ -153,7 +163,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     {
       reason: 'invalid_doi_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'One or more input DOIs do not match the 10.NNNN/ pattern.',
+      when: 'Every input DOI fails to match the 10.NNNN/ pattern, even after URL, doi:, and suffix stripping.',
       recovery:
         'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
     },
@@ -207,11 +217,13 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
 
     // For each DOI, fan out across servers in parallel
     await Promise.all(
-      input.dois.map(async (doi) => {
-        // Route format-invalid DOIs to failed[] rather than aborting the batch
-        if (!DOI_REGEX.test(doi)) {
+      input.dois.map(async (raw) => {
+        // Route format-invalid DOIs to failed[] rather than aborting the batch,
+        // under the text the caller sent — there is no bare DOI to report.
+        const doi = normalizeDoi(raw)?.doi;
+        if (!doi) {
           failed.push({
-            doi,
+            doi: raw,
             error: `Invalid DOI format — must match 10.NNNN/… (e.g. 10.1101/… or 10.64898/…).`,
             reason: 'invalid_doi_format',
             retryable: false,

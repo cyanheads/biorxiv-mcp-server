@@ -1,6 +1,7 @@
 /**
  * @fileoverview Shared utilities for biorxiv-mcp-server service layer. Provides
- * HTML error detection, calendar-date and upstream-text normalization,
+ * HTML error detection, DOI input normalization, calendar-date and
+ * upstream-text normalization,
  * `Retry-After` parsing and rate-limit rejection lookup shared by every fetch
  * path, and the server version string used in User-Agent headers across all
  * services.
@@ -36,6 +37,61 @@ export function isValidCalendarDate(dateStr: string): boolean {
   return (
     date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
   );
+}
+
+/** A preprint DOI reduced to its bare form, plus the revision a version suffix named. */
+export interface NormalizedDoi {
+  /** Bare DOI, e.g. `10.64898/2026.03.11.711201`. */
+  doi: string;
+  /** Revision named by a trailing `vN` (`"2"` for `…711201v2`); absent when none was given. */
+  version?: string;
+}
+
+/** A doi.org resolver or bioRxiv/medRxiv article URL in front of the DOI, scheme optional. */
+const DOI_URL_PREFIX =
+  /^(?:https?:\/\/)?(?:(?:dx\.)?doi\.org\/|(?:www\.)?(?:bio|med)rxiv\.org\/content\/)/i;
+
+/** The `doi:` scheme label, as in citations. */
+const DOI_SCHEME_PREFIX = /^doi:\s*/i;
+
+/**
+ * An article-page suffix after the DOI's final digit: an optional `vN` revision,
+ * then any article-tab suffix (`.full`, `.full.pdf`, `.full.pdf+html`,
+ * `.full-text`, `.article-metrics`, `.supplementary-material`, …), then an
+ * optional trailing slash, matched case-insensitively. Anchored after a digit,
+ * and each tab suffix starts with a letter, so neither a `v` inside a
+ * non-numeric identifier nor a `.`-separated digit group is ever stripped —
+ * bioRxiv and medRxiv identifiers are digits and dots, ending in a digit.
+ */
+const ARTICLE_SUFFIX = /(?<=\d)(?:v(\d+))?(?:\.[a-z][\w+-]*)*\/?$/i;
+
+/** `10.` + a registrant code of four or more digits + `/` + a non-empty suffix. */
+const BARE_DOI = /^10\.\d{4,}\/\S+$/;
+
+/**
+ * Reduce a pasted preprint reference to its bare DOI. Accepts the bare DOI
+ * itself, a `https://doi.org/` or `http(s)://dx.doi.org/` resolver URL, a
+ * `doi:` label, or a `{www.}{biorxiv,medrxiv}.org/content/` article URL — any
+ * of them with a trailing `vN` revision and an article-tab suffix (`.full`,
+ * `.full.pdf`, `.article-metrics`, …).
+ * A URL's query string and fragment are dropped. Returns the revision the
+ * suffix named alongside the DOI, and `undefined` when what is left is not a
+ * DOI — callers raise their `invalid_doi_format` on that.
+ *
+ * A bare DOI passes through unchanged: stripping only ever removes text around
+ * a bioRxiv/medRxiv identifier, never characters of one.
+ */
+export function normalizeDoi(input: string): NormalizedDoi | undefined {
+  let text = input.trim();
+  const url = DOI_URL_PREFIX.exec(text);
+  text = url
+    ? text.slice(url[0].length).replace(/[?#].*$/, '')
+    : text.replace(DOI_SCHEME_PREFIX, '');
+  const suffix = ARTICLE_SUFFIX.exec(text);
+  const version = suffix?.[1];
+  if (suffix) text = text.slice(0, suffix.index);
+  if (!BARE_DOI.test(text)) return;
+  return version === undefined ? { doi: text } : { doi: text, version: String(Number(version)) };
 }
 
 /**
