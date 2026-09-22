@@ -47,6 +47,7 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 ### `biorxiv_get_preprint` <sub>tool</sub>
 
 - Batch fetch up to 10 DOIs in a single request
+- Accepts a bare DOI or a pasted form of one — `https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or article-page suffix (`.full`, `.full.pdf`, `.article-metrics`, …) — and reports the bare DOI
 - Each DOI returns its full revision history in `revisions[]` — one API call per DOI, no enumeration loop
 - Includes title, authors, abstract, category, license, JATS XML full-text link (`jatsxmlUrl`), and published journal DOI (`publishedJournalDoi`) once accepted
 - Scope to `biorxiv`, `medrxiv`, or `both` (default `both`); when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
@@ -57,7 +58,8 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 ### `biorxiv_list_recent` <sub>tool</sub>
 
-- Optional server-side category filter — pass a value from `biorxiv_list_categories`
+- Optional server-side category filter — pass a value from `biorxiv_list_categories`, in any case, with `_`, `-`, or a space (`Cell Biology`, `cell_biology`, `cell-biology`)
+- A server that answers the filter with its unfiltered listing is left out with a notice, never returned as filtered; `invalid_category` when no server applied it
 - Fixed page size of 30 (API constraint); advance with integer `cursor` (0, 30, 60, …)
 - Response includes a `total` count per server; a cursor past the last page is marked `exhausted: true` rather than reading as zero results in the interval
 - When `server="both"` (default), per-server pagination state is independent (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); one server not answering is named in `failed[]` while the other's page still returns
@@ -68,7 +70,8 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 ### `biorxiv_search_preprints` <sub>tool</sub>
 
 - Query and/or author required (author maps to an EuropePMC `AUTH:"…"` field query, ANDed with the keyword query); optional `date_from`/`date_to` range and `server` scope (default `both`)
-- Up to 100 results per page (default 25); `cursor_mark` pages through the same ranked list
+- Up to 100 results per page (default 25); `cursor_mark` pages through the same ranked list; a page past the last match comes back empty with a notice saying so, and a token EuropePMC does not recognize raises `invalid_cursor_mark`
+- An EuropePMC response missing its result list is retried, never reported as zero matches; one that persists on a first page raises `search_unavailable`
 - EuropePMC powers relevance ranking (indexes new preprints within 1–2 days of posting); the bioRxiv/medRxiv API enriches matches with canonical metadata
 - Enriched results carry the same latest-revision fields as `biorxiv_get_preprint`, including `type`, `license`, `funder`, and `authorCorrespondingInstitution`
 - Enrichment failures degrade to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`)
@@ -80,7 +83,8 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 - Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `publishedJournalDoi` field on `biorxiv_get_preprint`
 - Returns journal DOI, journal name, published date, and corresponding-author institution; the output `server` field names which server answered (never `"both"`)
-- Scope to `biorxiv`, `medrxiv`, or `both` (default `both`) — the two servers share the `10.1101/` DOI prefix, so a DOI alone doesn't identify one
+- Scope to `biorxiv`, `medrxiv`, or `both` (default `both`) — the two servers share their DOI prefixes, so a DOI alone doesn't identify one
+- `10.64898/` DOIs, which `/pubs` cannot look up by preprint DOI, resolve through the preprint's own journal DOI; when the crosswalk has no record either way, that journal DOI returns alone, without journal name or date, with a notice saying so
 - No server answering raises a retryable `upstream_unavailable`, or `rate_limited` with the origin's wait on an HTTP 429 — never `doi_not_found`, which would assert an absence nothing established
 
 ---
@@ -88,8 +92,8 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 ### `biorxiv_get_fulltext` <sub>tool</sub>
 
 - Fetches the rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`) and extracts Markdown — there is no keyless JATS source
-- Resolves the latest version via the details API first; only DOI resolution fans out across `biorxiv`/`medrxiv`/`both` (default `both`) — the full-text fetch itself targets whichever server answered, named in the output `server` field
-- Long articles page via `offset`/`limit` character chunking (default `limit` 20,000, max 50,000); response reports `totalChars`, `remainingChars`, and `hasMore`, and the extracted article is cached per version so paging costs one origin fetch
+- Reads the latest version, or the one requested by `version` or a `vN` suffix on the DOI (the two must agree; a version the preprint lacks raises `version_not_found`), confirmed via the details API first; only DOI resolution fans out across `biorxiv`/`medrxiv`/`both` (default `both`) — the full-text fetch itself targets whichever server answered, named in the output `server` field
+- Long articles page via `offset`/`limit` character chunking (default `limit` 20,000, max 50,000); response reports `totalChars`, `remainingChars`, `hasMore`, and a full-article `wordCount` counted from the same Markdown, and the extracted article is cached per version so paging costs one origin fetch
 - PDF-only preprints and blocked/challenge pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`
 - An origin rate limit (HTTP 429) — on either the article-page host or `api.biorxiv.org` during resolution — returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, with the recovery hint naming which origin is limiting
 
@@ -97,7 +101,7 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 ### `biorxiv_list_categories` <sub>tool</sub>
 
-- No API call — hardcoded static list (~30 bioRxiv + ~50 medRxiv categories)
+- No API call — hardcoded static list (25 bioRxiv + 51 medRxiv categories), limited to the ones the listing API actually filters on
 - Use to validate category strings before passing to `biorxiv_list_recent`
 
 ## Features
