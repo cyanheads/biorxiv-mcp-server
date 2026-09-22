@@ -17,11 +17,16 @@
  * is still there to fall back on, while the EuropePMC search itself is this
  * tool's primary call and has nothing to degrade to, so a 429 there raises a
  * retryable `rate_limited` error carrying the origin's Retry-After wait.
+ *
+ * EuropePMC sometimes answers HTTP 200 with no result list. The service retries
+ * that body; one that persists fails the call rather than reading as zero
+ * matches — `invalid_cursor_mark` when a cursor page was requested (a malformed
+ * token draws that body every time), `search_unavailable` on a first page.
  * @module mcp-server/tools/definitions/biorxiv-search-preprints.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
@@ -139,7 +144,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         .string()
         .optional()
         .describe(
-          'Opaque page token for ranked EuropePMC results. Omit for the first page; pass the nextCursorMark returned by a prior call to fetch the next page. Pages through the same ranked list rather than raising limit.',
+          'Opaque page token for ranked EuropePMC results. Omit for the first page; pass the nextCursorMark returned by a prior call to fetch the next page. Pages through the same ranked list rather than raising limit. A token EuropePMC does not recognize fails with invalid_cursor_mark.',
         ),
     })
     .refine((v) => Boolean(v.query?.trim()) || Boolean(v.author?.trim()), {
@@ -234,7 +239,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .string()
       .optional()
       .describe(
-        'Recovery hint when zero results are returned — echoes query and suggests how to broaden.',
+        'Present when zero results are returned. On a cursor_mark page past the last match, says the list is exhausted; otherwise echoes the query and suggests how to broaden it.',
       ),
   },
 
@@ -276,9 +281,17 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     {
       reason: 'search_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'EuropePMC search endpoint is unreachable or returns a server error.',
+      when: 'EuropePMC search endpoint is unreachable, returns a server error, or answers a first-page search without a result list on every retry.',
       recovery:
         'EuropePMC may be temporarily unavailable. Retry after a short delay or use biorxiv_list_recent with a date range instead.',
+    },
+    {
+      reason: 'invalid_cursor_mark',
+      code: JsonRpcErrorCode.ValidationError,
+      retryable: false,
+      when: 'EuropePMC answers a cursor_mark page request without a result list on every retry — the token is malformed or not one EuropePMC issued.',
+      recovery:
+        'Pass the nextCursorMark from the previous page exactly as returned, or omit cursor_mark (or pass "*") to restart from the first page.',
     },
     {
       reason: 'rate_limited',
@@ -357,6 +370,16 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       );
     } catch (err) {
       const cause = err instanceof Error ? err : new Error(String(err));
+      // The service already decided this is the caller's cursor, not an outage:
+      // EuropePMC kept answering the cursor page without a result list.
+      if (err instanceof McpError && err.data?.reason === 'invalid_cursor_mark') {
+        throw ctx.fail(
+          'invalid_cursor_mark',
+          cause.message,
+          { cursor_mark: input.cursor_mark, ...ctx.recoveryFor('invalid_cursor_mark') },
+          { cause },
+        );
+      }
       // A 429 here is not "unreachable or a server error": the origin answered,
       // named a wait, and will answer again after it. Only the parsed wait
       // crosses over — the service already kept the upstream body out of `data`.
@@ -384,6 +407,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     }
 
     const { hitCount, results: epmcResults, nextCursorMark } = epmcSearchResult;
+    // The page token as the service sent it — blank reads as the first page.
+    const cursor = input.cursor_mark?.trim();
 
     const queryEcho = {
       ...(input.query && { query: input.query }),
@@ -391,20 +416,26 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       server: input.server,
       ...(input.date_from && { date_from: input.date_from }),
       ...(input.date_to && { date_to: input.date_to }),
-      ...(input.cursor_mark && { cursor_mark: input.cursor_mark }),
+      ...(cursor && { cursor_mark: cursor }),
       limit: input.limit,
     };
 
     if (epmcResults.length === 0) {
       ctx.enrich.total(hitCount);
       ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
+      // EuropePMC still hands out a nextCursorMark on the page holding the last
+      // match, so following it lands here: an empty page past the end of a query
+      // that does have matches. That is the end of the list, not a failed search.
+      const pastEnd = !!cursor && cursor !== '*' && hitCount > 0;
       const criteria =
         [
           ...(input.query ? [`"${input.query}"`] : []),
           ...(input.author ? [`author "${input.author}"`] : []),
         ].join(' and ') || 'the given criteria';
       ctx.enrich.notice(
-        `No preprints matched ${criteria}${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms${input.author ? ', a different author spelling,' : ''} or a wider date range.`,
+        pastEnd
+          ? `No results past this cursor_mark — all ${hitCount} matches were on earlier pages. Omit cursor_mark to start again from the first page.`
+          : `No preprints matched ${criteria}${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms${input.author ? ', a different author spelling,' : ''} or a wider date range.`,
       );
       return {
         preprints: [],
