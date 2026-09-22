@@ -2,7 +2,7 @@
 
 **Server:** biorxiv-mcp-server
 **Version:** 0.2.7
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.5`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
 **Zod:** ^4.6.5
@@ -144,7 +144,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required (≥ 5 words, lint-validated). Spread `ctx.recoveryFor('reason')` into `data` to mirror the contract recovery onto the wire (`data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim). Every declared reason must be named by a literal `ctx.fail('<reason>'` or `ctx.recoveryFor('<reason>')` in its handler — `lint:mcp`'s `error-contract-unthrown` flags one that isn't. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required (≥ 5 words, lint-validated). Spread `ctx.recoveryFor('reason')` into `data` to mirror the contract recovery onto the wire (`data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim), or pass an explicit `recovery: { hint }` when the hint needs runtime context (a computed wait). Forwarding is lint-enforced per throw site — a `ctx.fail` carrying neither warns as `error-contract-recovery-unforwarded`. Every declared reason must be named by a literal `ctx.fail('<reason>'` or `ctx.recoveryFor('<reason>')` in its handler — `lint:mcp`'s `error-contract-unthrown` flags one that isn't; mark an entry the service layer throws with `thrownBy: 'service'` (lint-only metadata) instead. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -187,7 +187,7 @@ src/
   config/
     server-config.ts                    # bioRxiv-specific env vars (BIORXIV_MAILTO, API base URLs)
   services/
-    shared.ts                           # Shared utilities (detectHtmlError, normalizeUpstreamText,
+    shared.ts                           # Shared utilities (detectHtmlError, normalizeDoi, normalizeUpstreamText,
                                         #   isValidCalendarDate, parseRetryAfterSeconds, findRateLimit, describeWait,
                                         #   SERVER_VERSION)
     biorxiv/
@@ -223,7 +223,8 @@ src/
 
 ## Domain Conventions
 
-- **DOI format:** `10.1101/YYYY.MM.DD.NNNNNN`. Validate on input — the bioRxiv API returns empty collections for malformed DOIs without an error code.
+- **DOI format:** `10.1101/YYYY.MM.DD.NNNNNN` or `10.64898/…`. Run every DOI input through `normalizeDoi()` (`src/services/shared.ts`), which strips doi.org/article URLs, `doi:`, and `vN`/`.full` suffixes and returns `undefined` for anything still malformed — the bioRxiv API returns empty collections for malformed DOIs without an error code. `/pubs` keyed by preprint DOI never parses a `10.64898/` DOI; see `getPublishedVersionByJournalDoi()`.
+- **Category spelling:** the listing API filters only on lowercase with `/` and `_` read as a space (`hiv aids`), and answers anything else with its unfiltered listing, echoing `messages[0].category: "all"`. `BiorxivApiService` owns the spelling and flags `categoryIgnored`; never present a flagged page as filtered.
 - **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"`, including for DOI-resolution tools — both servers issue `10.1101/` DOIs, so the DOI never identifies the server and a single-server default silently misses records held by the other. Fan out via `Promise.allSettled` when `"both"` and name the answering server in the output.
 - **Pagination:** integer `cursor` offset (0, 30, 60, …). Page size is fixed at 30 by the API — do not expose a `limit` parameter.
 - **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous.
@@ -382,7 +383,7 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] bioRxiv API wrapping: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data (e.g., `published` field may be `"NA"` — surface it as absent, not empty)
 - [ ] bioRxiv API wrapping: tests include at least one sparse payload case with omitted upstream fields
 - [ ] `BIORXIV_MAILTO` included in outbound User-Agent header when set (optional env var)
-- [ ] DOI format validated on input (`10.1101/` prefix check) before calling API
+- [ ] DOI input normalized and validated with `normalizeDoi()` before calling API
 - [ ] Two-server fan-out uses `Promise.allSettled`; partial failures reported per-DOI in `failed[]`
 - [ ] `biorxiv_list_recent` with `server="both"` surfaces per-server pagination state, not a merged cursor
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
