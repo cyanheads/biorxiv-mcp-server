@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-09-22
+
+Fixes empty EuropePMC bodies, category-filter mismatches, 10.64898/ crosswalk lookups, and DOI/version input handling
+
 ## [0.2.7](changelog/0.2.x/0.2.7.md) — 2026-09-19
 
 Adopts mcp-ts-core 0.13.5 — date-key parameter aliases, richer tool-error text, and a stateless HTTP session default

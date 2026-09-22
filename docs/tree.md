@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-09-19 12:02:38
+Generated on: 2026-09-22 22:52:02
 
 ```text
 biorxiv-mcp-server/
@@ -176,16 +176,22 @@ biorxiv-mcp-server/
 │   │   ├── biorxiv-fulltext/
 │   │   │   └── biorxiv-fulltext-service.test.ts
 │   │   ├── europe-pmc/
+│   │   │   ├── europe-pmc-service.empty-body.test.ts
 │   │   │   └── europe-pmc-service.test.ts
 │   │   └── shared.test.ts
 │   └── tools/
 │       ├── biorxiv-get-fulltext.tool.test.ts
+│       ├── biorxiv-get-fulltext.word-count.test.ts
 │       ├── biorxiv-get-preprint.tool.test.ts
+│       ├── biorxiv-get-published-version.fallback.test.ts
 │       ├── biorxiv-get-published-version.tool.test.ts
 │       ├── biorxiv-list-categories.tool.test.ts
+│       ├── biorxiv-list-recent.category.test.ts
 │       ├── biorxiv-list-recent.tool.test.ts
+│       ├── biorxiv-search-preprints.empty-body.test.ts
 │       ├── biorxiv-search-preprints.rate-limit.test.ts
-│       └── biorxiv-search-preprints.tool.test.ts
+│       ├── biorxiv-search-preprints.tool.test.ts
+│       └── doi-input.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
