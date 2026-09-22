@@ -556,14 +556,14 @@ describe('biorxivListRecentTool', () => {
   });
 
   it('queries both servers for a category shared by both taxonomies when server="both"', async () => {
-    // Epidemiology exists in both taxonomies — both remain valid
+    // Pathology exists in both taxonomies — both remain valid
     mockIsValidCategory.mockReturnValue(true);
     const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
     const input = biorxivListRecentTool.input.parse({
       start_date: '2024-01-15',
       end_date: '2024-01-15',
       server: 'both',
-      category: 'Epidemiology',
+      category: 'Pathology',
     });
     mockGetListing.mockClear();
     const result = await biorxivListRecentTool.handler(input, ctx);
@@ -574,7 +574,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       '2024-01-15',
       0,
-      'Epidemiology',
+      'Pathology',
       expect.anything(),
     );
     expect(mockGetListing).toHaveBeenCalledWith(
@@ -582,7 +582,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       '2024-01-15',
       0,
-      'Epidemiology',
+      'Pathology',
       expect.anything(),
     );
     expect(result.pagination.biorxiv).toBeDefined();

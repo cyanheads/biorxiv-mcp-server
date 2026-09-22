@@ -1,7 +1,9 @@
 /**
  * @fileoverview BiorxivApiService — wraps api.biorxiv.org endpoints for
  * preprint details (/details), date-range listing (/details with date interval),
- * and crosswalk (/pubs). All methods retry with exponential backoff. Parses
+ * and crosswalk (/pubs, keyed by preprint DOI or by journal DOI). Owns the
+ * category taxonomy and the API's category spelling, and flags a listing whose
+ * category filter the API ignored. All methods retry with exponential backoff. Parses
  * and normalizes raw JSON into domain types. Detects HTML error pages, and
  * classifies an origin rate limit (HTTP 429) as its own retryable
  * `rate_limited` condition carrying the parsed `Retry-After` wait — never the
@@ -30,11 +32,18 @@ import type {
   PublishedVersion,
   RawDetailsResponse,
   RawPreprintRevision,
+  RawPublishedRecord,
   RawPublishedResponse,
 } from './types.js';
 
 // ─── Hardcoded category taxonomy ─────────────────────────────────────────────
-// No API endpoint provides this; it changes infrequently. Maintained here.
+/**
+ * No API endpoint provides this; it changes infrequently. Maintained here, and
+ * limited to the categories the listing endpoint actually filters on: bioRxiv
+ * "Epidemiology" and "Clinical Trials" and medRxiv "Vascular Medicine" appear
+ * on the websites, but the API answers every spelling of them with its
+ * unfiltered listing, so they are left out rather than advertised as filters.
+ */
 const CATEGORIES: CategoryTaxonomy = {
   biorxiv: [
     'Animal Behavior and Cognition',
@@ -44,10 +53,8 @@ const CATEGORIES: CategoryTaxonomy = {
     'Biophysics',
     'Cancer Biology',
     'Cell Biology',
-    'Clinical Trials',
     'Developmental Biology',
     'Ecology',
-    'Epidemiology',
     'Evolutionary Biology',
     'Genetics',
     'Genomics',
@@ -117,14 +124,33 @@ const CATEGORIES: CategoryTaxonomy = {
     'Toxicology',
     'Transplantation',
     'Urology',
-    'Vascular Medicine',
   ],
 };
 
-// Pre-built sets for O(1) category membership checks
-const BIORXIV_CATEGORIES = new Set(CATEGORIES.biorxiv);
-const MEDRXIV_CATEGORIES = new Set(CATEGORIES.medrxiv);
-const ALL_CATEGORIES = new Set([...CATEGORIES.biorxiv, ...CATEGORIES.medrxiv]);
+/**
+ * A category in the API's own spelling: lowercase, with `/` and `_` read as a
+ * space (`HIV/AIDS` → `hiv aids`). This is the only form the listing endpoint
+ * filters on — a slash, raw or percent-encoded, makes it ignore the filter —
+ * and the form every record's `category` field carries, so it doubles as the
+ * key input is matched on: `Cell Biology`, `cell biology`, and `CELL_BIOLOGY`
+ * name the same category. `-` is read as a space too, so the websites'
+ * collection slugs (`cell-biology`, `hiv-aids`) match; no category name
+ * contains a hyphen of its own.
+ */
+function apiCategory(category: string): string {
+  return category.toLowerCase().replace(/[/_-]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Pre-built sets for O(1) category membership checks, keyed by API spelling
+const BIORXIV_CATEGORIES = new Set(CATEGORIES.biorxiv.map(apiCategory));
+const MEDRXIV_CATEGORIES = new Set(CATEGORIES.medrxiv.map(apiCategory));
+
+/**
+ * The `messages[0].category` echo for a listing the API did not filter. It
+ * appears on every unfiltered page, so it only means "filter ignored" when a
+ * category was sent; an empty page carries no category echo at all.
+ */
+const UNFILTERED_ECHO = 'all';
 
 /**
  * The one status this service classifies itself rather than treating as a bug.
@@ -206,6 +232,27 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   return rev;
 }
 
+/** Normalize a `/pubs` crosswalk record; undefined when it names no preprint. */
+function normalizePublished(record: RawPublishedRecord): PublishedVersion | undefined {
+  if (!record.preprint_doi) return;
+  const pv: PublishedVersion = { preprintDoi: record.preprint_doi };
+  if (record.published_doi) pv.publishedDoi = record.published_doi;
+  if (record.published_journal) pv.publishedJournal = record.published_journal;
+  if (record.published_date) pv.publishedDate = record.published_date;
+  const preprintTitle = normalizeUpstreamText(record.preprint_title);
+  if (preprintTitle) pv.preprintTitle = preprintTitle;
+  if (record.preprint_authors) pv.preprintAuthors = record.preprint_authors;
+  if (record.preprint_category) pv.preprintCategory = record.preprint_category;
+  if (record.preprint_date) pv.preprintDate = record.preprint_date;
+  const preprintAbstract = normalizeUpstreamText(record.preprint_abstract);
+  if (preprintAbstract) pv.preprintAbstract = preprintAbstract;
+  if (record.preprint_author_corresponding)
+    pv.preprintAuthorCorresponding = record.preprint_author_corresponding;
+  if (record.preprint_author_corresponding_institution)
+    pv.preprintAuthorCorrespondingInstitution = record.preprint_author_corresponding_institution;
+  return pv;
+}
+
 // ─── Service class ───────────────────────────────────────────────────────────
 
 export class BiorxivApiService {
@@ -227,12 +274,15 @@ export class BiorxivApiService {
 
   /**
    * Returns true if the given category string is valid for the specified server(s).
+   * Matching is case-insensitive with `_`, `-`, and `/` read as a space, so the
+   * taxonomy spelling, the lowercase spelling records carry, and the websites'
+   * collection slugs all match.
    * When server is 'both', the category must exist in at least one server's taxonomy.
-   * Use isValidCategoryForServer() to check per-server membership.
    */
   isValidCategory(category: string, server: BiorxivServer | 'both' = 'both'): boolean {
-    if (server === 'both') return ALL_CATEGORIES.has(category);
-    return (server === 'biorxiv' ? BIORXIV_CATEGORIES : MEDRXIV_CATEGORIES).has(category);
+    const key = apiCategory(category);
+    if (server === 'both') return BIORXIV_CATEGORIES.has(key) || MEDRXIV_CATEGORIES.has(key);
+    return (server === 'biorxiv' ? BIORXIV_CATEGORIES : MEDRXIV_CATEGORIES).has(key);
   }
 
   /**
@@ -276,7 +326,9 @@ export class BiorxivApiService {
   /**
    * Fetch preprints posted or revised within a date interval from a single server.
    * `cursor` is an integer offset (0, 30, 60, …). Page size is always 30.
-   * Returns listing result with pagination state.
+   * `category` is sent in the API's spelling whatever form the caller used.
+   * Returns listing result with pagination state, flagged `categoryIgnored` when
+   * a category was sent but the API answered with its unfiltered listing.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getListing(
@@ -289,7 +341,7 @@ export class BiorxivApiService {
   ): Promise<ListingResult> {
     let url = `${this.baseUrl}/details/${server}/${startDate}/${endDate}/${cursor}/json`;
     if (category) {
-      url += `?category=${encodeURIComponent(category)}`;
+      url += `?category=${encodeURIComponent(apiCategory(category))}`;
     }
 
     try {
@@ -317,9 +369,11 @@ export class BiorxivApiService {
                 ? parseInt(rawTotal, 10) || 0
                 : 0;
           const preprints = (data.collection ?? []).map(normalizeRevision);
+          const categoryIgnored = !!category && msg?.category === UNFILTERED_ECHO;
           return {
             preprints,
             pagination: { cursor, total },
+            ...(categoryIgnored && { categoryIgnored }),
           };
         },
         {
@@ -336,7 +390,9 @@ export class BiorxivApiService {
 
   /**
    * Resolve a preprint DOI to its published journal record via /pubs endpoint.
-   * Returns undefined when the preprint is not yet published.
+   * Returns undefined when the preprint is not yet published — and for every
+   * `10.64898/` DOI, which this path form never parses (see
+   * {@link getPublishedVersionByJournalDoi} for the lookup that does resolve them).
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getPublishedVersion(
@@ -345,7 +401,49 @@ export class BiorxivApiService {
     ctx: Context,
   ): Promise<PublishedVersion | undefined> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
-    const url = `${this.baseUrl}/pubs/${server}/${encodedDoi}/json`;
+    const record = (await this.fetchCrosswalk(encodedDoi, server, 'getPublishedVersion', ctx))[0];
+    return record ? normalizePublished(record) : undefined;
+  }
+
+  /**
+   * Resolve the crosswalk record the other way round: `/pubs` keyed by the
+   * journal DOI a preprint's `/details` record names. Answers for `10.64898/`
+   * preprints, whose own DOI the path form never parses. The API reads only the
+   * first two `/`-separated segments of the key, and its web server answers an
+   * encoded slash (`%2F`) with a 404 — but the API decodes the key once more
+   * itself, so every slash after the first is sent double-encoded (`%252F`) and
+   * a journal DOI with a second slash (`10.1093/genetics/…`) still arrives
+   * whole. Returns only the record for `preprintDoi`, or undefined when none
+   * names it.
+   * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
+   */
+  async getPublishedVersionByJournalDoi(
+    journalDoi: string,
+    preprintDoi: string,
+    server: BiorxivServer,
+    ctx: Context,
+  ): Promise<PublishedVersion | undefined> {
+    const [registrant = '', ...suffix] = journalDoi.split('/');
+    const encodedDoi = `${encodeURIComponent(registrant)}/${suffix.map(encodeURIComponent).join('%252F')}`;
+    const wanted = preprintDoi.toLowerCase();
+    const records = await this.fetchCrosswalk(
+      encodedDoi,
+      server,
+      'getPublishedVersionByJournalDoi',
+      ctx,
+    );
+    const record = records.find((r) => r.preprint_doi?.toLowerCase() === wanted);
+    return record ? normalizePublished(record) : undefined;
+  }
+
+  /** Fetch the raw `/pubs/{server}/{key}` collection, keyed by an already path-encoded DOI. */
+  private async fetchCrosswalk(
+    encodedKey: string,
+    server: BiorxivServer,
+    operation: string,
+    ctx: Context,
+  ): Promise<RawPublishedRecord[]> {
+    const url = `${this.baseUrl}/pubs/${server}/${encodedKey}/json`;
     try {
       return await withRetry(
         async () => {
@@ -361,29 +459,10 @@ export class BiorxivApiService {
               { url },
             );
           }
-          const data = JSON.parse(text) as RawPublishedResponse;
-          const record = data.collection?.[0];
-          if (!record?.preprint_doi) return;
-          const pv: PublishedVersion = { preprintDoi: record.preprint_doi };
-          if (record.published_doi) pv.publishedDoi = record.published_doi;
-          if (record.published_journal) pv.publishedJournal = record.published_journal;
-          if (record.published_date) pv.publishedDate = record.published_date;
-          const preprintTitle = normalizeUpstreamText(record.preprint_title);
-          if (preprintTitle) pv.preprintTitle = preprintTitle;
-          if (record.preprint_authors) pv.preprintAuthors = record.preprint_authors;
-          if (record.preprint_category) pv.preprintCategory = record.preprint_category;
-          if (record.preprint_date) pv.preprintDate = record.preprint_date;
-          const preprintAbstract = normalizeUpstreamText(record.preprint_abstract);
-          if (preprintAbstract) pv.preprintAbstract = preprintAbstract;
-          if (record.preprint_author_corresponding)
-            pv.preprintAuthorCorresponding = record.preprint_author_corresponding;
-          if (record.preprint_author_corresponding_institution)
-            pv.preprintAuthorCorrespondingInstitution =
-              record.preprint_author_corresponding_institution;
-          return pv;
+          return (JSON.parse(text) as RawPublishedResponse).collection ?? [];
         },
         {
-          operation: 'BiorxivApiService.getPublishedVersion',
+          operation: `BiorxivApiService.${operation}`,
           context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,

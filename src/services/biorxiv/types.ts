@@ -116,6 +116,11 @@ export interface ServerPaginationState {
 
 /** Per-server result from the listing endpoint */
 export interface ListingResult {
+  /**
+   * True when a category was sent but the API echoed `category: "all"` — it did
+   * not apply the filter, so `preprints` is the unfiltered listing. Absent otherwise.
+   */
+  categoryIgnored?: true;
   pagination: ServerPaginationState;
   preprints: PreprintRevision[];
 }

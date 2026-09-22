@@ -2,7 +2,10 @@
  * @fileoverview biorxiv_list_recent tool — lists preprints posted or revised
  * within a date interval. Fans out to both bioRxiv and medRxiv when
  * server="both". Category filtering is applied server-side via the ?category=
- * query param. Returns 30 results per page (API-fixed); use cursor to paginate.
+ * query param, in the API's lowercase spelling. The API answers a category it
+ * does not filter on with its unfiltered listing (echoing category "all"), so
+ * such a leg is dropped with a notice, and a call left with no filtered page
+ * raises invalid_category. Returns 30 results per page (API-fixed); use cursor to paginate.
  * When server="both", per-server pagination state is surfaced independently,
  * including per-server cursor exhaustion: the two servers hold different result
  * counts, so one cursor can be valid for one and past the end for the other.
@@ -62,7 +65,7 @@ function formatPreprint(p: PreprintRevision): string {
 export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   title: 'List Recent Preprints',
   description:
-    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings.',
+    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings; a server that answers a category filter with its unfiltered listing is left out with a notice, and invalid_category is raised when no server applied it.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   // biorxiv_search_preprints spells its date bounds date_from / date_to.
@@ -78,7 +81,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     category: z
       .string()
       .optional()
-      .describe('Subject category filter. Use biorxiv_list_categories for valid values.'),
+      .describe(
+        'Subject category filter, matched case-insensitively with "_" and "-" read as a space — "Cell Biology", "cell biology", "cell_biology", and "cell-biology" are the same filter. Use biorxiv_list_categories for valid values.',
+      ),
     cursor: z
       .number()
       .int()
@@ -171,7 +176,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .string()
       .optional()
       .describe(
-        'Guidance on how to read this result set: which servers did not answer, which cursors are past the end, and — when nothing came back — the applied filters and how to broaden them. All applicable qualifications are composed into one string.',
+        'Guidance on how to read this result set: which servers did not answer, which ignored the category filter (their unfiltered records are left out), which cursors are past the end, and — when nothing came back — the applied filters and how to broaden them. All applicable qualifications are composed into one string.',
       ),
     categoryNote: z
       .string()
@@ -191,7 +196,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     {
       reason: 'invalid_category',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The supplied category string is not in the taxonomy.',
+      when: "The category is not in the requested server's taxonomy, or api.biorxiv.org ignored it and returned the unfiltered listing on every server that answered.",
       recovery: 'Call biorxiv_list_categories to get valid category strings and retry.',
     },
     {
@@ -299,12 +304,28 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
 
     let allPreprints: PreprintRevision[] = [];
 
+    // The API answers a category it does not filter on with its unfiltered
+    // listing, echoing category "all". That page is never returned as filtered:
+    // a leg that did so is dropped, and a call left with no filtered page fails.
+    const ignoredCategory = (servers: BiorxivServer[]) =>
+      ctx.fail(
+        'invalid_category',
+        `api.biorxiv.org ignored category "${category}" on ${serverLabels(servers)} and returned its unfiltered listing, so no filtered page is available.`,
+        {
+          category,
+          servers,
+          recovery: {
+            hint: `Omit category to page the unfiltered listing, or pick a different category from biorxiv_list_categories — api.biorxiv.org is not filtering on "${category}".`,
+          },
+        },
+      );
+
     // When server="both" and a category is given, check membership per-server once.
     // A category that exists in only one taxonomy (inBx !== inMx) collapses the
     // request onto that server alone — querying the other would return an
     // unfiltered page mixed in with the filtered one under a filtered-looking
-    // request. Shared categories (Epidemiology, Pathology) and no-category
-    // requests still fan out to both servers.
+    // request. Shared categories (Pathology) and no-category requests still fan
+    // out to both servers.
     const inBx =
       input.server === 'both' && !!category && service.isValidCategory(category, 'biorxiv');
     const inMx =
@@ -321,67 +342,70 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       });
     }
 
-    if (exclusiveServer) {
-      // "both" request with a server-exclusive category → query only the owning
-      // server, so the page never mixes filtered with unfiltered records.
+    // One leg: an explicit server, or a "both" request collapsed onto the server
+    // owning a server-exclusive category.
+    const singleServer = exclusiveServer ?? (input.server === 'both' ? undefined : input.server);
+
+    if (singleServer) {
       const r = await service.getListing(
-        exclusiveServer,
+        singleServer,
         input.start_date,
         input.end_date,
         input.cursor,
         category,
         ctx,
       );
-      pagination[exclusiveServer] = toPaginationEntry(r);
+      if (r.categoryIgnored) throw ignoredCategory([singleServer]);
+      pagination[singleServer] = toPaginationEntry(r);
       allPreprints = r.preprints;
-    } else if (input.server === 'both') {
+    } else {
       // Fan out to both servers. Any category here is shared by both taxonomies,
       // so it applies to each; with no category both return unfiltered pages.
-      const [bxResult, mxResult] = await Promise.allSettled([
-        service.getListing(
-          'biorxiv',
-          input.start_date,
-          input.end_date,
-          input.cursor,
-          category,
-          ctx,
+      const settled = await Promise.allSettled(
+        SERVERS.map((server) =>
+          service.getListing(server, input.start_date, input.end_date, input.cursor, category, ctx),
         ),
-        service.getListing(
-          'medrxiv',
-          input.start_date,
-          input.end_date,
-          input.cursor,
-          category,
-          ctx,
-        ),
-      ]);
+      );
 
-      if (bxResult.status === 'fulfilled') {
-        pagination.biorxiv = toPaginationEntry(bxResult.value);
-        allPreprints.push(...bxResult.value.preprints);
-      } else {
-        ctx.log.warning('bioRxiv listing failed', { error: String(bxResult.reason) });
-        failed.push({ server: 'biorxiv', error: errorMessage(bxResult.reason) });
-        rejections.push(bxResult.reason);
+      // Servers that answered but ignored the category filter — their pages are
+      // unfiltered, so they are left out rather than mixed in with filtered ones.
+      const ignored: BiorxivServer[] = [];
+      for (const [i, result] of settled.entries()) {
+        const server = SERVERS[i] as BiorxivServer;
+        if (result.status === 'rejected') {
+          ctx.log.warning(`${SERVER_LABEL[server]} listing failed`, {
+            error: String(result.reason),
+          });
+          failed.push({ server, error: errorMessage(result.reason) });
+          rejections.push(result.reason);
+        } else if (result.value.categoryIgnored) {
+          ctx.log.warning(`${SERVER_LABEL[server]} ignored the category filter`, { category });
+          ignored.push(server);
+        } else {
+          pagination[server] = toPaginationEntry(result.value);
+          allPreprints.push(...result.value.preprints);
+        }
       }
 
-      if (mxResult.status === 'fulfilled') {
-        pagination.medrxiv = toPaginationEntry(mxResult.value);
-        allPreprints.push(...mxResult.value.preprints);
-      } else {
-        ctx.log.warning('medRxiv listing failed', { error: String(mxResult.reason) });
-        failed.push({ server: 'medrxiv', error: errorMessage(mxResult.reason) });
-        rejections.push(mxResult.reason);
-      }
+      // Every server that answered ignored the filter: there is no filtered page
+      // to return, and retrying will not produce one.
+      if (ignored.length === SERVERS.length) throw ignoredCategory(ignored);
 
-      // Nothing answered. An empty page here is not a result — it is the absence
-      // of one — and a caller branching on success-vs-error cannot tell the two
-      // apart from a notice string. Raise the same retryable error the other
-      // DOI-resolving tools raise for their own nothing-answered case.
-      if (failed.length === SERVERS.length) {
-        const message = `Neither bioRxiv nor medRxiv answered — ${failed
-          .map((f) => `${SERVER_LABEL[f.server]}: ${f.error}`)
-          .join('; ')}`;
+      // Nothing usable came back and at least one server never answered. An
+      // empty page here is not a result — it is the absence of one — and a
+      // caller branching on success-vs-error cannot tell the two apart from a
+      // notice string. Raise the same retryable error the other DOI-resolving
+      // tools raise for their own nothing-answered case: the server that failed
+      // may still return a filtered page on retry.
+      if (failed.length + ignored.length === SERVERS.length) {
+        const detail = [
+          ...failed.map((f) => `${SERVER_LABEL[f.server]}: ${f.error}`),
+          ...ignored.map((s) => `${SERVER_LABEL[s]} ignored the category filter "${category}"`),
+        ].join('; ');
+        const message =
+          ignored.length === 0
+            ? `Neither bioRxiv nor medRxiv answered — ${detail}`
+            : `No server returned a usable page — ${detail}`;
         const servers = failed.map((f) => f.server);
         // A rate limit outranks a generic outage: both say "retry", but only one
         // says when, and retrying sooner would land inside the same limit.
@@ -420,6 +444,15 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         );
       }
 
+      // An ignored filter answered, so it is not in failed[] and a retry will not
+      // change it — but its absent pagination entry needs the same explanation.
+      if (ignored.length > 0) {
+        const labels = serverLabels(ignored);
+        notices.push(
+          `${labels} ignored the category filter "${category}" and returned its unfiltered listing, so its records were left out — only the filtered results are shown.`,
+        );
+      }
+
       // One server's cursor overshot while the other still returned records. The
       // fully-empty branch below does not fire, so without this nothing qualifies
       // the exhausted server's total 0 — it reads as "no preprints in the interval".
@@ -429,17 +462,6 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           `Cursor ${input.cursor} is past the last available page on ${serverLabels(exhaustedServers)} — that entry is marked exhausted and its total of 0 is an out-of-range artifact, not the interval total. Lower the cursor to page that server.`,
         );
       }
-    } else {
-      const r = await service.getListing(
-        input.server,
-        input.start_date,
-        input.end_date,
-        input.cursor,
-        category,
-        ctx,
-      );
-      pagination[input.server] = toPaginationEntry(r);
-      allPreprints = r.preprints;
     }
 
     // "Nothing here" is a claim about what the servers reported, and by this point

@@ -12,9 +12,15 @@ import { rateLimitError } from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetPublishedVersion = vi.fn();
+// The /details fallback runs whenever the crosswalk answers empty; the default
+// here is a preprint no server holds, so those tests still end in doi_not_found.
+const mockGetDetails = vi.fn();
 
 vi.mock('@/services/biorxiv/biorxiv-service.js', () => ({
-  getBiorxivApiService: () => ({ getPublishedVersion: mockGetPublishedVersion }),
+  getBiorxivApiService: () => ({
+    getPublishedVersion: mockGetPublishedVersion,
+    getDetails: mockGetDetails,
+  }),
 }));
 
 const PUBLISHED: PublishedVersion = {
@@ -30,6 +36,8 @@ const PUBLISHED: PublishedVersion = {
 describe('biorxivGetPublishedVersionTool', () => {
   beforeEach(() => {
     mockGetPublishedVersion.mockResolvedValue(PUBLISHED);
+    mockGetDetails.mockReset();
+    mockGetDetails.mockResolvedValue([]);
   });
 
   // ── Happy path ──────────────────────────────────────────────────────────────

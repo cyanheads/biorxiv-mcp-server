@@ -83,6 +83,16 @@ const API_CALLS = {
     s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, undefined, ctx),
   getPublishedVersion: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
     s.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
+  getPublishedVersionByJournalDoi: (
+    s: BiorxivApiService,
+    ctx: ReturnType<typeof createMockContext>,
+  ) =>
+    s.getPublishedVersionByJournalDoi(
+      '10.1017/S0033291726104693',
+      '10.64898/2026.01.07.26343585',
+      'medrxiv',
+      ctx,
+    ),
 } as const;
 
 const MOCK_CONFIG = {} as AppConfig;
@@ -359,7 +369,7 @@ describe('BiorxivApiService', () => {
       const ctx = createMockContext();
       await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, 'Neuroscience', ctx);
       const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
-      expect(calledUrl).toContain('category=Neuroscience');
+      expect(calledUrl).toContain('category=neuroscience');
     });
 
     it('throws serviceUnavailable when API returns HTML error page', async () => {
@@ -506,6 +516,207 @@ describe('BiorxivApiService', () => {
       const first = service.getCategories();
       const second = service.getCategories();
       expect(first).toEqual(second);
+    });
+
+    it('matches case-insensitively, reading "_", "-", and "/" as a space', () => {
+      for (const spelling of [
+        'Cell Biology',
+        'cell biology',
+        'CELL_BIOLOGY',
+        ' cell  biology ',
+        'cell-biology',
+      ]) {
+        expect(service.isValidCategory(spelling, 'biorxiv')).toBe(true);
+      }
+      // The spelling the API echoes in every record's own category field
+      expect(service.isValidCategory('hiv aids', 'medrxiv')).toBe(true);
+      expect(service.isValidCategory('HIV_AIDS', 'medrxiv')).toBe(true);
+      // The websites' collection slugs
+      expect(service.isValidCategory('hiv-aids', 'medrxiv')).toBe(true);
+      expect(service.isValidCategory('animal-behavior-and-cognition', 'biorxiv')).toBe(true);
+      expect(service.isValidCategory('hiv aids', 'biorxiv')).toBe(false);
+    });
+
+    it('omits the categories the API cannot filter on', () => {
+      const taxonomy = service.getCategories();
+      expect(taxonomy.biorxiv).not.toContain('Epidemiology');
+      expect(taxonomy.biorxiv).not.toContain('Clinical Trials');
+      expect(taxonomy.medrxiv).not.toContain('Vascular Medicine');
+      expect(taxonomy.medrxiv).toContain('Epidemiology');
+      expect(taxonomy.medrxiv).toContain('HIV/AIDS');
+      expect(taxonomy.biorxiv).toHaveLength(25);
+      expect(taxonomy.medrxiv).toHaveLength(51);
+      expect(service.isValidCategory('Epidemiology', 'biorxiv')).toBe(false);
+      expect(service.isValidCategory('Epidemiology', 'medrxiv')).toBe(true);
+      expect(service.isValidCategory('Clinical Trials', 'both')).toBe(false);
+      expect(service.isValidCategory('Vascular Medicine', 'both')).toBe(false);
+    });
+
+    it('keeps a category shared by both taxonomies valid on each', () => {
+      expect(service.isValidCategory('Pathology', 'biorxiv')).toBe(true);
+      expect(service.isValidCategory('Pathology', 'medrxiv')).toBe(true);
+    });
+  });
+
+  // ── getListing category spelling and ignored-filter detection ─────────────
+
+  describe('getListing category filter', () => {
+    const listing = (category: string | undefined) =>
+      service.getListing('medrxiv', '2026-01-01', '2026-09-01', 0, category, createMockContext());
+    const calledUrl = () => (mockFetch.mock.calls[0] as string[])[0] ?? '';
+
+    it.each([
+      ['HIV/AIDS', 'hiv%20aids'],
+      ['hiv_aids', 'hiv%20aids'],
+      ['Cell Biology', 'cell%20biology'],
+      ['CELL_BIOLOGY', 'cell%20biology'],
+      ['hiv-aids', 'hiv%20aids'],
+      ['Pharmacology and Therapeutics', 'pharmacology%20and%20therapeutics'],
+    ])('sends %s in the API spelling (%s)', async (category, encoded) => {
+      mockFetch.mockResolvedValue(
+        makeResponse({ messages: [{ status: 'ok', category: 'x', total: '1' }], collection: [] }),
+      );
+      await listing(category);
+      expect(calledUrl()).toMatch(new RegExp(`\\?category=${encoded}$`));
+    });
+
+    it('flags a requested category the API echoed back as "all"', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', category: 'all', total: '13507' }],
+          collection: [],
+        }),
+      );
+      const result = await listing('Vascular Medicine');
+      expect(result.categoryIgnored).toBe(true);
+      expect(result.pagination.total).toBe(13507);
+    });
+
+    it('does not flag a category the API applied', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', category: 'hiv aids', total: '177' }],
+          collection: [],
+        }),
+      );
+      expect((await listing('HIV/AIDS')).categoryIgnored).toBeUndefined();
+    });
+
+    it('does not flag an unfiltered request, whose echo is always "all"', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', category: 'all', total: '318' }],
+          collection: [],
+        }),
+      );
+      const result = await listing(undefined);
+      expect(result.categoryIgnored).toBeUndefined();
+      expect(calledUrl()).not.toContain('category=');
+    });
+
+    it('does not flag an empty page, whose message carries no category echo', async () => {
+      // Live shape for a filtered interval with no posts: status only, no category.
+      mockFetch.mockResolvedValue(makeResponse({ messages: [{ status: 'no posts found' }] }));
+      const result = await listing('Paleontology');
+      expect(result.categoryIgnored).toBeUndefined();
+      expect(result.preprints).toEqual([]);
+    });
+  });
+
+  // ── getPublishedVersionByJournalDoi ─────────────────────────────────────────
+
+  describe('getPublishedVersionByJournalDoi', () => {
+    const PREPRINT = '10.64898/2026.01.07.26343585';
+    const JOURNAL = '10.1017/S0033291726104693';
+
+    it('queries /pubs by the journal DOI and returns the record naming the preprint', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok' }],
+          collection: [
+            { preprint_doi: '10.64898/2025.01.01.000001', published_doi: JOURNAL },
+            {
+              preprint_doi: PREPRINT,
+              published_doi: JOURNAL,
+              published_journal: 'Psychological Medicine',
+              published_date: '2026-06-17',
+            },
+          ],
+        }),
+      );
+      const result = await service.getPublishedVersionByJournalDoi(
+        JOURNAL,
+        PREPRINT,
+        'medrxiv',
+        createMockContext(),
+      );
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        `https://api.biorxiv.org/pubs/medrxiv/${JOURNAL}/json`,
+      );
+      expect(result).toMatchObject({
+        preprintDoi: PREPRINT,
+        publishedDoi: JOURNAL,
+        publishedJournal: 'Psychological Medicine',
+        publishedDate: '2026-06-17',
+      });
+    });
+
+    it('double-encodes every slash after the first, so a multi-slash journal DOI arrives whole', async () => {
+      // Sent raw, the API reads only `10.1093/genetics`; a single-encoded %2F is a 404.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok' }],
+          collection: [
+            {
+              preprint_doi: '10.64898/2026.01.07.697413',
+              published_doi: '10.1093/genetics/iyag142',
+              published_journal: 'GENETICS',
+              published_date: '2026-06-03',
+            },
+          ],
+        }),
+      );
+      const result = await service.getPublishedVersionByJournalDoi(
+        '10.1093/genetics/iyag142',
+        '10.64898/2026.01.07.697413',
+        'biorxiv',
+        createMockContext(),
+      );
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/biorxiv/10.1093/genetics%252Fiyag142/json',
+      );
+      expect(result).toMatchObject({ publishedJournal: 'GENETICS', publishedDate: '2026-06-03' });
+    });
+
+    it('returns undefined when the crosswalk answers empty', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'Preprint for DOI 10.1093/genetics/iyag142 not found' }],
+          collection: [],
+        }),
+      );
+      const result = await service.getPublishedVersionByJournalDoi(
+        '10.1093/genetics/iyag142',
+        PREPRINT,
+        'medrxiv',
+        createMockContext(),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('ignores a record for a different preprint', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [{ preprint_doi: '10.1101/2024.01.01.000001', published_doi: JOURNAL }],
+        }),
+      );
+      const result = await service.getPublishedVersionByJournalDoi(
+        JOURNAL,
+        PREPRINT,
+        'medrxiv',
+        createMockContext(),
+      );
+      expect(result).toBeUndefined();
     });
   });
 
