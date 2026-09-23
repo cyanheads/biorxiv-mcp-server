@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-22 · ⚠️ Breaking
+
+Adds a bioRxiv funder filter and awards field, defaults biorxiv_list_recent to omit abstracts, and cleans Highwire markup from titles and abstracts
+
 ## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-09-22
 
 Fixes empty EuropePMC bodies, category-filter mismatches, 10.64898/ crosswalk lookups, and DOI/version input handling

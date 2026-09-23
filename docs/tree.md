@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 22:52:02
+Generated on: 2026-09-23 04:15:07
 
 ```text
 biorxiv-mcp-server/
@@ -26,6 +26,7 @@ biorxiv-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -160,12 +161,14 @@ biorxiv-mcp-server/
 │   │   ├── europe-pmc/
 │   │   │   ├── europe-pmc-service.ts
 │   │   │   └── types.ts
-│   │   └── shared.ts
+│   │   ├── shared.ts
+│   │   └── upstream-text-tables.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
 │   ├── helpers/
+│   │   ├── markdown-fixtures.ts
 │   │   ├── rate-limit.ts
 │   │   └── rejection.ts
 │   ├── prompts/
@@ -187,11 +190,14 @@ biorxiv-mcp-server/
 │       ├── biorxiv-get-published-version.tool.test.ts
 │       ├── biorxiv-list-categories.tool.test.ts
 │       ├── biorxiv-list-recent.category.test.ts
+│       ├── biorxiv-list-recent.funder.test.ts
 │       ├── biorxiv-list-recent.tool.test.ts
 │       ├── biorxiv-search-preprints.empty-body.test.ts
+│       ├── biorxiv-search-preprints.fallback-abstract.test.ts
 │       ├── biorxiv-search-preprints.rate-limit.test.ts
 │       ├── biorxiv-search-preprints.tool.test.ts
-│       └── doi-input.test.ts
+│       ├── doi-input.test.ts
+│       └── funder-awards.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
