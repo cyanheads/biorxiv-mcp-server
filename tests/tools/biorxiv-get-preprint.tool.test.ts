@@ -4,10 +4,11 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
+import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
@@ -509,7 +510,7 @@ describe('biorxivGetPreprintTool', () => {
       license: 'CC-BY 4.0',
       jatsxmlUrl: 'https://www.biorxiv.org/content/10.1101/2024.01.15.575123v1.xml',
       publishedJournalDoi: '10.1038/s41586-024-00001-0',
-      funder: 'NIH R01',
+      awards: ['R01 GM134936'],
       authorCorresponding: 'Smith J',
       authorCorrespondingInstitution: 'MIT',
     };
@@ -521,6 +522,7 @@ describe('biorxivGetPreprintTool', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('CC-BY 4.0');
     expect(text).toContain('10.1038/s41586-024-00001-0');
+    expect(text).toContain('**Awards:** R01 GM134936\n');
   });
 
   it('renders every revision-specific field in content[] for all revisions, not just the latest', () => {
@@ -536,7 +538,7 @@ describe('biorxivGetPreprintTool', () => {
       authorCorresponding: 'Albert Kao',
       authorCorrespondingInstitution: 'Santa Fe Institute',
       category: 'Animal Behavior and Cognition',
-      funder: 'NSF',
+      awards: ['IOS2402645'],
       server: 'biorxiv',
       abstract: 'Living in groups offers social animals collective wisdom.',
     };
@@ -549,7 +551,7 @@ describe('biorxivGetPreprintTool', () => {
       authorCorresponding: 'Jane Smith',
       authorCorrespondingInstitution: 'MIT',
       category: 'Evolutionary Biology',
-      funder: 'NIH',
+      awards: ['IOS2402645', 'MCB 2216742'],
       server: 'medrxiv',
       abstract: 'A revised analysis of collective decision-making.',
     };
@@ -571,9 +573,87 @@ describe('biorxivGetPreprintTool', () => {
     expect(text).toContain('MIT');
     expect(text).toContain('Animal Behavior and Cognition');
     expect(text).toContain('Evolutionary Biology');
-    expect(text).toContain('NSF');
-    expect(text).toContain('NIH');
+    expect(text).toContain('**Awards:** IOS2402645\n');
+    expect(text).toContain('**Awards:** IOS2402645; MCB 2216742\n');
     expect(text).toContain('**Server:** biorxiv');
     expect(text).toContain('**Server:** medrxiv');
+  });
+
+  // ── Upstream Markdown ───────────────────────────────────────────────────────
+
+  describe('upstream text with Markdown metacharacters', () => {
+    const MARKDOWN_REVISION: PreprintRevision = {
+      doi: IDENTIFIERS.doi,
+      version: '1',
+      date: '2026-07-03',
+      server: 'biorxiv',
+      title: UPSTREAM.title,
+      abstract: UPSTREAM.abstract,
+      authors: UPSTREAM.authors,
+      authorCorresponding: UPSTREAM.authorCorresponding,
+      authorCorrespondingInstitution: UPSTREAM.authorCorrespondingInstitution,
+      awards: UPSTREAM.awards,
+      category: UPSTREAM.category,
+      license: UPSTREAM.license,
+      type: UPSTREAM.type,
+      jatsxmlUrl: IDENTIFIERS.jatsxmlUrl,
+      publishedJournalDoi: IDENTIFIERS.publishedDoi,
+    };
+
+    async function call() {
+      mockGetDetails.mockResolvedValue([MARKDOWN_REVISION]);
+      const result = await runToolContract(
+        biorxivGetPreprintTool,
+        { dois: [IDENTIFIERS.doi], server: 'biorxiv' },
+        { context: { errors: biorxivGetPreprintTool.errors } },
+      );
+      const text = (result.content[0] as { text: string }).text;
+      return { result, text };
+    }
+
+    it('carries upstream text unescaped in structuredContent', async () => {
+      const { result } = await call();
+      const revision = (
+        result.structuredContent as { preprints: { revisions: PreprintRevision[] }[] }
+      ).preprints[0]?.revisions[0];
+      expect(revision).toMatchObject({
+        title: UPSTREAM.title,
+        abstract: UPSTREAM.abstract,
+        authors: UPSTREAM.authors,
+        license: UPSTREAM.license,
+        awards: UPSTREAM.awards,
+        jatsxmlUrl: IDENTIFIERS.jatsxmlUrl,
+        publishedJournalDoi: IDENTIFIERS.publishedDoi,
+      });
+    });
+
+    it('escapes every upstream field in content[] so it renders literally', async () => {
+      const { text } = await call();
+      expect(text).toContain(`### ${ESCAPED.title}\n`);
+      expect(text).toContain(`**Title:** ${ESCAPED.title}\n`);
+      expect(text).toContain(`**Type:** ${ESCAPED.type}\n`);
+      expect(text).toContain(`**Category:** ${ESCAPED.category}\n`);
+      expect(text).toContain(`**License:** ${ESCAPED.license}\n`);
+      expect(text).toContain(`**Authors:** ${ESCAPED.authors}\n`);
+      expect(text).toContain(`**Corresponding:** ${ESCAPED.authorCorresponding}\n`);
+      expect(text).toContain(`**Institution:** ${ESCAPED.authorCorrespondingInstitution}\n`);
+      expect(text).toContain(`**Awards:** ${ESCAPED.awards}\n`);
+      expect(text).toContain(`**Abstract:** ${ESCAPED.abstract}`);
+    });
+
+    it('leaves the DOI, JATS URL, and journal DOI unescaped in content[]', async () => {
+      const { text } = await call();
+      expect(text).toContain(`**DOI:** ${IDENTIFIERS.doi}\n`);
+      expect(text).toContain(`**JATS XML:** ${IDENTIFIERS.jatsxmlUrl}\n`);
+      expect(text).toContain(`**Published Journal DOI:** ${IDENTIFIERS.publishedDoi}\n`);
+    });
+
+    it('falls back to the raw DOI as the heading when the title is absent', () => {
+      const blocks = biorxivGetPreprintTool.format!({
+        preprints: [{ doi: IDENTIFIERS.doi, revisions: [{ doi: IDENTIFIERS.doi }] }],
+        failed: [],
+      });
+      expect((blocks[0] as { text: string }).text).toContain(`### ${IDENTIFIERS.doi}\n`);
+    });
   });
 });

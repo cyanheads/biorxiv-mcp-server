@@ -80,7 +80,7 @@ const API_CALLS = {
   getDetails: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
     s.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx),
   getListing: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
-    s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, undefined, ctx),
+    s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx),
   getPublishedVersion: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
     s.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
   getPublishedVersionByJournalDoi: (
@@ -155,36 +155,67 @@ describe('BiorxivApiService', () => {
       expect(revisions[0]?.authors).toBeUndefined();
     });
 
-    it('normalizes funder array to a joined string', async () => {
-      mockFetch.mockResolvedValue(
-        makeResponse({
-          collection: [
-            {
-              doi: '10.1101/2024.01.15.575123',
-              funder: [{ name: 'NIH' }, { name: 'NSF' }],
-            },
-          ],
-        }),
-      );
-      const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
-      expect(revisions[0]?.funder).toBe('NIH; NSF');
-    });
+    // Upstream funder names and ROR IDs are misattributed (the funder is replaced
+    // by an unrelated organization while the award stays), so only awards survive.
+    describe('funder array', () => {
+      const detailsWith = async (funder: unknown) => {
+        mockFetch.mockResolvedValue(
+          makeResponse({ collection: [{ doi: '10.1101/2025.06.23.661133', funder }] }),
+        );
+        return (
+          await service.getDetails('10.1101/2025.06.23.661133', 'biorxiv', createMockContext())
+        )[0];
+      };
 
-    it('normalizes funder="NA" to absent', async () => {
-      mockFetch.mockResolvedValue(
-        makeResponse({
-          collection: [
-            {
-              doi: '10.1101/2024.01.15.575123',
-              funder: 'NA',
-            },
-          ],
-        }),
-      );
-      const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
-      expect(revisions[0]?.funder).toBeUndefined();
+      it('keeps the award and drops the misattributed name and ROR ID (live record shape)', async () => {
+        const revision = await detailsWith([
+          {
+            name: 'Sint Lucas Andreas Hospital',
+            id: 'https://ror.org/016jc2h42',
+            'id-type': 'ROR',
+            award: 'R35GM134936R01CA260414K99GM155323',
+          },
+        ]);
+        // Several grants run together upstream with no separator — never split.
+        expect(revision?.awards).toEqual(['R35GM134936R01CA260414K99GM155323']);
+        expect(revision).not.toHaveProperty('funder');
+        const serialized = JSON.stringify(revision);
+        expect(serialized).not.toContain('Sint Lucas');
+        expect(serialized).not.toContain('016jc2h42');
+      });
+
+      it('keeps awards verbatim, in order, deduplicated, dropping empty and N/A placeholders', async () => {
+        const revision = await detailsWith([
+          { name: 'Rotunda Hospital', award: 'CC2102' },
+          { name: 'Rotunda Hospital', award: 'CC2102' },
+          { name: 'Gwent Group (United Kingdom)', award: "EP/X038882/1 'InnovaTEbehaviour'" },
+          { name: 'Sioux Valley Hospital', award: '' },
+          { name: 'Royal Hallamshire Hospital', award: '   ' },
+          { name: 'Long Beach Animal Hospital', award: 'N/A' },
+          { name: 'Critical Path Institute' },
+          { name: 'Cystic Fibrosis Research Foundation', award: ' UK Program MC_UU_00030/7 ' },
+          { name: 'Somerset Medical Center', award: 'CC2102' },
+        ]);
+        expect(revision?.awards).toEqual([
+          'CC2102',
+          "EP/X038882/1 'InnovaTEbehaviour'",
+          'UK Program MC_UU_00030/7',
+        ]);
+      });
+
+      it.each([
+        ['funder "NA"', 'NA'],
+        ['no funder field', undefined],
+        ['an empty funder array', []],
+        [
+          'entries with no usable award',
+          [{ name: 'Rize Devlet Hastanesi', award: '' }, { name: 'X' }],
+        ],
+      ])('carries no awards field for %s', async (_label, funder) => {
+        const revision = await detailsWith(funder);
+        expect(revision).not.toHaveProperty('awards');
+        expect(revision).not.toHaveProperty('funder');
+      });
     });
 
     it('preserves non-NA published journal DOI', async () => {
@@ -274,6 +305,31 @@ describe('BiorxivApiService', () => {
       expect(revisions[0]?.abstract).toBe('We report a method.');
       expect(revisions[0]?.abstract).not.toMatch(/O_FIG|C_FIG|SRC=|org\.highwire|SCPLOW/);
     });
+
+    it('resolves placeholders, headings, and list markers in title and abstract, leaving other fields raw', async () => {
+      // Live shape: 10.64898/2026.08.30.26361755 (trimmed), plus the one title in
+      // the corpus that carries a placeholder.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [
+            {
+              doi: '10.64898/2026.08.30.26361755',
+              title: '{Phi}Xacm4-11 infection dynamics',
+              authors: 'O`Toole, P.; Mu_ller, M.',
+              abstract:
+                'Structured abstractO_ST_ABSBackgroundC_ST_ABSPro-inflammatory diets threaten health.\n\nMethodsWe held energy within {+/-}3% and protein [&ge;]98% of baseline.\n\nResultssDII was weakly associated with GHG (Spearman {rho}=0.14).\n\nKey messagesO_LIFootprints are decoupled (|{rho}|[&le;]0.30).\nC_LIO_LIThe reduction is small ([~]1.1%).\nC_LI',
+            },
+          ],
+        }),
+      );
+      const ctx = createMockContext();
+      const [revision] = await service.getDetails('10.64898/2026.08.30.26361755', 'biorxiv', ctx);
+      expect(revision?.title).toBe('ΦXacm4-11 infection dynamics');
+      expect(revision?.abstract).toBe(
+        'Structured abstract Background: Pro-inflammatory diets threaten health. Methods: We held energy within ±3% and protein ≥98% of baseline. Results: sDII was weakly associated with GHG (Spearman ρ=0.14). Key messages: • Footprints are decoupled (|ρ|≤0.30). • The reduction is small (∼1.1%).',
+      );
+      expect(revision?.authors).toBe('O`Toole, P.; Mu_ller, M.');
+    });
   });
 
   // ── getListing ──────────────────────────────────────────────────────────────
@@ -288,14 +344,7 @@ describe('BiorxivApiService', () => {
       );
 
       const ctx = createMockContext();
-      const result = await service.getListing(
-        'biorxiv',
-        '2024-01-01',
-        '2024-01-31',
-        0,
-        undefined,
-        ctx,
-      );
+      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
       expect(result.preprints).toHaveLength(1);
       expect(result.pagination.total).toBe(100);
       expect(result.pagination.cursor).toBe(0);
@@ -310,14 +359,7 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getListing(
-        'biorxiv',
-        '2024-01-01',
-        '2024-01-31',
-        0,
-        undefined,
-        ctx,
-      );
+      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
       expect(result.pagination.total).toBe(915);
     });
 
@@ -328,28 +370,14 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getListing(
-        'biorxiv',
-        '2024-01-01',
-        '2024-01-31',
-        0,
-        undefined,
-        ctx,
-      );
+      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
       expect(result.pagination.total).toBe(0);
     });
 
     it('returns empty preprints when collection is absent', async () => {
       mockFetch.mockResolvedValue(makeResponse({ messages: [{ total: 0, cursor: 0 }] }));
       const ctx = createMockContext();
-      const result = await service.getListing(
-        'biorxiv',
-        '2024-01-01',
-        '2024-01-31',
-        0,
-        undefined,
-        ctx,
-      );
+      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
       expect(result.preprints).toHaveLength(0);
     });
 
@@ -358,7 +386,7 @@ describe('BiorxivApiService', () => {
         makeResponse({ messages: [{ total: 30, cursor: 30 }], collection: [] }),
       );
       const ctx = createMockContext();
-      await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 30, undefined, ctx);
+      await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 30, {}, ctx);
       // URL should contain the offset
       const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
       expect(calledUrl).toContain('/30/');
@@ -367,7 +395,14 @@ describe('BiorxivApiService', () => {
     it('appends category query param to URL when provided', async () => {
       mockFetch.mockResolvedValue(makeResponse({ messages: [{ total: 5 }], collection: [] }));
       const ctx = createMockContext();
-      await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, 'Neuroscience', ctx);
+      await service.getListing(
+        'biorxiv',
+        '2024-01-01',
+        '2024-01-31',
+        0,
+        { category: 'Neuroscience' },
+        ctx,
+      );
       const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
       expect(calledUrl).toContain('category=neuroscience');
     });
@@ -376,7 +411,7 @@ describe('BiorxivApiService', () => {
       mockFetch.mockResolvedValue(makeHtmlResponse());
       const ctx = createMockContext();
       await expect(
-        service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, undefined, ctx),
+        service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx),
       ).rejects.toThrow();
     });
   });
@@ -466,6 +501,29 @@ describe('BiorxivApiService', () => {
       const result = await service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx);
       expect(result?.preprintTitle).toBe('CO2 fixation in E. coli');
       expect(result?.preprintAbstract).toBe('Carbon fixation is central to metabolism.');
+    });
+
+    it('resolves placeholders and removes display-figure blocks in the crosswalk abstract', async () => {
+      // Live shape: 10.1101/2020.04.14.040204, whose `_DISPLAY` residue the old
+      // lazy figure match left behind.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [
+            {
+              preprint_doi: '10.1101/2020.04.14.040204',
+              preprint_title: 'TGF[beta] signaling after {Delta}F508 correction',
+              preprint_abstract:
+                'Relapse is reported in some, thought to be cured, patients.\n\nGraphical Abstract O_FIG_DISPLAY_L [Figure 1] M_FIG_DISPLAY C_FIG_DISPLAY',
+            },
+          ],
+        }),
+      );
+      const ctx = createMockContext();
+      const result = await service.getPublishedVersion('10.1101/2020.04.14.040204', 'biorxiv', ctx);
+      expect(result?.preprintTitle).toBe('TGFβ signaling after ΔF508 correction');
+      expect(result?.preprintAbstract).toBe(
+        'Relapse is reported in some, thought to be cured, patients.',
+      );
     });
 
     it('throws serviceUnavailable when API returns HTML error page', async () => {
@@ -562,7 +620,14 @@ describe('BiorxivApiService', () => {
 
   describe('getListing category filter', () => {
     const listing = (category: string | undefined) =>
-      service.getListing('medrxiv', '2026-01-01', '2026-09-01', 0, category, createMockContext());
+      service.getListing(
+        'medrxiv',
+        '2026-01-01',
+        '2026-09-01',
+        0,
+        { category },
+        createMockContext(),
+      );
     const calledUrl = () => (mockFetch.mock.calls[0] as string[])[0] ?? '';
 
     it.each([
@@ -620,6 +685,81 @@ describe('BiorxivApiService', () => {
       const result = await listing('Paleontology');
       expect(result.categoryIgnored).toBeUndefined();
       expect(result.preprints).toEqual([]);
+    });
+  });
+
+  // ── getListing funder filter ────────────────────────────────────────────────
+
+  describe('getListing funder filter', () => {
+    const listing = (filters: { category?: string; funder?: string }) =>
+      service.getListing('biorxiv', '2026-08-01', '2026-08-31', 0, filters, createMockContext());
+    const calledUrl = () => (mockFetch.mock.calls[0] as string[])[0] ?? '';
+
+    /** Live NSF envelope for 2026-08: the funder echo names the real funder. */
+    const NSF_ECHO = 'National Science Foundation : https://ror.org/021nxhr62';
+
+    it('sends the funder query parameter', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', category: 'all', funder: NSF_ECHO, total: '12' }],
+          collection: [{ doi: '10.1101/2026.08.01.000001' }],
+        }),
+      );
+      const result = await listing({ funder: '021nxhr62' });
+      expect(calledUrl()).toMatch(/\/0\/json\?funder=021nxhr62$/);
+      expect(result.pagination.total).toBe(12);
+      // A funder-only page echoes category "all"; no category was sent, so no flag.
+      expect(result.categoryIgnored).toBeUndefined();
+      expect(result.funderNotFound).toBeUndefined();
+    });
+
+    it('sends category and funder together', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', category: 'neuroscience', funder: NSF_ECHO, total: '4' }],
+          collection: [],
+        }),
+      );
+      await listing({ category: 'Neuroscience', funder: '021nxhr62' });
+      expect(calledUrl()).toMatch(/\?category=neuroscience&funder=021nxhr62$/);
+    });
+
+    it('still flags a category the API ignored under a funder filter', async () => {
+      // Live shape: the funder applied, the category did not — the page is the
+      // funder's unfiltered-by-category listing.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', category: 'all', funder: NSF_ECHO, total: '12' }],
+          collection: [],
+        }),
+      );
+      const result = await listing({ category: 'Epidemiology', funder: '021nxhr62' });
+      expect(result.categoryIgnored).toBe(true);
+      expect(result.funderNotFound).toBeUndefined();
+    });
+
+    it('flags "funder value not found" as funderNotFound, not as an empty page', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({ messages: [{ status: 'funder value not found' }] }),
+      );
+      const result = await listing({ funder: '016jc2h42' });
+      expect(result.funderNotFound).toBe(true);
+      expect(result.preprints).toEqual([]);
+    });
+
+    it('does not flag a funder page that is merely empty', async () => {
+      // Live shape past the funder's last page, or for a funder with no posts.
+      mockFetch.mockResolvedValue(makeResponse({ messages: [{ status: 'no posts found' }] }));
+      const result = await listing({ funder: '021nxhr62' });
+      expect(result.funderNotFound).toBeUndefined();
+    });
+
+    it('does not flag the not-found status when no funder was sent', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({ messages: [{ status: 'funder value not found' }] }),
+      );
+      expect((await listing({})).funderNotFound).toBeUndefined();
+      expect(calledUrl()).not.toContain('?');
     });
   });
 

@@ -19,25 +19,28 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
-import { describeWait, findRateLimit, normalizeDoi } from '@/services/shared.js';
+import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/services/shared.js';
 
+// Upstream free text is escaped as it is interpolated so it renders literally;
+// DOIs and URLs stay raw because agents copy them back into calls.
 function formatRevision(r: PreprintRevision): string {
   const lines: string[] = [];
   lines.push(`#### v${r.version ?? '?'} — ${r.date ?? 'unknown date'}`);
-  if (r.title) lines.push(`**Title:** ${r.title}`);
+  if (r.title) lines.push(`**Title:** ${escapeMarkdown(r.title)}`);
   lines.push(`**DOI:** ${r.doi}`);
   if (r.server) lines.push(`**Server:** ${r.server}`);
-  if (r.type) lines.push(`**Type:** ${r.type}`);
-  if (r.category) lines.push(`**Category:** ${r.category}`);
-  if (r.license) lines.push(`**License:** ${r.license}`);
-  if (r.authors) lines.push(`**Authors:** ${r.authors}`);
-  if (r.authorCorresponding) lines.push(`**Corresponding:** ${r.authorCorresponding}`);
+  if (r.type) lines.push(`**Type:** ${escapeMarkdown(r.type)}`);
+  if (r.category) lines.push(`**Category:** ${escapeMarkdown(r.category)}`);
+  if (r.license) lines.push(`**License:** ${escapeMarkdown(r.license)}`);
+  if (r.authors) lines.push(`**Authors:** ${escapeMarkdown(r.authors)}`);
+  if (r.authorCorresponding)
+    lines.push(`**Corresponding:** ${escapeMarkdown(r.authorCorresponding)}`);
   if (r.authorCorrespondingInstitution)
-    lines.push(`**Institution:** ${r.authorCorrespondingInstitution}`);
-  if (r.funder) lines.push(`**Funder:** ${r.funder}`);
+    lines.push(`**Institution:** ${escapeMarkdown(r.authorCorrespondingInstitution)}`);
+  if (r.awards) lines.push(`**Awards:** ${escapeMarkdown(r.awards.join('; '))}`);
   if (r.jatsxmlUrl) lines.push(`**JATS XML:** ${r.jatsxmlUrl}`);
   if (r.publishedJournalDoi) lines.push(`**Published Journal DOI:** ${r.publishedJournalDoi}`);
-  if (r.abstract) lines.push(`\n**Abstract:** ${r.abstract}`);
+  if (r.abstract) lines.push(`\n**Abstract:** ${escapeMarkdown(r.abstract)}`);
   return lines.join('\n');
 }
 
@@ -48,7 +51,7 @@ function formatPreprint(doi: string, revisions: PreprintRevision[]): string {
   // Header carries only the preprint-level identity; every metadata field —
   // including revision-specific titles and authors — is rendered per-revision
   // by formatRevision() so content[] matches structuredContent for all revisions.
-  lines.push(`### ${latest?.title ?? doi}`);
+  lines.push(`### ${latest?.title ? escapeMarkdown(latest.title) : doi}`);
   lines.push(`**DOI:** ${doi}`);
   lines.push(`\n#### Revisions (${revisions.length} total)`);
   for (const rev of revisions) {
@@ -74,7 +77,12 @@ const RevisionSchema = z.object({
   category: z.string().optional().describe('Subject category.'),
   jatsxmlUrl: z.string().optional().describe('URL to the JATS XML full-text.'),
   abstract: z.string().optional().describe('Abstract text.'),
-  funder: z.string().optional().describe('Funder information.'),
+  awards: z
+    .array(z.string().describe('One award value as upstream records it.'))
+    .optional()
+    .describe(
+      'Grant award numbers from the funding statement, verbatim and deduplicated — one value can hold several grants run together without a separator. Absent when none. Funder names are not included: api.biorxiv.org attributes them to unrelated organizations.',
+    ),
   publishedJournalDoi: z.string().optional().describe('Published journal DOI when accepted.'),
   server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
 });

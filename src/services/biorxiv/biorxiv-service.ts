@@ -3,8 +3,10 @@
  * preprint details (/details), date-range listing (/details with date interval),
  * and crosswalk (/pubs, keyed by preprint DOI or by journal DOI). Owns the
  * category taxonomy and the API's category spelling, and flags a listing whose
- * category filter the API ignored. All methods retry with exponential backoff. Parses
- * and normalizes raw JSON into domain types. Detects HTML error pages, and
+ * category filter the API ignored or whose funder ROR ID it does not know. All
+ * methods retry with exponential backoff. Parses and normalizes raw JSON into
+ * domain types, keeping a record's funder awards but not its misattributed
+ * funder names and ROR IDs. Detects HTML error pages, and
  * classifies an origin rate limit (HTTP 429) as its own retryable
  * `rate_limited` condition carrying the parsed `Retry-After` wait — never the
  * upstream response body.
@@ -27,6 +29,7 @@ import {
 import type {
   BiorxivServer,
   CategoryTaxonomy,
+  ListingFilters,
   ListingResult,
   PreprintRevision,
   PublishedVersion,
@@ -153,6 +156,13 @@ const MEDRXIV_CATEGORIES = new Set(CATEGORIES.medrxiv.map(apiCategory));
 const UNFILTERED_ECHO = 'all';
 
 /**
+ * The listing status — HTTP 200, no collection — for a `funder` ROR ID the API
+ * holds no funder record for. Read as an empty page, it would claim the funder
+ * posted nothing in the interval.
+ */
+const FUNDER_NOT_FOUND = 'funder value not found';
+
+/**
  * The one status this service classifies itself rather than treating as a bug.
  * Passing it to `fetchWithTimeout` only lowers the log severity from `error` to
  * `debug`; the thrown error and its classification are unchanged.
@@ -199,6 +209,9 @@ function rethrowClassified(err: unknown): never {
 
 // ─── Normalization helpers ───────────────────────────────────────────────────
 
+/** An `award` value upstream uses for "no award" — absent, not a grant number. */
+const AWARD_PLACEHOLDER = /^n\/?a$/i;
+
 function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   const rev: PreprintRevision = { doi: raw.doi };
   const title = normalizeUpstreamText(raw.title);
@@ -215,16 +228,15 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   if (raw.jatsxml) rev.jatsxmlUrl = raw.jatsxml;
   const abstract = normalizeUpstreamText(raw.abstract);
   if (abstract) rev.abstract = abstract;
-  if (raw.funder && raw.funder !== 'NA') {
-    if (Array.isArray(raw.funder)) {
-      const names = raw.funder
-        .map((f) => f.name ?? '')
-        .filter(Boolean)
-        .join('; ');
-      if (names) rev.funder = names;
-    } else {
-      rev.funder = raw.funder;
+  // Only the awards are kept: upstream replaces each funder's name and ROR ID
+  // with an unrelated organization while leaving the award in place.
+  if (Array.isArray(raw.funder)) {
+    const awards = new Set<string>();
+    for (const { award } of raw.funder) {
+      const value = typeof award === 'string' ? award.trim() : '';
+      if (value && !AWARD_PLACEHOLDER.test(value)) awards.add(value);
     }
+    if (awards.size > 0) rev.awards = [...awards];
   }
   // Normalize "NA" to absent — callers should check undefined, not "NA"
   if (raw.published && raw.published !== 'NA') rev.publishedJournalDoi = raw.published;
@@ -326,9 +338,12 @@ export class BiorxivApiService {
   /**
    * Fetch preprints posted or revised within a date interval from a single server.
    * `cursor` is an integer offset (0, 30, 60, …). Page size is always 30.
-   * `category` is sent in the API's spelling whatever form the caller used.
+   * `filters.category` is sent in the API's spelling whatever form the caller
+   * used; `filters.funder` is sent as given, and must already be a bare ROR ID
+   * (`normalizeRorId`). Both are sent when both are set.
    * Returns listing result with pagination state, flagged `categoryIgnored` when
-   * a category was sent but the API answered with its unfiltered listing.
+   * a category was sent but the API answered with its unfiltered listing, and
+   * `funderNotFound` when the API holds no funder record for the ROR ID.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getListing(
@@ -336,13 +351,16 @@ export class BiorxivApiService {
     startDate: string,
     endDate: string,
     cursor: number,
-    category: string | undefined,
+    filters: ListingFilters,
     ctx: Context,
   ): Promise<ListingResult> {
+    const { category, funder } = filters;
+    const query = [
+      ...(category ? [`category=${encodeURIComponent(apiCategory(category))}`] : []),
+      ...(funder ? [`funder=${encodeURIComponent(funder)}`] : []),
+    ];
     let url = `${this.baseUrl}/details/${server}/${startDate}/${endDate}/${cursor}/json`;
-    if (category) {
-      url += `?category=${encodeURIComponent(apiCategory(category))}`;
-    }
+    if (query.length > 0) url += `?${query.join('&')}`;
 
     try {
       return await withRetry(
@@ -370,10 +388,12 @@ export class BiorxivApiService {
                 : 0;
           const preprints = (data.collection ?? []).map(normalizeRevision);
           const categoryIgnored = !!category && msg?.category === UNFILTERED_ECHO;
+          const funderNotFound = !!funder && msg?.status === FUNDER_NOT_FOUND;
           return {
             preprints,
             pagination: { cursor, total },
             ...(categoryIgnored && { categoryIgnored }),
+            ...(funderNotFound && { funderNotFound }),
           };
         },
         {
