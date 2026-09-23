@@ -9,14 +9,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
+import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { europePmcRateLimitError, rateLimitError } from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockEpmcSearch = vi.fn();
+const mockGetAbstracts = vi.fn();
 const mockGetDetails = vi.fn();
 
 vi.mock('@/services/europe-pmc/europe-pmc-service.js', () => ({
-  getEuropePmcService: () => ({ search: mockEpmcSearch }),
+  getEuropePmcService: () => ({ search: mockEpmcSearch, getAbstracts: mockGetAbstracts }),
 }));
 
 vi.mock('@/services/biorxiv/biorxiv-service.js', () => ({
@@ -28,7 +30,6 @@ const EPMC_RESULT: EuropePmcResult = {
   title: 'CRISPR gene editing in neural circuits',
   authors: 'Smith J, Jones A',
   publishedDate: '2024-01-15',
-  abstract: 'A study on CRISPR applications.',
 };
 
 /** Build an EuropePmcSearchResult with a given hitCount, result set, and optional next-page cursor */
@@ -54,8 +55,8 @@ const REVISION: PreprintRevision = {
 /**
  * A revision carrying every latest-revision metadata field the details endpoint
  * exposes. Field values mirror the live v2 record for 10.64898/2026.01.24.701325,
- * whose upstream payload populates all four of the fields search used to drop
- * (`funder` arrives as an array upstream and is joined by the service).
+ * whose upstream payload populates every field search used to drop (`awards`
+ * arrives inside the upstream funder array and is extracted by the service).
  */
 const RICH_REVISION: PreprintRevision = {
   ...REVISION,
@@ -63,8 +64,7 @@ const RICH_REVISION: PreprintRevision = {
   license: 'cc_no',
   authorCorresponding: 'Qun Lu',
   authorCorrespondingInstitution: 'University of South Carolina',
-  funder:
-    "NIH Director's Transformative Research Award; Smart State Center for Economic Excellence of South Carolina",
+  awards: ['R01GM146257'],
   jatsxmlUrl: 'https://www.biorxiv.org/content/early/2026/07/01/2026.01.24.701325.source.xml',
   publishedJournalDoi: '10.1038/s41586-026-00001-0',
 };
@@ -74,6 +74,8 @@ describe('biorxivSearchPreprintsTool', () => {
     // hitCount > results.length to verify the true total threads through correctly
     mockEpmcSearch.mockResolvedValue(epmcSearchResult(1234, [EPMC_RESULT]));
     mockGetDetails.mockResolvedValue([REVISION]);
+    mockGetAbstracts.mockReset();
+    mockGetAbstracts.mockResolvedValue(new Map());
   });
 
   // ── Happy path ──────────────────────────────────────────────────────────────
@@ -547,15 +549,16 @@ describe('biorxivSearchPreprintsTool', () => {
       type: 'new results',
       license: 'cc_no',
       authorCorrespondingInstitution: 'University of South Carolina',
-      funder:
-        "NIH Director's Transformative Research Award; Smart State Center for Economic Excellence of South Carolina",
+      awards: ['R01GM146257'],
     });
+    expect(result.preprints[0]).not.toHaveProperty('funder');
 
     const text = (biorxivSearchPreprintsTool.format!(result)[0] as { text: string }).text;
     expect(text).toContain('**Type:** new results');
     expect(text).toContain('**License:** cc_no');
     expect(text).toContain('**Institution:** University of South Carolina');
-    expect(text).toContain("**Funder:** NIH Director's Transformative Research Award");
+    expect(text).toContain('**Awards:** R01GM146257\n');
+    expect(text).not.toContain('**Funder:**');
   });
 
   it('leaves the new metadata fields absent when the revision does not carry them', async () => {
@@ -566,12 +569,12 @@ describe('biorxivSearchPreprintsTool', () => {
 
     expect(result.preprints[0]?.type).toBeUndefined();
     expect(result.preprints[0]?.license).toBeUndefined();
-    expect(result.preprints[0]?.funder).toBeUndefined();
+    expect(result.preprints[0]).not.toHaveProperty('awards');
     expect(result.preprints[0]?.authorCorrespondingInstitution).toBeUndefined();
 
     const text = (biorxivSearchPreprintsTool.format!(result)[0] as { text: string }).text;
     expect(text).not.toContain('**Type:**');
-    expect(text).not.toContain('**Funder:**');
+    expect(text).not.toContain('**Awards:**');
     expect(text).not.toContain('undefined');
   });
 
@@ -589,7 +592,7 @@ describe('biorxivSearchPreprintsTool', () => {
       license: 'cc_no',
       authorCorrespondingInstitution: 'University of South Carolina',
     });
-    expect(parsed.preprints[0]?.funder).toContain('Smart State Center');
+    expect(parsed.preprints[0]?.awards).toEqual(['R01GM146257']);
   });
 
   // ── Edge cases ──────────────────────────────────────────────────────────────
@@ -766,5 +769,266 @@ describe('biorxivSearchPreprintsTool', () => {
     const blocks = biorxivSearchPreprintsTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('3 revisions');
+  });
+
+  // ── include_abstract ────────────────────────────────────────────────────────
+
+  describe('include_abstract', () => {
+    const FALLBACK_DOI = '10.1101/2024.02.01.000002';
+    const FALLBACK_EPMC: EuropePmcResult = {
+      doi: FALLBACK_DOI,
+      title: 'Fallback preprint',
+      authors: 'Roe R',
+      publishedDate: '2024-02-01',
+    };
+    const RICH_WITH_ABSTRACT: PreprintRevision = {
+      ...RICH_REVISION,
+      abstract: 'Enriched abstract text.',
+    };
+
+    /** One enriched and one fallback result through the tool's contract boundary. */
+    async function call(args: Record<string, unknown>) {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(2, [EPMC_RESULT, FALLBACK_EPMC]));
+      mockGetDetails.mockImplementation((doi: string) =>
+        Promise.resolve(doi === EPMC_RESULT.doi ? [RICH_WITH_ABSTRACT] : []),
+      );
+      const result = await runToolContract(
+        biorxivSearchPreprintsTool,
+        { query: 'CRISPR', server: 'biorxiv', ...args } as never,
+        { context: { errors: biorxivSearchPreprintsTool.errors } },
+      );
+      const structured = result.structuredContent as {
+        preprints: Record<string, unknown>[];
+        partial_results: boolean;
+        notice?: string;
+      };
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      return { result, structured, text };
+    }
+
+    it('defaults to true — the current output, abstracts on both surfaces', async () => {
+      expect(biorxivSearchPreprintsTool.input.parse({ query: 'x' }).include_abstract).toBe(true);
+      mockGetAbstracts.mockResolvedValue(new Map([[FALLBACK_DOI, 'Fallback abstract text.']]));
+      const { structured, text } = await call({});
+
+      expect(structured.preprints[0]).toMatchObject({
+        enriched: true,
+        abstract: 'Enriched abstract text.',
+      });
+      expect(structured.preprints[1]).toMatchObject({
+        enriched: false,
+        abstract: 'Fallback abstract text.',
+      });
+      expect(text).toContain('**Abstract:** Enriched abstract text.');
+      expect(text).toContain('**Abstract:** Fallback abstract text.');
+      // Only the fallback DOI is looked up; the enriched one already has its abstract.
+      expect(mockGetAbstracts).toHaveBeenCalledTimes(1);
+      expect(mockGetAbstracts).toHaveBeenCalledWith([FALLBACK_DOI], expect.anything());
+    });
+
+    it('false drops abstract from enriched and fallback results on both surfaces, and every other field stays', async () => {
+      const { result, structured, text } = await call({ include_abstract: false });
+
+      expect(result.isError).toBeFalsy();
+      for (const p of structured.preprints) expect(p).not.toHaveProperty('abstract');
+      expect(text).not.toContain('**Abstract:**');
+      expect(text).not.toContain('Enriched abstract text.');
+      expect(mockGetAbstracts).not.toHaveBeenCalled();
+
+      expect(structured.preprints[0]).toMatchObject({
+        enriched: true,
+        title: RICH_REVISION.title,
+        authors: RICH_REVISION.authors,
+        authorCorresponding: 'Qun Lu',
+        authorCorrespondingInstitution: 'University of South Carolina',
+        date: '2024-01-15',
+        version: '1',
+        type: 'new results',
+        license: 'cc_no',
+        category: 'Neuroscience',
+        server: 'biorxiv',
+        jatsxmlUrl: RICH_REVISION.jatsxmlUrl,
+        awards: ['R01GM146257'],
+        publishedJournalDoi: '10.1038/s41586-026-00001-0',
+        revisionCount: 1,
+      });
+      expect(structured.preprints[1]).toEqual({
+        doi: FALLBACK_DOI,
+        title: 'Fallback preprint',
+        authors: 'Roe R',
+        date: '2024-02-01',
+        enriched: false,
+        enrichment_error: 'not_found',
+      });
+      for (const line of [
+        '**Type:** new results',
+        '**License:** cc_no',
+        '**Corresponding:** Qun Lu',
+        '**Institution:** University of South Carolina',
+        '**Awards:** R01GM146257',
+        '**Published DOI:** 10.1038/s41586-026-00001-0',
+        `**JATS XML:** ${RICH_REVISION.jatsxmlUrl}`,
+        '**Authors:** Roe R',
+        '**Date:** 2024-02-01',
+      ]) {
+        expect(text).toContain(line);
+      }
+    });
+
+    it.each([true, false])(
+      'keeps partial_results and each enrichment_error unchanged (include_abstract %s)',
+      async (include_abstract) => {
+        mockGetDetails.mockImplementation((doi: string) =>
+          doi === EPMC_RESULT.doi ? Promise.reject(rateLimitError(30)) : Promise.resolve([]),
+        );
+        mockEpmcSearch.mockResolvedValue(epmcSearchResult(2, [EPMC_RESULT, FALLBACK_EPMC]));
+        const result = await runToolContract(
+          biorxivSearchPreprintsTool,
+          { query: 'CRISPR', server: 'biorxiv', include_abstract } as never,
+          { context: { errors: biorxivSearchPreprintsTool.errors } },
+        );
+        const structured = result.structuredContent as {
+          preprints: Record<string, unknown>[];
+          partial_results: boolean;
+        };
+        const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+
+        expect(result.isError).toBeFalsy();
+        expect(structured.partial_results).toBe(true);
+        expect(structured.preprints.map((p) => p.enrichment_error)).toEqual([
+          'rate_limited',
+          'not_found',
+        ]);
+        expect(text).toContain('Some results show EuropePMC metadata only');
+        expect(text).toContain('enrichment_error: rate_limited');
+        expect(text).toContain('enrichment_error: not_found');
+      },
+    );
+
+    it.each([true, false])(
+      'returns the same empty-result notice (include_abstract %s)',
+      async (include_abstract) => {
+        mockEpmcSearch.mockResolvedValue(epmcSearchResult(0, []));
+        const result = await runToolContract(
+          biorxivSearchPreprintsTool,
+          { query: 'xyzzy', include_abstract } as never,
+          { context: { errors: biorxivSearchPreprintsTool.errors } },
+        );
+        const structured = result.structuredContent as { preprints: unknown[]; notice?: string };
+        expect(structured.preprints).toEqual([]);
+        expect(structured.notice).toContain('No preprints matched "xyzzy"');
+        expect(mockGetAbstracts).not.toHaveBeenCalled();
+      },
+    );
+
+    it('a failed abstract lookup leaves fallback results without one and says so, on both surfaces', async () => {
+      mockGetAbstracts.mockRejectedValue(new Error('Fetch failed for EuropePMC. Status: 503'));
+      const { result, structured, text } = await call({});
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.preprints[0]).toMatchObject({ abstract: 'Enriched abstract text.' });
+      expect(structured.preprints[1]).not.toHaveProperty('abstract');
+      expect(structured.notice).toBe(
+        'Abstracts could not be retrieved for the 1 result shown with EuropePMC metadata only — the EuropePMC abstract lookup failed, so retry the search to include them.',
+      );
+      expect(text).toContain('Abstracts could not be retrieved for the 1 result');
+      // The raw upstream message stays out of the notice.
+      expect(structured.notice).not.toContain('503');
+    });
+
+    it('a rate-limited abstract lookup names the wait in the notice', async () => {
+      mockGetAbstracts.mockRejectedValue(europePmcRateLimitError(45));
+      const { structured } = await call({});
+      expect(structured.notice).toContain('EuropePMC is rate-limiting this host');
+      expect(structured.notice).toContain('wait 45 seconds');
+    });
+  });
+
+  // ── Upstream Markdown ───────────────────────────────────────────────────────
+
+  describe('upstream text with Markdown metacharacters', () => {
+    const MARKDOWN_EPMC: EuropePmcResult = {
+      doi: IDENTIFIERS.doi,
+      title: UPSTREAM.title,
+      authors: UPSTREAM.authors,
+      publishedDate: '2026-07-03',
+    };
+
+    const MARKDOWN_REVISION: PreprintRevision = {
+      doi: IDENTIFIERS.doi,
+      version: '1',
+      date: '2026-07-03',
+      server: 'biorxiv',
+      title: UPSTREAM.title,
+      abstract: UPSTREAM.abstract,
+      authors: UPSTREAM.authors,
+      authorCorresponding: UPSTREAM.authorCorresponding,
+      authorCorrespondingInstitution: UPSTREAM.authorCorrespondingInstitution,
+      awards: UPSTREAM.awards,
+      category: UPSTREAM.category,
+      license: UPSTREAM.license,
+      type: UPSTREAM.type,
+      jatsxmlUrl: IDENTIFIERS.jatsxmlUrl,
+      publishedJournalDoi: IDENTIFIERS.publishedDoi,
+    };
+
+    async function call() {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(1, [MARKDOWN_EPMC]));
+      const result = await runToolContract(
+        biorxivSearchPreprintsTool,
+        { query: 'base editor', server: 'biorxiv' },
+        { context: { errors: biorxivSearchPreprintsTool.errors } },
+      );
+      const preprint = (result.structuredContent as { preprints: Record<string, unknown>[] })
+        .preprints[0];
+      return { preprint, text: (result.content[0] as { text: string }).text };
+    }
+
+    it('enriched branch: raw in structuredContent, escaped in content[], identifiers untouched', async () => {
+      mockGetDetails.mockResolvedValue([MARKDOWN_REVISION]);
+      const { preprint, text } = await call();
+
+      expect(preprint).toMatchObject({
+        enriched: true,
+        title: UPSTREAM.title,
+        abstract: UPSTREAM.abstract,
+        license: UPSTREAM.license,
+        awards: UPSTREAM.awards,
+        jatsxmlUrl: IDENTIFIERS.jatsxmlUrl,
+      });
+
+      expect(text).toContain(`### ${ESCAPED.title}\n`);
+      expect(text).toContain(`**Type:** ${ESCAPED.type}\n`);
+      expect(text).toContain(`**Category:** ${ESCAPED.category}\n`);
+      expect(text).toContain(`**License:** ${ESCAPED.license}\n`);
+      expect(text).toContain(`**Authors:** ${ESCAPED.authors}\n`);
+      expect(text).toContain(`**Corresponding:** ${ESCAPED.authorCorresponding}\n`);
+      expect(text).toContain(`**Institution:** ${ESCAPED.authorCorrespondingInstitution}\n`);
+      expect(text).toContain(`**Awards:** ${ESCAPED.awards}\n`);
+      expect(text).toContain(`**Abstract:** ${ESCAPED.abstract}`);
+      expect(text).toContain(`**DOI:** ${IDENTIFIERS.doi}\n`);
+      expect(text).toContain(`**JATS XML:** ${IDENTIFIERS.jatsxmlUrl}\n`);
+      expect(text).toContain(`**Published DOI:** ${IDENTIFIERS.publishedDoi}\n`);
+    });
+
+    it('EuropePMC fallback branch: raw in structuredContent, escaped in content[]', async () => {
+      mockGetDetails.mockResolvedValue([]);
+      mockGetAbstracts.mockResolvedValue(new Map([[IDENTIFIERS.doi, UPSTREAM.abstract]]));
+      const { preprint, text } = await call();
+
+      expect(preprint).toMatchObject({
+        enriched: false,
+        title: UPSTREAM.title,
+        authors: UPSTREAM.authors,
+        abstract: UPSTREAM.abstract,
+      });
+
+      expect(text).toContain(`### ${ESCAPED.title}\n`);
+      expect(text).toContain(`**Authors:** ${ESCAPED.authors}\n`);
+      expect(text).toContain(`**Abstract:** ${ESCAPED.abstract}`);
+      expect(text).toContain(`**DOI:** ${IDENTIFIERS.doi}\n`);
+      // The formatter's own emphasis markup still renders.
+      expect(text).toContain('\n*DOI not indexed on target server — EuropePMC metadata shown.*');
+    });
   });
 });

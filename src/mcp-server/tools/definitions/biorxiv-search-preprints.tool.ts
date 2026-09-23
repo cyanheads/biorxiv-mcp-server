@@ -22,6 +22,13 @@
  * that body; one that persists fails the call rather than reading as zero
  * matches — `invalid_cursor_mark` when a cursor page was requested (a malformed
  * token draws that body every time), `search_unavailable` on a first page.
+ *
+ * `include_abstract` (default true) drops only the abstract, from enriched and
+ * fallback records alike. The ranked search's `lite` records carry no abstract,
+ * so when abstracts are requested and any record fell back to EuropePMC
+ * metadata, their abstracts come from one DOI-keyed `core` lookup; a fully
+ * enriched page never makes it. That lookup degrades like enrichment does — a
+ * failure leaves those records without an abstract and says so in the notice.
  * @module mcp-server/tools/definitions/biorxiv-search-preprints.tool
  */
 
@@ -31,7 +38,12 @@ import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
-import { describeWait, findRateLimit, isValidCalendarDate } from '@/services/shared.js';
+import {
+  describeWait,
+  escapeMarkdown,
+  findRateLimit,
+  isValidCalendarDate,
+} from '@/services/shared.js';
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
@@ -52,7 +64,7 @@ type EnrichedPreprint = {
   category?: string | undefined;
   server?: string | undefined;
   jatsxmlUrl?: string | undefined;
-  funder?: string | undefined;
+  awards?: string[] | undefined;
   publishedJournalDoi?: string | undefined;
   abstract?: string | undefined;
   enriched: boolean;
@@ -67,34 +79,38 @@ const ENRICHMENT_ERROR_NOTES: Record<EnrichmentError, string> = {
   not_found: 'DOI not indexed on target server — EuropePMC metadata shown.',
 };
 
+// Upstream free text — bioRxiv's and EuropePMC's alike — is escaped as it is
+// interpolated so it renders literally; DOIs and URLs stay raw because agents
+// copy them back into calls.
 function formatResult(p: EnrichedPreprint): string {
   const lines: string[] = [];
 
-  lines.push(`### ${p.title ?? p.doi}`);
+  lines.push(`### ${p.title ? escapeMarkdown(p.title) : p.doi}`);
   lines.push(`**DOI:** ${p.doi}`);
 
   if (p.enriched) {
     if (p.server) lines.push(`**Server:** ${p.server}`);
-    if (p.type) lines.push(`**Type:** ${p.type}`);
-    if (p.category) lines.push(`**Category:** ${p.category}`);
-    if (p.license) lines.push(`**License:** ${p.license}`);
+    if (p.type) lines.push(`**Type:** ${escapeMarkdown(p.type)}`);
+    if (p.category) lines.push(`**Category:** ${escapeMarkdown(p.category)}`);
+    if (p.license) lines.push(`**License:** ${escapeMarkdown(p.license)}`);
     if (p.date) lines.push(`**Date:** ${p.date}`);
     if (p.version) lines.push(`**Version:** ${p.version}`);
-    if (p.authors) lines.push(`**Authors:** ${p.authors}`);
-    if (p.authorCorresponding) lines.push(`**Corresponding:** ${p.authorCorresponding}`);
+    if (p.authors) lines.push(`**Authors:** ${escapeMarkdown(p.authors)}`);
+    if (p.authorCorresponding)
+      lines.push(`**Corresponding:** ${escapeMarkdown(p.authorCorresponding)}`);
     if (p.authorCorrespondingInstitution)
-      lines.push(`**Institution:** ${p.authorCorrespondingInstitution}`);
-    if (p.funder) lines.push(`**Funder:** ${p.funder}`);
+      lines.push(`**Institution:** ${escapeMarkdown(p.authorCorrespondingInstitution)}`);
+    if (p.awards) lines.push(`**Awards:** ${escapeMarkdown(p.awards.join('; '))}`);
     if (p.publishedJournalDoi) lines.push(`**Published DOI:** ${p.publishedJournalDoi}`);
     if (p.jatsxmlUrl) lines.push(`**JATS XML:** ${p.jatsxmlUrl}`);
-    if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
+    if (p.abstract) lines.push(`\n**Abstract:** ${escapeMarkdown(p.abstract)}`);
     if (p.revisionCount !== undefined && p.revisionCount > 1)
       lines.push(`\n*${p.revisionCount} revisions — latest shown.*`);
   } else {
     // EuropePMC-only fallback when bioRxiv enrichment failed
-    if (p.authors) lines.push(`**Authors:** ${p.authors}`);
+    if (p.authors) lines.push(`**Authors:** ${escapeMarkdown(p.authors)}`);
     if (p.date) lines.push(`**Date:** ${p.date}`);
-    if (p.abstract) lines.push(`\n**Abstract:** ${p.abstract}`);
+    if (p.abstract) lines.push(`\n**Abstract:** ${escapeMarkdown(p.abstract)}`);
     lines.push(`\n*${ENRICHMENT_ERROR_NOTES[p.enrichment_error ?? 'not_found']}*`);
   }
 
@@ -104,7 +120,7 @@ function formatResult(p: EnrichedPreprint): string {
 export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   title: 'Search Preprints by Keyword',
   description:
-    'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. A EuropePMC rate limit (HTTP 429) fails the call with a retryable rate_limited error carrying the wait in seconds — a rate-limited metadata enrichment does not, and instead marks the affected record enrichment_error: "rate_limited".',
+    'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. Abstracts are included by default; include_abstract: false omits them from every result for a response about a third the size, and biorxiv_get_preprint returns the abstract for up to 10 DOIs per call. A EuropePMC rate limit (HTTP 429) fails the call with a retryable rate_limited error carrying the wait in seconds — a rate-limited metadata enrichment does not, and instead marks the affected record enrichment_error: "rate_limited".',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   // biorxiv_list_recent spells its date bounds start_date / end_date.
@@ -140,6 +156,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         .max(100)
         .default(25)
         .describe('Maximum results to return (1–100). Defaults to 25.'),
+      include_abstract: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Include each result's abstract. Defaults to true. false omits the abstract from every result, enriched and EuropePMC-fallback alike, and keeps every other field.",
+        ),
       cursor_mark: z
         .string()
         .optional()
@@ -171,12 +193,22 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
             category: z.string().optional().describe('Subject category.'),
             server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
             jatsxmlUrl: z.string().optional().describe('URL to the JATS XML full-text.'),
-            funder: z.string().optional().describe('Funder information.'),
+            awards: z
+              .array(z.string().describe('One award value as upstream records it.'))
+              .optional()
+              .describe(
+                'Grant award numbers from the funding statement, verbatim and deduplicated — one value can hold several grants run together without a separator. Absent when none, and on EuropePMC-only fallback records. Funder names are not included: api.biorxiv.org attributes them to unrelated organizations.',
+              ),
             publishedJournalDoi: z
               .string()
               .optional()
               .describe('Published journal DOI when accepted.'),
-            abstract: z.string().optional().describe('Abstract text.'),
+            abstract: z
+              .string()
+              .optional()
+              .describe(
+                'Abstract text. Omitted when include_abstract is false. On a EuropePMC-fallback record, absent when EuropePMC holds none or the abstract lookup failed — the notice says when it failed.',
+              ),
             enriched: z
               .boolean()
               .describe(
@@ -239,7 +271,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .string()
       .optional()
       .describe(
-        'Present when zero results are returned. On a cursor_mark page past the last match, says the list is exhausted; otherwise echoes the query and suggests how to broaden it.',
+        'Present when zero results are returned: on a cursor_mark page past the last match, says the list is exhausted; otherwise echoes the query and suggests how to broaden it. Also present when abstracts for results shown with EuropePMC metadata only could not be retrieved, which leaves those results without one.',
       ),
   },
 
@@ -500,12 +532,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
               : findRateLimit(rejections)
                 ? 'rate_limited'
                 : 'service_error';
+          // Its abstract, when requested, is attached below from one core lookup.
           return {
             doi,
             ...(epResult.title && { title: epResult.title }),
             ...(epResult.authors && { authors: epResult.authors }),
             ...(epResult.publishedDate && { date: epResult.publishedDate }),
-            ...(epResult.abstract && { abstract: epResult.abstract }),
             enriched: false,
             enrichment_error: enrichmentError,
           };
@@ -525,17 +557,50 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           ...(latest.category && { category: latest.category }),
           ...(latest.server && { server: latest.server }),
           ...(latest.jatsxmlUrl && { jatsxmlUrl: latest.jatsxmlUrl }),
-          ...(latest.funder && { funder: latest.funder }),
+          ...(latest.awards && { awards: latest.awards }),
           ...(latest.publishedJournalDoi && { publishedJournalDoi: latest.publishedJournalDoi }),
-          ...(latest.abstract && { abstract: latest.abstract }),
+          ...(input.include_abstract && latest.abstract && { abstract: latest.abstract }),
           enriched: true,
           revisionCount: revisions.length,
         };
       }),
     );
 
+    // ctx.enrich.notice is last-wins, so every qualification is collected here
+    // and flushed as one string.
+    const notices: string[] = [];
+
+    // Step 3: abstracts for fallback records. The lite search carried none, so
+    // they come from one core lookup keyed by those DOIs. A failure degrades
+    // like enrichment does: the records stand without an abstract, and the
+    // notice says why.
+    const fallback = enriched.filter((p) => !p.enriched);
+    if (input.include_abstract && fallback.length > 0) {
+      try {
+        const abstracts = await epmc.getAbstracts(
+          fallback.map((p) => p.doi),
+          ctx,
+        );
+        for (const p of fallback) {
+          const abstract = abstracts.get(p.doi.toLowerCase());
+          if (abstract) p.abstract = abstract;
+        }
+      } catch (err) {
+        ctx.log.warning('EuropePMC abstract lookup failed', { error: String(err) });
+        const rateLimit = findRateLimit([err]);
+        const n = fallback.length;
+        const why = rateLimit
+          ? `EuropePMC is rate-limiting this host, so wait ${describeWait(rateLimit.retryAfter)} and retry the search to include them`
+          : 'the EuropePMC abstract lookup failed, so retry the search to include them';
+        notices.push(
+          `Abstracts could not be retrieved for the ${n} ${n === 1 ? 'result' : 'results'} shown with EuropePMC metadata only — ${why}.`,
+        );
+      }
+    }
+
     ctx.enrich.total(hitCount);
     ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
       preprints: enriched,
