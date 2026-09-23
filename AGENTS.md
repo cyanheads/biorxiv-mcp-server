@@ -187,9 +187,10 @@ src/
   config/
     server-config.ts                    # bioRxiv-specific env vars (BIORXIV_MAILTO, API base URLs)
   services/
-    shared.ts                           # Shared utilities (detectHtmlError, normalizeDoi, normalizeUpstreamText,
-                                        #   isValidCalendarDate, parseRetryAfterSeconds, findRateLimit, describeWait,
-                                        #   SERVER_VERSION)
+    shared.ts                           # Shared utilities (detectHtmlError, normalizeDoi, normalizeRorId,
+                                        #   normalizeUpstreamText, escapeMarkdown, isValidCalendarDate,
+                                        #   parseRetryAfterSeconds, findRateLimit, describeWait, SERVER_VERSION)
+    upstream-text-tables.ts             # Closed tables normalizeUpstreamText reads: Highwire placeholders, section headings
     biorxiv/
       biorxiv-service.ts                # BiorxivApiService — details, publications, pubs endpoints
       types.ts                          # Domain types (Preprint, PublishedVersion, …)
@@ -225,11 +226,13 @@ src/
 
 - **DOI format:** `10.1101/YYYY.MM.DD.NNNNNN` or `10.64898/…`. Run every DOI input through `normalizeDoi()` (`src/services/shared.ts`), which strips doi.org/article URLs, `doi:`, and `vN`/`.full` suffixes and returns `undefined` for anything still malformed — the bioRxiv API returns empty collections for malformed DOIs without an error code. `/pubs` keyed by preprint DOI never parses a `10.64898/` DOI; see `getPublishedVersionByJournalDoi()`.
 - **Category spelling:** the listing API filters only on lowercase with `/` and `_` read as a space (`hiv aids`), and answers anything else with its unfiltered listing, echoing `messages[0].category: "all"`. `BiorxivApiService` owns the spelling and flags `categoryIgnored`; never present a flagged page as filtered.
+- **Funder data:** upstream funder `name`s and ROR `id`s on records are misattributed — expose only `awards` (verbatim, never split), never a funder name or ID. The listing's `funder` filter takes a bare ROR ID (`normalizeRorId()` strips the URL form and checks the checksum), is bioRxiv-only, and `"funder value not found"` (flagged `funderNotFound`) is an error, never an empty page.
 - **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"`, including for DOI-resolution tools — both servers issue `10.1101/` DOIs, so the DOI never identifies the server and a single-server default silently misses records held by the other. Fan out via `Promise.allSettled` when `"both"` and name the answering server in the output.
 - **Pagination:** integer `cursor` offset (0, 30, 60, …). Page size is fixed at 30 by the API — do not expose a `limit` parameter.
 - **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous.
-- **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. Enrichment routes based on `input.server` — when explicit ("biorxiv" or "medrxiv"), always use that server. `10.1101/` prefix is used as a hint only within `server="both"` to prefer bioRxiv first, but is not a reliable discriminator (both servers share this prefix).
-- **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and abstracts must all appear in the rendered markdown, not just counts.
+- **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. Enrichment routes based on `input.server` — when explicit ("biorxiv" or "medrxiv"), always use that server. `10.1101/` prefix is used as a hint only within `server="both"` to prefer bioRxiv first, but is not a reliable discriminator (both servers share this prefix). The ranked search stays `resulttype=lite`, which never carries an abstract; records that fall back to EuropePMC metadata get theirs from one DOI-keyed `resultType=core` query (`getAbstracts`), made only when abstracts are requested and something fell back. A failed lookup is a notice, never a failed search.
+- **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and every abstract a record carries must all appear in the rendered markdown, not just counts. `include_abstract` (default `false` on `biorxiv_list_recent`, `true` on `biorxiv_search_preprints`) removes the abstract from both surfaces together and no other field.
+- **Upstream text in `format()`:** run titles and abstracts through `normalizeUpstreamText()` in the service (never in `format()`), and pass every upstream free-text field through `escapeMarkdown()` where `format()` interpolates it. It escapes only characters that would change rendering (`A\*T`, `\<COMP id>`; `p<0.05` and `cc_by` stay raw), because agents copy spans out of `content[]` — keep it that narrow. Never escape DOIs, URLs, `structuredContent`, or `biorxiv_get_fulltext`'s extracted `content`.
 - **Polite access:** include `BIORXIV_MAILTO` in the `User-Agent` header when set: `biorxiv-mcp-server/0.1.0 (mailto:${config.mailto})`. The env var is optional — omit the mailto segment when not configured.
 
 ---
@@ -378,7 +381,7 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
-- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data — including revision list, crosswalk fields, abstract, and pagination state
+- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data — including revision list, crosswalk fields, pagination state, and the abstract whenever the record carries one (`include_abstract` drops it from both surfaces at once)
 - [ ] bioRxiv API wrapping: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] bioRxiv API wrapping: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data (e.g., `published` field may be `"NA"` — surface it as absent, not empty)
 - [ ] bioRxiv API wrapping: tests include at least one sparse payload case with omitted upstream fields

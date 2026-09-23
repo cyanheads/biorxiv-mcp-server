@@ -36,7 +36,7 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 | Tool | Description |
 |:---|:---|
 | `biorxiv_get_preprint` | Fetch full metadata, abstract, revision history, and journal crosswalk for one or more preprints by DOI |
-| `biorxiv_list_recent` | List preprints posted or updated within a date interval, with optional server and category filters |
+| `biorxiv_list_recent` | List preprints posted or updated within a date interval, with optional server, category, and funder filters |
 | `biorxiv_search_preprints` | Search preprints by keyword and/or author via EuropePMC for relevance ranking, enriched with bioRxiv/medRxiv metadata |
 | `biorxiv_get_published_version` | Resolve a preprint DOI to its journal publication record (journal DOI, name, published date) |
 | `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown extracted from its rendered HTML article page |
@@ -49,7 +49,8 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 - Batch fetch up to 10 DOIs in a single request
 - Accepts a bare DOI or a pasted form of one — `https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or article-page suffix (`.full`, `.full.pdf`, `.article-metrics`, …) — and reports the bare DOI
 - Each DOI returns its full revision history in `revisions[]` — one API call per DOI, no enumeration loop
-- Includes title, authors, abstract, category, license, JATS XML full-text link (`jatsxmlUrl`), and published journal DOI (`publishedJournalDoi`) once accepted
+- Includes title, authors, abstract, category, license, grant award numbers (`awards`), JATS XML full-text link (`jatsxmlUrl`), and published journal DOI (`publishedJournalDoi`) once accepted
+- `awards` holds each award value as upstream records it (one value can run several grants together), deduplicated; funder names are left out because `api.biorxiv.org` attributes them to unrelated organizations
 - Scope to `biorxiv`, `medrxiv`, or `both` (default `both`); when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
 - Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag — a DOI is only reported `not_found` when every attempted server answered
 - A rate-limited lookup (HTTP 429) reports `reason: "rate_limited"` rather than folding into `upstream_unavailable`, carrying `retryAfter` — the wait in seconds `api.biorxiv.org` asked for
@@ -60,7 +61,11 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 - Optional server-side category filter — pass a value from `biorxiv_list_categories`, in any case, with `_`, `-`, or a space (`Cell Biology`, `cell_biology`, `cell-biology`)
 - A server that answers the filter with its unfiltered listing is left out with a notice, never returned as filtered; `invalid_category` when no server applied it
+- Optional `funder` filter by ROR ID, bare (`021nxhr62`) or as `https://ror.org/021nxhr62`, checked against the ROR pattern and checksum before any request; combines with `category`
+- The funder filter is bioRxiv-only — medRxiv records carry no funder data — so `server="both"` queries bioRxiv alone with a notice, and `server="medrxiv"` raises `invalid_funder`
+- A ROR ID `api.biorxiv.org` has no funder record for raises `invalid_funder`, never an empty page
 - Fixed page size of 30 (API constraint); advance with integer `cursor` (0, 30, 60, …)
+- Abstracts are omitted by default — they are about three quarters of a page — and every other record field is returned; `include_abstract: true` adds them for the whole page, and `biorxiv_get_preprint` returns them for up to 10 DOIs per call
 - Response includes a `total` count per server; a cursor past the last page is marked `exhausted: true` rather than reading as zero results in the interval
 - When `server="both"` (default), per-server pagination state is independent (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); one server not answering is named in `failed[]` while the other's page still returns
 - Every attempted server failing raises a retryable `upstream_unavailable` (or `rate_limited`) error instead of an empty page
@@ -73,8 +78,9 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 - Up to 100 results per page (default 25); `cursor_mark` pages through the same ranked list; a page past the last match comes back empty with a notice saying so, and a token EuropePMC does not recognize raises `invalid_cursor_mark`
 - An EuropePMC response missing its result list is retried, never reported as zero matches; one that persists on a first page raises `search_unavailable`
 - EuropePMC powers relevance ranking (indexes new preprints within 1–2 days of posting); the bioRxiv/medRxiv API enriches matches with canonical metadata
-- Enriched results carry the same latest-revision fields as `biorxiv_get_preprint`, including `type`, `license`, `funder`, and `authorCorrespondingInstitution`
-- Enrichment failures degrade to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`)
+- Enriched results carry the same latest-revision fields as `biorxiv_get_preprint`, including `type`, `license`, `awards`, and `authorCorrespondingInstitution`
+- Enrichment failures degrade to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`); those records' abstracts come from one EuropePMC lookup keyed by their DOIs, and a failed lookup leaves them without one, with a notice
+- Abstracts are included by default; `include_abstract: false` drops them from every result, enriched and fallback alike, for a response about a third the size, keeping every other field
 - A EuropePMC rate limit (HTTP 429) raises a retryable `rate_limited` error carrying the origin's `Retry-After` wait — the search itself has no metadata to fall back on, unlike enrichment
 
 ---
@@ -123,6 +129,7 @@ Agent-friendly output:
 - Rate-limit transparency — a 429 from any upstream surfaces as `reason: "rate_limited"` carrying the origin's parsed `retryAfter` wait, distinguished from a generic `upstream_unavailable`
 - Discriminated enrichment outputs — `biorxiv_search_preprints` results carry `enriched` plus a typed `enrichment_error` (`service_error` / `rate_limited` / `not_found`) so callers branch on data, not string parsing
 - Paging and pagination state — `exhausted` cursors are flagged as an out-of-range artifact rather than an empty interval, and `biorxiv_get_fulltext` reports `totalChars` / `remainingChars` / `hasMore` for chunked reads
+- Clean titles and abstracts — Highwire export markup is resolved to plain text on both surfaces: symbol placeholders (`{beta}`, `{+/-}`, `[&ge;]`) become their characters, structured-abstract headings read `Results: …`, list items read `• …`, and figure and table blocks are dropped. The Markdown in `content[]` escapes upstream text so it renders as written
 
 ## Getting started
 
