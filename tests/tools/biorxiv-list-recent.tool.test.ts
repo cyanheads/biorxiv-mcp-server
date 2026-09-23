@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-list-recent.tool.js';
 import type { ListingResult, PreprintRevision } from '@/services/biorxiv/types.js';
+import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
@@ -121,7 +122,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-01',
       '2024-01-31',
       0,
-      undefined,
+      {},
       expect.anything(),
     );
   });
@@ -546,7 +547,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       '2024-01-15',
       0,
-      'Neuroscience',
+      { category: 'Neuroscience' },
       expect.anything(),
     );
     expect(result.pagination.biorxiv).toBeDefined();
@@ -574,7 +575,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       '2024-01-15',
       0,
-      'Pathology',
+      { category: 'Pathology' },
       expect.anything(),
     );
     expect(mockGetListing).toHaveBeenCalledWith(
@@ -582,7 +583,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       '2024-01-15',
       0,
-      'Pathology',
+      { category: 'Pathology' },
       expect.anything(),
     );
     expect(result.pagination.biorxiv).toBeDefined();
@@ -654,5 +655,232 @@ describe('biorxivListRecentTool', () => {
     const text = (blocks[0] as { text: string }).text;
     // Contains pagination header but no preprint items
     expect(text).toContain('bioRxiv');
+  });
+
+  // ── include_abstract ────────────────────────────────────────────────────────
+
+  describe('include_abstract', () => {
+    /** A record carrying every output field, so a projection that drops more than the abstract shows. */
+    const FULL: PreprintRevision = {
+      doi: '10.1101/2026.09.01.700001',
+      title: 'Kinetochore assembly in human cells',
+      authors: 'Doe, J.; Roe, R.',
+      authorCorresponding: 'Jane Doe',
+      authorCorrespondingInstitution: 'University of Somewhere',
+      date: '2026-09-01',
+      version: '2',
+      type: 'new results',
+      license: 'cc_by',
+      category: 'cell biology',
+      jatsxmlUrl: 'https://www.biorxiv.org/content/early/2026/09/01/2026.09.01.700001.source.xml',
+      abstract: 'Kinetochores assemble on centromeric chromatin.',
+      awards: ['R35GM134936'],
+      publishedJournalDoi: '10.1038/s41586-026-00002-0',
+      server: 'biorxiv',
+    };
+    const { abstract: _abstract, ...WITHOUT_ABSTRACT } = FULL;
+    const MEDRXIV: PreprintRevision = {
+      doi: '10.1101/2026.09.01.26300001',
+      title: 'Cohort outcomes',
+      abstract: 'A medRxiv abstract.',
+      server: 'medrxiv',
+    };
+
+    async function call(args: Record<string, unknown>) {
+      const result = await runToolContract(
+        biorxivListRecentTool,
+        { start_date: '2026-09-01', end_date: '2026-09-02', ...args } as never,
+        { context: { errors: biorxivListRecentTool.errors } },
+      );
+      const structured = result.structuredContent as {
+        preprints: Record<string, unknown>[];
+        pagination: Record<string, unknown>;
+        failed: unknown[];
+        notice?: string;
+      };
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      return { result, structured, text };
+    }
+
+    it('defaults to false', () => {
+      const input = biorxivListRecentTool.input.parse({
+        start_date: '2026-09-01',
+        end_date: '2026-09-02',
+      });
+      expect(input.include_abstract).toBe(false);
+    });
+
+    it('omits the abstract by default on both surfaces and keeps every other field', async () => {
+      mockGetListing.mockResolvedValue({ preprints: [FULL], pagination: { cursor: 0, total: 1 } });
+      const { result, structured, text } = await call({ server: 'biorxiv' });
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.preprints).toEqual([WITHOUT_ABSTRACT]);
+      expect(text).not.toContain(FULL.abstract);
+      for (const line of [
+        `### ${FULL.title}`,
+        `**DOI:** ${FULL.doi}`,
+        '**Date:** 2026-09-01',
+        '**Version:** 2',
+        '**Type:** new results',
+        '**Server:** biorxiv',
+        '**Category:** cell biology',
+        '**License:** cc_by',
+        '**Authors:** Doe, J.; Roe, R.',
+        '**Corresponding:** Jane Doe',
+        '**Institution:** University of Somewhere',
+        '**Awards:** R35GM134936',
+        `**JATS XML:** ${FULL.jatsxmlUrl}`,
+        `**Published DOI:** ${FULL.publishedJournalDoi}`,
+      ]) {
+        expect(text).toContain(line);
+      }
+    });
+
+    it('true returns every record in full, the abstract on both surfaces', async () => {
+      mockGetListing.mockResolvedValue({ preprints: [FULL], pagination: { cursor: 0, total: 1 } });
+      const { structured, text } = await call({ server: 'biorxiv', include_abstract: true });
+      expect(structured.preprints).toEqual([FULL]);
+      expect(text).toContain(`\n\n${FULL.abstract}`);
+    });
+
+    it('omits abstracts from both servers on a two-server page', async () => {
+      mockGetListing.mockImplementation((server: string) =>
+        Promise.resolve({
+          preprints: [server === 'biorxiv' ? FULL : MEDRXIV],
+          pagination: { cursor: 0, total: 1 },
+        }),
+      );
+      const { structured, text } = await call({ server: 'both' });
+      expect(structured.preprints.map((p) => p.doi)).toEqual([FULL.doi, MEDRXIV.doi]);
+      for (const p of structured.preprints) expect(p).not.toHaveProperty('abstract');
+      expect(text).not.toContain(FULL.abstract);
+      expect(text).not.toContain(MEDRXIV.abstract);
+    });
+
+    it.each([false, true])(
+      'keeps a partial failed[] result the same (include_abstract %s)',
+      async (include_abstract) => {
+        mockGetListing.mockImplementation((server: string) =>
+          server === 'biorxiv'
+            ? Promise.resolve({ preprints: [FULL], pagination: { cursor: 0, total: 1 } })
+            : Promise.reject(new Error('medRxiv down')),
+        );
+        const { result, structured, text } = await call({ server: 'both', include_abstract });
+        expect(result.isError).toBeFalsy();
+        expect(structured.failed).toEqual([{ server: 'medrxiv', error: 'medRxiv down' }]);
+        expect(structured.pagination).toEqual({ biorxiv: { cursor: 0, total: 1 } });
+        expect(structured.notice).toMatch(/medRxiv did not answer/);
+        expect(structured.preprints).toEqual([include_abstract ? FULL : WITHOUT_ABSTRACT]);
+        expect(text).toContain('**medRxiv:** server did not answer');
+      },
+    );
+
+    it.each([false, true])(
+      'keeps an exhausted cursor the same (include_abstract %s)',
+      async (include_abstract) => {
+        mockGetListing.mockImplementation((server: string) =>
+          Promise.resolve(
+            server === 'biorxiv'
+              ? { preprints: [FULL], pagination: { cursor: 30, total: 31 } }
+              : { preprints: [], pagination: { cursor: 30, total: 0 } },
+          ),
+        );
+        const { structured, text } = await call({ server: 'both', cursor: 30, include_abstract });
+        expect(structured.pagination).toEqual({
+          biorxiv: { cursor: 30, total: 31 },
+          medrxiv: { cursor: 30, total: 0, exhausted: true },
+        });
+        expect(structured.notice).toMatch(/Cursor 30 is past the last available page on medRxiv/);
+        expect(text).toContain('cursor exhausted');
+      },
+    );
+
+    it.each([false, true])(
+      'keeps an empty result the same (include_abstract %s)',
+      async (include_abstract) => {
+        mockGetListing.mockResolvedValue({ preprints: [], pagination: { cursor: 0, total: 0 } });
+        const { result, structured } = await call({ server: 'biorxiv', include_abstract });
+        expect(result.isError).toBeFalsy();
+        expect(structured.preprints).toEqual([]);
+        expect(structured.notice).toMatch(/No preprints found for dates 2026-09-01–2026-09-02/);
+      },
+    );
+  });
+
+  // ── Upstream Markdown ───────────────────────────────────────────────────────
+
+  describe('upstream text with Markdown metacharacters', () => {
+    const MARKDOWN_PREPRINT: PreprintRevision = {
+      doi: IDENTIFIERS.doi,
+      date: '2026-07-03',
+      version: '1',
+      server: 'biorxiv',
+      title: UPSTREAM.title,
+      abstract: UPSTREAM.abstract,
+      authors: UPSTREAM.authors,
+      authorCorresponding: UPSTREAM.authorCorresponding,
+      authorCorrespondingInstitution: UPSTREAM.authorCorrespondingInstitution,
+      awards: UPSTREAM.awards,
+      category: UPSTREAM.category,
+      license: UPSTREAM.license,
+      type: UPSTREAM.type,
+      jatsxmlUrl: IDENTIFIERS.jatsxmlUrl,
+      publishedJournalDoi: IDENTIFIERS.publishedDoi,
+    };
+
+    async function call() {
+      mockGetListing.mockResolvedValue({
+        preprints: [MARKDOWN_PREPRINT],
+        pagination: { cursor: 0, total: 1 },
+      });
+      const result = await runToolContract(
+        biorxivListRecentTool,
+        {
+          start_date: '2026-07-01',
+          end_date: '2026-07-03',
+          server: 'biorxiv',
+          include_abstract: true,
+        } as never,
+        { context: { errors: biorxivListRecentTool.errors } },
+      );
+      return { result, text: (result.content[0] as { text: string }).text };
+    }
+
+    it('carries upstream text unescaped in structuredContent', async () => {
+      const { result } = await call();
+      expect(
+        (result.structuredContent as { preprints: PreprintRevision[] }).preprints[0],
+      ).toMatchObject({
+        title: UPSTREAM.title,
+        abstract: UPSTREAM.abstract,
+        authors: UPSTREAM.authors,
+        awards: UPSTREAM.awards,
+        jatsxmlUrl: IDENTIFIERS.jatsxmlUrl,
+        publishedJournalDoi: IDENTIFIERS.publishedDoi,
+      });
+    });
+
+    it('escapes every upstream field in content[], the line-initial abstract included', async () => {
+      const { text } = await call();
+      expect(text).toContain(`### ${ESCAPED.title}\n`);
+      expect(text).toContain(`**Type:** ${ESCAPED.type}\n`);
+      expect(text).toContain(`**Category:** ${ESCAPED.category}\n`);
+      expect(text).toContain(`**License:** ${ESCAPED.license}\n`);
+      expect(text).toContain(`**Authors:** ${ESCAPED.authors}\n`);
+      expect(text).toContain(`**Corresponding:** ${ESCAPED.authorCorresponding}\n`);
+      expect(text).toContain(`**Institution:** ${ESCAPED.authorCorrespondingInstitution}\n`);
+      expect(text).toContain(`**Awards:** ${ESCAPED.awards}\n`);
+      // The abstract opens its own line, where an unescaped `1. ` starts an ordered list.
+      expect(text).toContain(`\n\n${ESCAPED.abstract}`);
+      expect(text).not.toMatch(/^1\. /m);
+    });
+
+    it('leaves the DOI, JATS URL, and journal DOI unescaped in content[]', async () => {
+      const { text } = await call();
+      expect(text).toContain(`**DOI:** ${IDENTIFIERS.doi}\n`);
+      expect(text).toContain(`**JATS XML:** ${IDENTIFIERS.jatsxmlUrl}\n`);
+      expect(text).toContain(`**Published DOI:** ${IDENTIFIERS.publishedDoi}\n`);
+    });
   });
 });

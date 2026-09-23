@@ -5,7 +5,15 @@
  * query param, in the API's lowercase spelling. The API answers a category it
  * does not filter on with its unfiltered listing (echoing category "all"), so
  * such a leg is dropped with a notice, and a call left with no filtered page
- * raises invalid_category. Returns 30 results per page (API-fixed); use cursor to paginate.
+ * raises invalid_category. A funder filter (a ROR ID, normalized and
+ * checksum-validated before any call) is sent alongside category; only bioRxiv
+ * records carry funder data, so it narrows server="both" to bioRxiv with a
+ * notice and is rejected with server="medrxiv". An ID the API holds no funder
+ * record for raises invalid_funder rather than reading as an empty page.
+ * Returns 30 results per page (API-fixed); use cursor to paginate. Abstracts
+ * are about three quarters of a page and a listing is read for its titles and
+ * metadata, so they are omitted unless include_abstract is true; nothing else
+ * in a record changes.
  * When server="both", per-server pagination state is surfaced independently,
  * including per-server cursor exhaustion: the two servers hold different result
  * counts, so one cursor can be valid for one and past the end for the other.
@@ -24,8 +32,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
-import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
-import { describeWait, findRateLimit, isValidCalendarDate } from '@/services/shared.js';
+import type { BiorxivServer, PreprintRevision, ServerParam } from '@/services/biorxiv/types.js';
+import {
+  describeWait,
+  escapeMarkdown,
+  findRateLimit,
+  isValidCalendarDate,
+  normalizeRorId,
+} from '@/services/shared.js';
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -41,31 +55,35 @@ function serverLabels(servers: readonly BiorxivServer[]): string {
   return servers.map((s) => SERVER_LABEL[s]).join(' and ');
 }
 
+// Upstream free text is escaped as it is interpolated so it renders literally —
+// the abstract opens its own line, where `1. ` would start a list. DOIs and
+// URLs stay raw because agents copy them back into calls.
 function formatPreprint(p: PreprintRevision): string {
   const lines: string[] = [];
-  lines.push(`### ${p.title ?? p.doi}`);
+  lines.push(`### ${p.title ? escapeMarkdown(p.title) : p.doi}`);
   lines.push(`**DOI:** ${p.doi}`);
   if (p.date) lines.push(`**Date:** ${p.date}`);
   if (p.version) lines.push(`**Version:** ${p.version}`);
-  if (p.type) lines.push(`**Type:** ${p.type}`);
+  if (p.type) lines.push(`**Type:** ${escapeMarkdown(p.type)}`);
   if (p.server) lines.push(`**Server:** ${p.server}`);
-  if (p.category) lines.push(`**Category:** ${p.category}`);
-  if (p.license) lines.push(`**License:** ${p.license}`);
-  if (p.authors) lines.push(`**Authors:** ${p.authors}`);
-  if (p.authorCorresponding) lines.push(`**Corresponding:** ${p.authorCorresponding}`);
+  if (p.category) lines.push(`**Category:** ${escapeMarkdown(p.category)}`);
+  if (p.license) lines.push(`**License:** ${escapeMarkdown(p.license)}`);
+  if (p.authors) lines.push(`**Authors:** ${escapeMarkdown(p.authors)}`);
+  if (p.authorCorresponding)
+    lines.push(`**Corresponding:** ${escapeMarkdown(p.authorCorresponding)}`);
   if (p.authorCorrespondingInstitution)
-    lines.push(`**Institution:** ${p.authorCorrespondingInstitution}`);
-  if (p.funder) lines.push(`**Funder:** ${p.funder}`);
+    lines.push(`**Institution:** ${escapeMarkdown(p.authorCorrespondingInstitution)}`);
+  if (p.awards) lines.push(`**Awards:** ${escapeMarkdown(p.awards.join('; '))}`);
   if (p.jatsxmlUrl) lines.push(`**JATS XML:** ${p.jatsxmlUrl}`);
   if (p.publishedJournalDoi) lines.push(`**Published DOI:** ${p.publishedJournalDoi}`);
-  if (p.abstract) lines.push(`\n${p.abstract}`);
+  if (p.abstract) lines.push(`\n${escapeMarkdown(p.abstract)}`);
   return lines.join('\n');
 }
 
 export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   title: 'List Recent Preprints',
   description:
-    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings; a server that answers a category filter with its unfiltered listing is left out with a notice, and invalid_category is raised when no server applied it.',
+    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. Abstracts are omitted by default to keep the page small — pass include_abstract: true for the whole page, or call biorxiv_get_preprint (up to 10 DOIs per call) for a few. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings; a server that answers a category filter with its unfiltered listing is left out with a notice, and invalid_category is raised when no server applied it. `funder` limits the listing to bioRxiv preprints funded by that organization, given its ROR ID; an ID api.biorxiv.org has no funder record for raises invalid_funder rather than returning an empty page.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   // biorxiv_search_preprints spells its date bounds date_from / date_to.
@@ -84,12 +102,24 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .describe(
         'Subject category filter, matched case-insensitively with "_" and "-" read as a space — "Cell Biology", "cell biology", "cell_biology", and "cell-biology" are the same filter. Use biorxiv_list_categories for valid values.',
       ),
+    funder: z
+      .string()
+      .optional()
+      .describe(
+        'Funder filter: the funder\'s ROR ID, bare ("021nxhr62" for the US National Science Foundation) or as a URL ("https://ror.org/021nxhr62"). bioRxiv only — medRxiv records carry no funder data, so server="both" queries bioRxiv alone and server="medrxiv" is rejected. Combines with category. Look the ID up by name at ror.org.',
+      ),
     cursor: z
       .number()
       .int()
       .min(0)
       .default(0)
       .describe('Integer page offset (0, 30, 60, …). Defaults to 0 (first page).'),
+    include_abstract: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Include each preprint's abstract. Defaults to false: abstracts make up about three quarters of a page, and every other field is returned either way.",
+      ),
   }),
 
   output: z.object({
@@ -111,8 +141,16 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
             license: z.string().optional().describe('License identifier.'),
             category: z.string().optional().describe('Subject category.'),
             jatsxmlUrl: z.string().optional().describe('URL to the JATS XML full-text.'),
-            abstract: z.string().optional().describe('Abstract text.'),
-            funder: z.string().optional().describe('Funder information.'),
+            abstract: z
+              .string()
+              .optional()
+              .describe('Abstract text. Present only when include_abstract is true.'),
+            awards: z
+              .array(z.string().describe('One award value as upstream records it.'))
+              .optional()
+              .describe(
+                'Grant award numbers from the funding statement, verbatim and deduplicated — one value can hold several grants run together without a separator. Absent when none. Funder names are not included: api.biorxiv.org attributes them to unrelated organizations.',
+              ),
             publishedJournalDoi: z
               .string()
               .optional()
@@ -151,7 +189,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
               ),
           })
           .optional()
-          .describe('medRxiv pagination state. Present when server is "medrxiv" or "both".'),
+          .describe(
+            'medRxiv pagination state. Present when server is "medrxiv" or "both", except under a funder filter, which queries bioRxiv only.',
+          ),
       })
       .describe('Per-server pagination state. Advance each server independently.'),
     failed: z
@@ -176,7 +216,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       .string()
       .optional()
       .describe(
-        'Guidance on how to read this result set: which servers did not answer, which ignored the category filter (their unfiltered records are left out), which cursors are past the end, and — when nothing came back — the applied filters and how to broaden them. All applicable qualifications are composed into one string.',
+        'Guidance on how to read this result set: which servers did not answer, which ignored the category filter (their unfiltered records are left out), that a funder filter limited server="both" to bioRxiv, which cursors are past the end, and — when nothing came back — the applied filters and how to broaden them. All applicable qualifications are composed into one string.',
       ),
     categoryNote: z
       .string()
@@ -198,6 +238,13 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       code: JsonRpcErrorCode.ValidationError,
       when: "The category is not in the requested server's taxonomy, or api.biorxiv.org ignored it and returned the unfiltered listing on every server that answered.",
       recovery: 'Call biorxiv_list_categories to get valid category strings and retry.',
+    },
+    {
+      reason: 'invalid_funder',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'funder is not a well-formed ROR ID (pattern or checksum), is combined with server="medrxiv", or is a ROR ID api.biorxiv.org has no funder record for.',
+      recovery:
+        'Look up the funder by name at ror.org and pass its ROR ID, bare (021nxhr62) or as https://ror.org/021nxhr62, with server "biorxiv" or "both".',
     },
     {
       reason: 'upstream_unavailable',
@@ -224,6 +271,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       server: input.server,
       cursor: input.cursor,
       category: input.category,
+      funder: input.funder,
     });
 
     // Validate dates: shape first, then real-calendar-date (rejects overflow days
@@ -246,22 +294,45 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       );
     }
 
-    // Validate category — trim before checking, and validate against the target server(s)
-    const trimmedCategory = input.category?.trim();
-    if (trimmedCategory) {
-      const service = getBiorxivApiService();
-      if (!service.isValidCategory(trimmedCategory, input.server)) {
-        const serverLabel = input.server === 'both' ? 'bioRxiv or medRxiv' : input.server;
-        throw ctx.fail(
-          'invalid_category',
-          `Category "${trimmedCategory}" is not valid for ${serverLabel}.`,
-          { ...ctx.recoveryFor('invalid_category') },
-        );
-      }
+    // Validate funder before any call. The API takes only the bare 9-character ROR
+    // ID, and a mistyped one fails its checksum here rather than upstream.
+    const funderInput = input.funder?.trim();
+    const funder = funderInput ? normalizeRorId(funderInput) : undefined;
+    if (funderInput && !funder) {
+      throw ctx.fail(
+        'invalid_funder',
+        `"${funderInput}" is not a valid ROR ID — expected 9 characters: 0, six letters or digits, and two checksum digits (e.g. 021nxhr62), bare or after https://ror.org/.`,
+        { funder: funderInput, ...ctx.recoveryFor('invalid_funder') },
+      );
     }
+    if (funder && input.server === 'medrxiv') {
+      throw ctx.fail(
+        'invalid_funder',
+        'The funder filter applies to bioRxiv only — medRxiv records carry no funder data, so a medRxiv funder listing is always empty.',
+        {
+          funder,
+          recovery: {
+            hint: 'Set server to "biorxiv" or "both" (which queries bioRxiv alone under a funder filter), or omit funder to list medRxiv.',
+          },
+        },
+      );
+    }
+    // Only bioRxiv carries funder data, so a funder filter narrows "both" to bioRxiv.
+    const target: ServerParam = funder && input.server === 'both' ? 'biorxiv' : input.server;
 
+    // Validate category — trim before checking, and validate against the target server(s)
     const service = getBiorxivApiService();
-    const category = trimmedCategory || undefined;
+    const category = input.category?.trim() || undefined;
+    if (category && !service.isValidCategory(category, target)) {
+      const serverLabel = target === 'both' ? 'bioRxiv or medRxiv' : target;
+      const scope = target === input.server ? '' : ' (a funder filter queries bioRxiv only)';
+      throw ctx.fail(
+        'invalid_category',
+        `Category "${category}" is not valid for ${serverLabel}${scope}.`,
+        { ...ctx.recoveryFor('invalid_category') },
+      );
+    }
+    const filters = { category, funder };
 
     type PaginationEntry = {
       cursor: number;
@@ -283,6 +354,14 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     // ctx.enrich.notice is last-wins, so every qualification that applies to this
     // result set is collected here and flushed as one string before returning.
     const notices: string[] = [];
+
+    // The absent medRxiv entry needs the same explanation a server-exclusive
+    // category gets, or it reads as medRxiv having been skipped by accident.
+    if (target !== input.server) {
+      notices.push(
+        'The funder filter applies to bioRxiv only — medRxiv records carry no funder data — so only bioRxiv was queried and there is no medRxiv pagination entry.',
+      );
+    }
 
     function toPaginationEntry(r: {
       pagination: { cursor: number; total: number };
@@ -326,14 +405,12 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     // unfiltered page mixed in with the filtered one under a filtered-looking
     // request. Shared categories (Pathology) and no-category requests still fan
     // out to both servers.
-    const inBx =
-      input.server === 'both' && !!category && service.isValidCategory(category, 'biorxiv');
-    const inMx =
-      input.server === 'both' && !!category && service.isValidCategory(category, 'medrxiv');
+    const inBx = target === 'both' && !!category && service.isValidCategory(category, 'biorxiv');
+    const inMx = target === 'both' && !!category && service.isValidCategory(category, 'medrxiv');
     const exclusiveServer: BiorxivServer | undefined =
       inBx === inMx ? undefined : inBx ? 'biorxiv' : 'medrxiv';
 
-    if (input.server === 'both' && category && exclusiveServer) {
+    if (target === 'both' && category && exclusiveServer) {
       ctx.enrich({
         categoryNote:
           exclusiveServer === 'biorxiv'
@@ -342,9 +419,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       });
     }
 
-    // One leg: an explicit server, or a "both" request collapsed onto the server
-    // owning a server-exclusive category.
-    const singleServer = exclusiveServer ?? (input.server === 'both' ? undefined : input.server);
+    // One leg: an explicit server, or a "both" request collapsed onto bioRxiv by a
+    // funder filter or onto the server owning a server-exclusive category.
+    const singleServer = exclusiveServer ?? (target === 'both' ? undefined : target);
 
     if (singleServer) {
       const r = await service.getListing(
@@ -352,18 +429,33 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         input.start_date,
         input.end_date,
         input.cursor,
-        category,
+        filters,
         ctx,
       );
+      // No funder record means no filter was applied at all — the empty page
+      // says nothing about what the funder posted.
+      if (r.funderNotFound) {
+        throw ctx.fail(
+          'invalid_funder',
+          `api.biorxiv.org has no funder record for ROR ID ${funder}, so it cannot filter on it — this is not an empty result.`,
+          {
+            funder,
+            recovery: {
+              hint: `Confirm the ROR ID at ror.org and that it names the funding body itself. For a parent organization, try the ROR ID of the member institute that made the award, which api.biorxiv.org may hold on record instead.`,
+            },
+          },
+        );
+      }
       if (r.categoryIgnored) throw ignoredCategory([singleServer]);
       pagination[singleServer] = toPaginationEntry(r);
       allPreprints = r.preprints;
     } else {
       // Fan out to both servers. Any category here is shared by both taxonomies,
       // so it applies to each; with no category both return unfiltered pages.
+      // A funder filter never reaches this branch — it narrows the call to bioRxiv.
       const settled = await Promise.allSettled(
         SERVERS.map((server) =>
-          service.getListing(server, input.start_date, input.end_date, input.cursor, category, ctx),
+          service.getListing(server, input.start_date, input.end_date, input.cursor, filters, ctx),
         ),
       );
 
@@ -476,19 +568,24 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         const filterDesc = [
           `dates ${input.start_date}–${input.end_date}`,
           category ? `category "${category}"` : null,
-          input.server !== 'both' ? `server "${input.server}"` : null,
+          funder ? `funder ${funder}` : null,
+          target !== 'both' ? `server "${target}"` : null,
         ]
           .filter(Boolean)
           .join(', ');
+        const removable = [category && 'category', funder && 'funder'].filter(Boolean).join(' or ');
         notices.push(
-          `No preprints found for ${filterDesc}. Try widening the date range or removing the category filter.`,
+          `No preprints found for ${filterDesc}. Try widening the date range${removable ? ` or removing the ${removable} filter` : ''}.`,
         );
       }
     }
 
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
-    return { preprints: allPreprints, pagination, failed };
+    const preprints = input.include_abstract
+      ? allPreprints
+      : allPreprints.map(({ abstract: _abstract, ...rest }) => rest);
+    return { preprints, pagination, failed };
   },
 
   format: (result) => {
