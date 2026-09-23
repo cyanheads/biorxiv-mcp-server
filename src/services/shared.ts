@@ -179,6 +179,24 @@ const BRACE_PLACEHOLDER = /(?<![_^{]|\\[A-Za-z]+)\{([^{}]+)\}/g;
 /** A `[name]` placeholder, or a `[xHHHH]` hex code point. */
 const BRACKET_PLACEHOLDER = /\[([^[\]\s]+)\]/g;
 
+/**
+ * One character a `[xHHHH]` placeholder may stand for: a symbol outside ASCII.
+ * ASCII, control, format, surrogate, private-use, and unassigned code points
+ * are never Highwire symbols, and decoding one would let upstream text spell
+ * out markup (`[x003C]iframe[x003E]`).
+ */
+const SYMBOL_CODE_POINT = /^[^\p{ASCII}\p{C}]$/u;
+
+/**
+ * An inline HTML formatting tag leaked from JATS, enumerated so a legitimate
+ * inequality (`x<y`) is never taken for one. Skipped where an open `<` comes
+ * before it with no `>` between them (`<scr<i>ipt>`, `<<i>iframe>`): removing
+ * the tag there would join that `<` to the text after it and splice together a
+ * tag the input never held.
+ */
+const INLINE_TAG =
+  /(?<!<(?:[A-Za-z/!?][^<>]*)?)<\/?(?:i|b|u|em|strong|sub|sup|small|br|p|span|div|a|h[1-6])\b[^>]*>/gi;
+
 /** A marked-up heading's text as ` Heading: `, or a blank when it held none. */
 function headingLabel(_match: string, heading: string): string {
   const label = heading.trim().replace(/:$/, '');
@@ -187,8 +205,26 @@ function headingLabel(_match: string, heading: string): string {
 
 function bracketGlyph(match: string, name: string): string {
   const codePoint = /^x([0-9A-Fa-f]{4,5})$/.exec(name)?.[1];
-  if (codePoint) return String.fromCodePoint(Number.parseInt(codePoint, 16));
+  if (codePoint) {
+    const char = String.fromCodePoint(Number.parseInt(codePoint, 16));
+    return SYMBOL_CODE_POINT.test(char) ? char : match;
+  }
   return BRACKET_PLACEHOLDERS[name] ?? match;
+}
+
+/**
+ * Strip `INLINE_TAG`s until none is left to strip. Its guard already keeps one
+ * pass from forming a new tag; repeating to a fixed point makes that hold by
+ * construction, and is the form static analysis checks sanitizers for.
+ */
+function stripInlineTags(text: string): string {
+  let previous: string;
+  let current = text;
+  do {
+    previous = current;
+    current = current.replace(INLINE_TAG, '');
+  } while (current !== previous);
+  return current;
 }
 
 /**
@@ -214,9 +250,11 @@ function bracketGlyph(match: string, name: string): string {
  * - list items (`O_LI … C_LI`) rendered as `• ` items;
  * - Highwire symbol placeholders (`{beta}`, `{+/-}`, `[&ge;]`, `[~]`,
  *   `[x1D05]`, …) mapped to their characters through closed tables
- *   (`upstream-text-tables.ts`). An unknown name, LaTeX braces, and
- *   single-letter brackets stay verbatim;
- * - inline HTML formatting tags (`<i>`, `<b>`, `<sub>`, `<sup>`, `<u>`, …).
+ *   (`upstream-text-tables.ts`), and `[xHHHH]` read as a code point when it
+ *   is a non-ASCII symbol. An unknown name, any other code point, LaTeX
+ *   braces, and single-letter brackets stay verbatim;
+ * - inline HTML formatting tags (`<i>`, `<b>`, `<sub>`, `<sup>`, `<u>`, …),
+ *   except where removing one would splice a new tag out of the text around it.
  *
  * The result is plain text, never Markdown: `format()` escapes it at
  * interpolation (`escapeMarkdown`), so anything emitted here as syntax would
@@ -261,10 +299,8 @@ export function normalizeUpstreamText(text: string | undefined): string | undefi
     .replace(/O_LI(?!NKSMALLFIG)/g, ' • ')
     .replace(/C_LI/g, ' ')
     .replace(BRACE_PLACEHOLDER, (match, name: string) => BRACE_PLACEHOLDERS[name] ?? match)
-    .replace(BRACKET_PLACEHOLDER, bracketGlyph)
-    // Inline HTML formatting tags leaked from JATS (enumerated to avoid eating
-    // legitimate inequalities like "x<y" that aren't real tags).
-    .replace(/<\/?(?:i|b|u|em|strong|sub|sup|small|br|p|span|div|a|h[1-6])\b[^>]*>/gi, '')
+    .replace(BRACKET_PLACEHOLDER, bracketGlyph);
+  cleaned = stripInlineTags(cleaned)
     // Collapse whitespace opened up by the removals above.
     .replace(/\s+/g, ' ')
     .trim();

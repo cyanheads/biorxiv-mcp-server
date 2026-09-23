@@ -146,6 +146,20 @@ describe('normalizeUpstreamText', () => {
   it('does not eat mathematical inequalities that are not real HTML tags', () => {
     const raw = 'genes retained where the threshold was set at p<0.01 across all comparisons';
     expect(normalizeUpstreamText(raw)).toBe(raw);
+    expect(normalizeUpstreamText('significant at p<0.05 in <i>E. coli</i> only')).toBe(
+      'significant at p<0.05 in E. coli only',
+    );
+  });
+
+  it('never splices a tag together from the text around a stripped one', () => {
+    // Removing <i> here would join the open `<` to what follows it.
+    expect(normalizeUpstreamText('a <scr<i>ipt>alert(1)</script> b')).toBe(
+      'a <scr<i>ipt>alert(1)</script> b',
+    );
+    expect(normalizeUpstreamText('a <<i>iframe onload=x> b')).toBe('a <<i>iframe onload=x> b');
+    expect(normalizeUpstreamText('a <iframe src <b>x> b')).toBe('a <iframe src <b>x> b');
+    // A stripped tag never re-forms an allowlisted one either.
+    expect(normalizeUpstreamText('a <<b>i>x</i> b')).toBe('a <<b>i>x b');
   });
 
   it('returns undefined for absent input so callers keep treating fields as absent', () => {
@@ -239,6 +253,17 @@ describe('normalizeUpstreamText', () => {
     ['the ,[x1D05]-transpeptidase family', 'the ,ᴅ-transpeptidase family'],
   ])('maps the bracket placeholder in %j', (raw, expected) => {
     expect(normalizeUpstreamText(raw)).toBe(expected);
+  });
+
+  it('reads [xHHHH] as a code point only for a non-ASCII symbol', () => {
+    expect(normalizeUpstreamText('[x00B5]M and [x1D7C3]')).toBe('µM and 𝟃');
+    // ASCII, control, surrogate, and private-use code points are never Highwire
+    // symbols; decoding them would let upstream text spell out markup.
+    expect(normalizeUpstreamText('a [x003C]iframe[x003E] b')).toBe('a [x003C]iframe[x003E] b');
+    expect(normalizeUpstreamText('a [x003C]<i>iframe[x003E] b')).toBe('a [x003C]iframe[x003E] b');
+    expect(normalizeUpstreamText('[x0041] [x0009] [x0085] [xD800] [xE000] [x202E]')).toBe(
+      '[x0041] [x0009] [x0085] [xD800] [xE000] [x202E]',
+    );
   });
 
   it('keeps an unknown placeholder name verbatim rather than deleting it', () => {
