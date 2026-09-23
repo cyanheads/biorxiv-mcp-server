@@ -4,10 +4,11 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
 import type { PublishedVersion } from '@/services/biorxiv/types.js';
+import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
@@ -352,5 +353,62 @@ describe('biorxivGetPublishedVersionTool', () => {
     // Should not contain any fabricated placeholders
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('null');
+  });
+
+  // ── Upstream Markdown ───────────────────────────────────────────────────────
+
+  describe('upstream text with Markdown metacharacters', () => {
+    const MARKDOWN_PUBLISHED: PublishedVersion = {
+      preprintDoi: IDENTIFIERS.doi,
+      publishedDoi: IDENTIFIERS.publishedDoi,
+      publishedJournal: UPSTREAM.journal,
+      publishedDate: '2026-09-01',
+      preprintTitle: UPSTREAM.title,
+      preprintAuthors: UPSTREAM.authors,
+      preprintCategory: UPSTREAM.category,
+      preprintDate: '2026-07-03',
+      preprintAbstract: UPSTREAM.abstract,
+      preprintAuthorCorresponding: UPSTREAM.authorCorresponding,
+      preprintAuthorCorrespondingInstitution: UPSTREAM.authorCorrespondingInstitution,
+    };
+
+    async function call() {
+      mockGetPublishedVersion.mockResolvedValue(MARKDOWN_PUBLISHED);
+      const result = await runToolContract(
+        biorxivGetPublishedVersionTool,
+        { doi: IDENTIFIERS.doi, server: 'biorxiv' },
+        { context: { errors: biorxivGetPublishedVersionTool.errors } },
+      );
+      return { result, text: (result.content[0] as { text: string }).text };
+    }
+
+    it('carries upstream text unescaped in structuredContent', async () => {
+      const { result } = await call();
+      expect(result.structuredContent).toMatchObject({
+        publishedDoi: IDENTIFIERS.publishedDoi,
+        publishedJournal: UPSTREAM.journal,
+        preprintTitle: UPSTREAM.title,
+        preprintAbstract: UPSTREAM.abstract,
+      });
+    });
+
+    it('escapes every upstream field in content[], the line-initial abstract included', async () => {
+      const { text } = await call();
+      expect(text).toContain(`**Journal:** ${ESCAPED.journal}\n`);
+      expect(text).toContain(`**Title:** ${ESCAPED.title}\n`);
+      expect(text).toContain(`**Authors:** ${ESCAPED.authors}\n`);
+      expect(text).toContain(`**Category:** ${ESCAPED.category}\n`);
+      expect(text).toContain(`**Corresponding Author:** ${ESCAPED.authorCorresponding}\n`);
+      expect(text).toContain(`**Institution:** ${ESCAPED.authorCorrespondingInstitution}\n`);
+      // The abstract opens its own line under the label, where `1. ` starts an ordered list.
+      expect(text).toContain(`**Abstract:**\n${ESCAPED.abstract}`);
+      expect(text).not.toMatch(/^1\. /m);
+    });
+
+    it('leaves the preprint and journal DOIs unescaped in content[]', async () => {
+      const { text } = await call();
+      expect(text).toContain(`**Preprint DOI:** ${IDENTIFIERS.doi}\n`);
+      expect(text).toContain(`**Published DOI:** ${IDENTIFIERS.publishedDoi}\n`);
+    });
   });
 });

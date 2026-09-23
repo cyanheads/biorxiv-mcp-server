@@ -25,7 +25,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
-import { describeWait, findRateLimit, normalizeDoi } from '@/services/shared.js';
+import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/services/shared.js';
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
@@ -264,23 +264,32 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     };
   },
 
+  // Upstream free text is escaped as it is interpolated so it renders literally —
+  // the abstract opens its own line, where `1. ` would start a list. DOIs stay
+  // raw because agents copy them back into calls.
   format: (result) => {
     const lines: string[] = [];
     lines.push(`## Published Version`);
     lines.push(`**Preprint DOI:** ${result.preprintDoi}`);
     lines.push(`**Resolved on server:** ${result.server}`);
     if (result.publishedDoi) lines.push(`**Published DOI:** ${result.publishedDoi}`);
-    if (result.publishedJournal) lines.push(`**Journal:** ${result.publishedJournal}`);
+    if (result.publishedJournal)
+      lines.push(`**Journal:** ${escapeMarkdown(result.publishedJournal)}`);
     if (result.publishedDate) lines.push(`**Published Date:** ${result.publishedDate}`);
-    if (result.preprintTitle) lines.push(`\n**Title:** ${result.preprintTitle}`);
-    if (result.preprintAuthors) lines.push(`**Authors:** ${result.preprintAuthors}`);
-    if (result.preprintCategory) lines.push(`**Category:** ${result.preprintCategory}`);
+    if (result.preprintTitle) lines.push(`\n**Title:** ${escapeMarkdown(result.preprintTitle)}`);
+    if (result.preprintAuthors)
+      lines.push(`**Authors:** ${escapeMarkdown(result.preprintAuthors)}`);
+    if (result.preprintCategory)
+      lines.push(`**Category:** ${escapeMarkdown(result.preprintCategory)}`);
     if (result.preprintDate) lines.push(`**Preprint Date:** ${result.preprintDate}`);
     if (result.preprintAuthorCorresponding)
-      lines.push(`**Corresponding Author:** ${result.preprintAuthorCorresponding}`);
+      lines.push(`**Corresponding Author:** ${escapeMarkdown(result.preprintAuthorCorresponding)}`);
     if (result.preprintAuthorCorrespondingInstitution)
-      lines.push(`**Institution:** ${result.preprintAuthorCorrespondingInstitution}`);
-    if (result.preprintAbstract) lines.push(`\n**Abstract:**\n${result.preprintAbstract}`);
+      lines.push(
+        `**Institution:** ${escapeMarkdown(result.preprintAuthorCorrespondingInstitution)}`,
+      );
+    if (result.preprintAbstract)
+      lines.push(`\n**Abstract:**\n${escapeMarkdown(result.preprintAbstract)}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

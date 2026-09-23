@@ -6,10 +6,11 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import type { FullTextFetchResult } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
+import { ESCAPED, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
@@ -442,5 +443,32 @@ describe('biorxivGetFulltextTool', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('offset=9');
     expect(text).not.toContain('undefined');
+  });
+
+  it('escapes the page title in content[] but never the extracted Markdown or source URL', async () => {
+    const markdown = '## Results\n\nWe edit *A•T* pairs with `ABE8e` — see [Figure 1](#F1).';
+    const sourceUrl = `https://www.biorxiv.org/content/${DOI}v2.full?utm_source=x_y`;
+    mockFetchFullText.mockResolvedValue({
+      kind: 'article',
+      markdown,
+      title: UPSTREAM.title,
+      sourceUrl,
+    } satisfies FullTextFetchResult);
+
+    const result = await runToolContract(
+      biorxivGetFulltextTool,
+      { doi: DOI },
+      { context: { errors: biorxivGetFulltextTool.errors } },
+    );
+    const text = (result.content[0] as { text: string }).text;
+
+    expect(result.structuredContent).toMatchObject({
+      title: UPSTREAM.title,
+      content: markdown,
+      sourceUrl,
+    });
+    expect(text).toContain(`## ${ESCAPED.title}\n`);
+    expect(text).toContain(`\n${markdown}\n`);
+    expect(text).toContain(`**Source:** ${sourceUrl}\n`);
   });
 });

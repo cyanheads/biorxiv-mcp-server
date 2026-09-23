@@ -33,7 +33,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import { getBiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
-import { describeWait, findRateLimit, normalizeDoi } from '@/services/shared.js';
+import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/services/shared.js';
 
 export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
   title: 'Get Preprint Full Text',
@@ -420,9 +420,12 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
     };
   },
 
+  // The page title is upstream text and is escaped; `content` is extractor-produced
+  // Markdown meant to render as Markdown, and the DOI and source URL are copied
+  // back into calls, so those stay raw.
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`## ${result.title ?? result.doi}`);
+    lines.push(`## ${result.title ? escapeMarkdown(result.title) : result.doi}`);
     lines.push(
       `**DOI:** ${result.doi} | **Server:** ${result.server} | **Version:** v${result.version}`,
     );
