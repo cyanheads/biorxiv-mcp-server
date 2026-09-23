@@ -1,7 +1,10 @@
 /**
  * @fileoverview EuropePmcService — wraps the EuropePMC REST search endpoint
  * for preprint keyword search. Returns ranked DOI lists used by
- * biorxiv_search_preprints for bioRxiv/medRxiv enrichment. All requests
+ * biorxiv_search_preprints for bioRxiv/medRxiv enrichment, and looks up
+ * abstracts for records that fall back to EuropePMC metadata: the ranked search
+ * uses the `lite` result type, which never carries `abstractText`, so abstracts
+ * come from one DOI-keyed `core` query instead. All requests
  * include a polite User-Agent and are retried with exponential backoff.
  * Detects HTML error pages, retries an HTTP 200 body that carries no result
  * list, and classifies an origin rate limit (HTTP 429) as its own retryable
@@ -153,8 +156,8 @@ export class EuropePmcService {
   /**
    * Search EuropePMC for preprints matching the query. Returns ranked results
    * with DOIs plus the upstream hitCount grand total, used to drive bioRxiv API
-   * enrichment. Requests the minimal field set (doi, title, authorString,
-   * firstPublicationDate, abstractText).
+   * enrichment. Uses the `lite` result type (doi, title, authorString,
+   * firstPublicationDate), which carries no abstract — see `getAbstracts`.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    * A body with no result list is retried; if every attempt returns one, throws
    * `ValidationError` (`invalid_cursor_mark`) when a cursor page other than `*`
@@ -192,7 +195,6 @@ export class EuropePmcService {
     }
     const filterParam = 'source:PPR';
 
-    const fields = 'doi,title,authorString,firstPublicationDate,abstractText';
     // A blank cursor (a form client's empty field) is a first page, as it is
     // upstream. Tokens are base64, so surrounding whitespace is never part of one.
     const cursorMark = options.cursorMark?.trim() || '*';
@@ -203,7 +205,6 @@ export class EuropePmcService {
       cursorMark,
       pageSize: String(limit),
       format: 'json',
-      fields,
     });
 
     const url = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
@@ -234,13 +235,11 @@ export class EuropePmcService {
             .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
             .map((raw): EuropePmcResult => {
               const title = normalizeUpstreamText(raw.title);
-              const abstract = normalizeUpstreamText(raw.abstractText);
               return {
                 doi: raw.doi,
                 ...(title && { title }),
                 ...(raw.authorString && { authors: raw.authorString }),
                 ...(raw.firstPublicationDate && { publishedDate: raw.firstPublicationDate }),
-                ...(abstract && { abstract }),
               };
             });
           return {
@@ -260,6 +259,70 @@ export class EuropePmcService {
       );
     } catch (err) {
       rethrowClassified(err, cursorMark);
+    }
+  }
+
+  /**
+   * Fetch the abstracts of preprints by DOI in one `resultType=core` query — the
+   * only EuropePMC result type that carries `abstractText`. The query is keyed
+   * by the given DOIs (`DOI:"…" OR …`, preprints only) and one page is sized to
+   * hold them, so the response is bounded by the input. Returns normalized
+   * abstracts keyed by lowercase DOI; a DOI EuropePMC holds no abstract for is
+   * absent from the map. Throws on failure — classified like `search`, with an
+   * HTTP 429 as a retryable `rate_limited` error carrying `Retry-After`.
+   */
+  async getAbstracts(dois: readonly string[], ctx: Context): Promise<Map<string, string>> {
+    const unique = [...new Set(dois.map((doi) => doi.toLowerCase()))];
+    // Quotes are stripped so a stray one cannot end the DOI phrase early.
+    const clause = unique.map((doi) => `DOI:"${doi.replace(/"/g, '')}"`).join(' OR ');
+    const params = new URLSearchParams({
+      query: `(${clause}) AND SRC:PPR`,
+      resultType: 'core',
+      synonym: 'FALSE',
+      pageSize: String(unique.length),
+      format: 'json',
+    });
+    const url = `${this.baseUrl}/search?${params.toString()}`;
+
+    try {
+      return await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, 20_000, ctx, {
+            signal: ctx.signal,
+            headers: { 'User-Agent': this.userAgent },
+            expectedStatuses: EXPECTED_STATUSES,
+          });
+          const text = await response.text();
+          if (detectHtmlError(text)) {
+            throw serviceUnavailable(
+              'EuropePMC returned HTML instead of JSON — service may be degraded.',
+              { url },
+            );
+          }
+          const data = JSON.parse(text) as RawEuropePmcSearchResponse;
+          if (!data.resultList) {
+            throw serviceUnavailable('EuropePMC answered HTTP 200 with no result list.', {
+              reason: EMPTY_BODY_REASON,
+            });
+          }
+          const abstracts = new Map<string, string>();
+          for (const raw of data.resultList.result ?? []) {
+            const doi = raw.doi?.toLowerCase();
+            const abstract = normalizeUpstreamText(raw.abstractText);
+            if (doi && abstract && !abstracts.has(doi)) abstracts.set(doi, abstract);
+          }
+          return abstracts;
+        },
+        {
+          operation: 'EuropePmcService.getAbstracts',
+          context: ctx,
+          baseDelayMs: 300,
+          signal: ctx.signal,
+        },
+      );
+    } catch (err) {
+      // No cursor: an empty body that outlasts the retries is an upstream failure.
+      rethrowClassified(err, '*');
     }
   }
 }

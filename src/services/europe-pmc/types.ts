@@ -7,7 +7,10 @@
 
 // ─── Raw API shapes ─────────────────────────────────────────────────────────
 
-/** A single result from the EuropePMC search endpoint */
+/**
+ * A single result from the EuropePMC search endpoint. `abstractText` appears only
+ * under `resultType=core`; the `lite` result type never carries it.
+ */
 export interface RawEuropePmcResult {
   abstractText?: string;
   authorString?: string;
@@ -29,9 +32,12 @@ export interface RawEuropePmcSearchResponse {
 
 // ─── Domain types ────────────────────────────────────────────────────────────
 
-/** A preprint search result from EuropePMC, used for enrichment */
+/**
+ * A preprint search result from EuropePMC, used for enrichment. Carries no
+ * abstract: the ranked search uses the `lite` result type, and abstracts come
+ * from `EuropePmcService.getAbstracts`.
+ */
 export interface EuropePmcResult {
-  abstract?: string;
   authors?: string;
   doi: string;
   publishedDate?: string;

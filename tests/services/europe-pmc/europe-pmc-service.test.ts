@@ -101,7 +101,6 @@ describe('EuropePmcService', () => {
               title: 'CRISPR gene editing study',
               authorString: 'Smith J, Jones A',
               firstPublicationDate: '2024-01-15',
-              abstractText: 'We studied CRISPR applications.',
             },
           ],
         },
@@ -117,7 +116,7 @@ describe('EuropePmcService', () => {
     expect(results[0]?.authors).toBe('Smith J, Jones A');
   });
 
-  it('maps authorString to authors and abstractText to abstract', async () => {
+  it('maps authorString to authors and firstPublicationDate to publishedDate', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
         hitCount: 1,
@@ -126,7 +125,6 @@ describe('EuropePmcService', () => {
             {
               doi: '10.1101/2024.01.15.575123',
               authorString: 'Doe J',
-              abstractText: 'Abstract content.',
               firstPublicationDate: '2024-01-15',
             },
           ],
@@ -136,8 +134,18 @@ describe('EuropePmcService', () => {
     const ctx = createMockContext();
     const { results } = await service.search({ query: 'test' }, ctx);
     expect(results[0]?.authors).toBe('Doe J');
-    expect(results[0]?.abstract).toBe('Abstract content.');
     expect(results[0]?.publishedDate).toBe('2024-01-15');
+    expect(results[0]).not.toHaveProperty('abstract');
+  });
+
+  it('requests the lite result type, which carries no abstract', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'CRISPR' }, ctx);
+    const params = new URL(firstCalledUrl()).searchParams;
+    expect(params.get('resulttype')).toBe('lite');
+    // EuropePMC ignores `fields`; asking lite for abstractText through it never worked.
+    expect(params.has('fields')).toBe(false);
   });
 
   it('skips results without a DOI', async () => {
@@ -195,10 +203,9 @@ describe('EuropePmcService', () => {
     const { results } = await service.search({ query: 'CRISPR' }, ctx);
     expect(results[0]?.title).toBeUndefined();
     expect(results[0]?.authors).toBeUndefined();
-    expect(results[0]?.abstract).toBeUndefined();
   });
 
-  it('normalizes HTML and sentinel markup out of title and abstract', async () => {
+  it('normalizes HTML markup out of the title', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
         hitCount: 1,
@@ -209,7 +216,6 @@ describe('EuropePmcService', () => {
               title: 'Synergistic CRISPR-Cas Antimicrobials in  <i>Staphylococcus aureus</i>',
               authorString: 'Smith J',
               firstPublicationDate: '2024-01-15',
-              abstractText: 'AO_SCPLOWBSTRACTC_SCPLOWMultidrug-resistant pathogens pose a threat.',
             },
           ],
         },
@@ -220,8 +226,30 @@ describe('EuropePmcService', () => {
     expect(results[0]?.title).toBe(
       'Synergistic CRISPR-Cas Antimicrobials in Staphylococcus aureus',
     );
-    expect(results[0]?.abstract).toBe('Multidrug-resistant pathogens pose a threat.');
     expect(results[0]?.title).not.toContain('<i>');
+  });
+
+  it('resolves Highwire placeholders in the title, leaving authors raw', async () => {
+    mockFetch.mockResolvedValue(
+      makeResponse({
+        hitCount: 1,
+        resultList: {
+          result: [
+            {
+              doi: '10.1101/2024.05.06.592824',
+              title: 'Rad51 filaments at 2.35 [A] with {beta}-strand swaps',
+              authorString: 'O`Toole P, Mu_ller M',
+              firstPublicationDate: '2024-05-06',
+            },
+          ],
+        },
+      }),
+    );
+    const ctx = createMockContext();
+    const { results } = await service.search({ query: 'Rad51' }, ctx);
+    // `[A]` is Å here, but single-letter brackets are also concentration notation.
+    expect(results[0]?.title).toBe('Rad51 filaments at 2.35 [A] with β-strand swaps');
+    expect(results[0]?.authors).toBe('O`Toole P, Mu_ller M');
   });
 
   // ── URL construction ────────────────────────────────────────────────────────
@@ -499,6 +527,120 @@ describe('EuropePmcService', () => {
         retryAfter: e.data?.retryAfter,
       });
       expect(contractFields(err)).toEqual(contractFields(fixture));
+    });
+  });
+
+  // ── Abstract lookup (resultType=core) ───────────────────────────────────────
+
+  describe('getAbstracts', () => {
+    const A = '10.1101/2024.01.15.575123';
+    const B = '10.64898/2026.09.10.750574';
+
+    function coreBody(records: { doi?: string; abstractText?: string }[]) {
+      return { version: '6.9', hitCount: records.length, resultList: { result: records } };
+    }
+
+    it('sends one core query keyed by the DOIs, preprints only, with a page sized to them', async () => {
+      mockFetch.mockResolvedValue(makeResponse(coreBody([])));
+      const ctx = createMockContext();
+      await service.getAbstracts([A, B], ctx);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const params = new URL(firstCalledUrl()).searchParams;
+      expect(params.get('resultType')).toBe('core');
+      expect(params.get('query')).toBe(`(DOI:"${A}" OR DOI:"${B}") AND SRC:PPR`);
+      expect(params.get('pageSize')).toBe('2');
+      expect(params.get('format')).toBe('json');
+    });
+
+    it('deduplicates DOIs case-insensitively and strips quotes that would end the phrase', async () => {
+      mockFetch.mockResolvedValue(makeResponse(coreBody([])));
+      const ctx = createMockContext();
+      await service.getAbstracts([A, A.toUpperCase(), '10.5555/odd"doi'], ctx);
+
+      const params = new URL(firstCalledUrl()).searchParams;
+      expect(params.get('query')).toBe(`(DOI:"${A}" OR DOI:"10.5555/odddoi") AND SRC:PPR`);
+      expect(params.get('pageSize')).toBe('2');
+    });
+
+    it('returns normalized abstracts keyed by lowercase DOI, leaving DOIs without one absent', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse(
+          coreBody([
+            {
+              doi: A.toUpperCase(),
+              abstractText: 'AO_SCPLOWBSTRACTC_SCPLOWMultidrug-resistant pathogens pose a threat.',
+            },
+            { doi: B, abstractText: 'BackgroundFilaments form.\n\nResultsA [~]10 nm pitch.' },
+            { doi: '10.1101/2024.01.15.000009' },
+            { abstractText: 'No DOI on this record.' },
+          ]),
+        ),
+      );
+      const ctx = createMockContext();
+      const abstracts = await service.getAbstracts([A, B, '10.1101/2024.01.15.000009'], ctx);
+
+      expect(Object.fromEntries(abstracts)).toEqual({
+        [A]: 'Multidrug-resistant pathogens pose a threat.',
+        [B]: 'Background: Filaments form. Results: A ∼10 nm pitch.',
+      });
+    });
+
+    it('renders the <h4> headings core abstracts carry as "Heading: ", like a bioRxiv abstract', async () => {
+      // Live core shape: EuropePMC marks structured-abstract headings up as <h4>.
+      mockFetch.mockResolvedValue(
+        makeResponse(
+          coreBody([
+            {
+              doi: A,
+              abstractText:
+                '<h4>Background</h4>  Auditory responses are standardized. <h4>Methods</h4>  We built a <i>rule-based</i> framework (p<0.05).',
+            },
+          ]),
+        ),
+      );
+      const ctx = createMockContext();
+      const abstracts = await service.getAbstracts([A], ctx);
+      expect(abstracts.get(A)).toBe(
+        'Background: Auditory responses are standardized. Methods: We built a rule-based framework (p<0.05).',
+      );
+    });
+
+    it('keeps the first abstract when EuropePMC returns a DOI twice', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse(
+          coreBody([
+            { doi: A, abstractText: 'First.' },
+            { doi: A, abstractText: 'Second.' },
+          ]),
+        ),
+      );
+      const ctx = createMockContext();
+      const abstracts = await service.getAbstracts([A], ctx);
+      expect(abstracts.get(A)).toBe('First.');
+    });
+
+    it('throws ServiceUnavailable for a body with no result list rather than reading it as no abstracts', async () => {
+      mockFetch.mockResolvedValue(makeResponse({ version: '6.9' }));
+      const ctx = createMockContext();
+      const err = await service.getAbstracts([A], ctx).catch((e: unknown) => e);
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect((err as McpError).data?.reason).toBe('empty_response_body');
+    });
+
+    it('throws ServiceUnavailable for an HTML error page', async () => {
+      mockFetch.mockResolvedValue(makeHtmlResponse());
+      const ctx = createMockContext();
+      const err = await service.getAbstracts([A], ctx).catch((e: unknown) => e);
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    });
+
+    it('classifies a 429 as rate_limited with the parsed Retry-After and no upstream body', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '45'));
+      const ctx = createMockContext();
+      const err = await service.getAbstracts([A], ctx).catch((e: unknown) => e);
+      expect(findRateLimit([err])).toEqual({ retryAfter: 45 });
+      expect(JSON.stringify((err as McpError).data)).not.toContain('429 Too Many Requests');
     });
   });
 });
