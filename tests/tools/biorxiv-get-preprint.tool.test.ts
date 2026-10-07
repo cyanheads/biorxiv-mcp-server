@@ -10,7 +10,7 @@ import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-g
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
-import { recoveryHint, rejection } from '../helpers/rejection.js';
+import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
 
@@ -270,14 +270,14 @@ describe('biorxivGetPreprintTool', () => {
 
   it('recovery hint for upstream_unavailable tells the caller to retry, not to verify the DOI', async () => {
     mockGetDetails.mockRejectedValue(new Error('network error'));
-    const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
-    const input = biorxivGetPreprintTool.input.parse({
-      dois: ['10.1101/2024.01.01.000001'],
-      server: 'both',
-    });
-    const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
-    expect(recoveryHint(err)).toMatch(/retry/i);
-    expect(recoveryHint(err)).not.toMatch(/verify the doi/i);
+    const result = await runToolContract(
+      biorxivGetPreprintTool,
+      { dois: ['10.1101/2024.01.01.000001'], server: 'both' } as never,
+      { context: { errors: biorxivGetPreprintTool.errors } },
+    );
+    expect(result.isError).toBe(true);
+    expect(envelopeHint(result)).toMatch(/retry/i);
+    expect(envelopeHint(result)).not.toMatch(/verify the doi/i);
   });
 
   it('throws upstream_unavailable when one DOI is a service error and the rest are not found', async () => {

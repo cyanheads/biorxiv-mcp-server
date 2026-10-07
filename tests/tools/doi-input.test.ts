@@ -14,7 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
-import { recoveryHint, rejection } from '../helpers/rejection.js';
+import { envelopeHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
 const mockGetPublishedVersion = vi.fn();
@@ -251,7 +251,6 @@ describe('biorxiv_get_fulltext — requested version', () => {
     });
     expect(err.message).toContain('v2');
     expect(err.message).toContain('3');
-    expect(recoveryHint(err)).toMatch(/version/);
     expect(mockGetDetails).not.toHaveBeenCalled();
   });
 
@@ -262,7 +261,6 @@ describe('biorxiv_get_fulltext — requested version', () => {
       data: { reason: 'version_not_found', version: '7', availableVersions: ['1', '2', '3'] },
     });
     expect(err.message).toContain('1, 2, 3');
-    expect(recoveryHint(err)).toMatch(/latest/);
     expect(mockFetchFullText).not.toHaveBeenCalled();
   });
 
@@ -307,6 +305,7 @@ describe('biorxiv_get_fulltext — requested version', () => {
     expect(result.structuredContent).toMatchObject({
       error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'version_conflict' } },
     });
+    expect(envelopeHint(result)).toMatch(/version/);
     const text = textOf(result);
     expect(text).toContain('Recovery:');
     expect(text).toContain('(reason version_conflict)');
@@ -321,6 +320,7 @@ describe('biorxiv_get_fulltext — requested version', () => {
         data: { reason: 'version_not_found', availableVersions: ['1', '2', '3'] },
       },
     });
+    expect(envelopeHint(result)).toMatch(/latest/);
     const text = textOf(result);
     expect(text).toContain('available versions: 1, 2, 3');
     expect(text).toContain('(reason version_not_found)');

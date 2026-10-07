@@ -292,9 +292,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     // All DOIs failed — pick the appropriate declared error
     if (preprints.length === 0 && failed.length === input.dois.length) {
       if (failed.every((f) => f.reason === 'invalid_doi_format')) {
-        throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.dois.join(', ')}`, {
-          ...ctx.recoveryFor('invalid_doi_format'),
-        });
+        throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.dois.join(', ')}`);
       }
       // A rate limit outranks a generic upstream failure here: both say "retry",
       // but only one says when, and retrying sooner than the origin asked would
@@ -321,13 +319,11 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
         throw ctx.fail(
           'upstream_unavailable',
           `No DOI could be resolved — ${unavailable.map((f) => `${f.doi}: ${f.error}`).join('; ')}`,
-          { ...ctx.recoveryFor('upstream_unavailable') },
         );
       }
       throw ctx.fail(
         'doi_not_found',
         `None of the requested DOIs were found: ${input.dois.join(', ')}`,
-        { ...ctx.recoveryFor('doi_not_found') },
       );
     }
 

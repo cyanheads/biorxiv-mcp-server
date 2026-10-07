@@ -20,10 +20,22 @@ export async function rejection(call: unknown): Promise<McpError> {
 }
 
 /**
- * The `recovery.hint` a typed error contract mirrors onto `McpError.data`.
+ * The `recovery.hint` the throw site itself put on `McpError.data` — a handler
+ * called directly gets no contract fill, so this sees only an explicit hint.
  * Returns `''` when the throw carried none, so an assertion reads as a missing
  * hint rather than a type error.
  */
 export function recoveryHint(err: McpError): string {
   return (err.data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+}
+
+/**
+ * The `recovery.hint` on a `runToolContract` error envelope — what a client
+ * receives, with a declared reason's contract hint filled in by the framework.
+ */
+export function envelopeHint(result: { structuredContent?: unknown }): string {
+  const envelope = result.structuredContent as
+    | { error?: { data?: { recovery?: { hint?: string } } } }
+    | undefined;
+  return envelope?.error?.data?.recovery?.hint ?? '';
 }

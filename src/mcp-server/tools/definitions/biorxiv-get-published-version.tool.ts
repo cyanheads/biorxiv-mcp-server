@@ -133,9 +133,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
 
     const doi = normalizeDoi(input.doi)?.doi;
     if (!doi) {
-      throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.doi}`, {
-        ...ctx.recoveryFor('invalid_doi_format'),
-      });
+      throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.doi}`);
     }
 
     const service = getBiorxivApiService();
@@ -179,7 +177,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       return ctx.fail(
         'upstream_unavailable',
         `${lookup} for ${doi} failed — ${detail}`,
-        { doi, servers: failedServers, ...ctx.recoveryFor('upstream_unavailable') },
+        { doi, servers: failedServers },
         { cause: rejections[0]?.error },
       );
     };
@@ -224,7 +222,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       throw ctx.fail(
         'doi_not_found',
         `${doi} has no published journal version: neither the crosswalk nor its ${server} preprint record lists one.`,
-        { doi, servers, ...ctx.recoveryFor('doi_not_found') },
+        { doi, servers },
       );
     }
 

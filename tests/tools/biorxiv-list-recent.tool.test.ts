@@ -10,7 +10,7 @@ import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-li
 import type { ListingResult, PreprintRevision } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
-import { recoveryHint, rejection } from '../helpers/rejection.js';
+import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetListing = vi.fn();
 const mockIsValidCategory = vi.fn();
@@ -470,9 +470,16 @@ describe('biorxivListRecentTool', () => {
     expect(err.message).toContain('biorxiv down');
     expect(err.message).toContain('medrxiv down');
     expect(err.cause).toBe(bxDown);
-    expect(recoveryHint(err)).toMatch(/retry/i);
     // The empty-interval guidance must not ride along on the failure
     expect(JSON.stringify(err.data)).not.toMatch(/No preprints found/);
+
+    // The contract hint the client receives says to retry
+    const result = await runToolContract(
+      biorxivListRecentTool,
+      { start_date: '2024-01-01', end_date: '2024-01-31', server: 'both' } as never,
+      { context: { errors: biorxivListRecentTool.errors } },
+    );
+    expect(envelopeHint(result)).toMatch(/retry/i);
   });
 
   it('throws rate_limited instead of upstream_unavailable when one of the two failures is a 429', async () => {

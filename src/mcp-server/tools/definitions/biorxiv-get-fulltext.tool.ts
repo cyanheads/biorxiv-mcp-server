@@ -217,9 +217,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
 
     const parsed = normalizeDoi(input.doi);
     if (!parsed) {
-      throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.doi}`, {
-        ...ctx.recoveryFor('invalid_doi_format'),
-      });
+      throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.doi}`);
     }
     const { doi } = parsed;
 
@@ -239,7 +237,6 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
           doi,
           doiVersion: parsed.version,
           version: input.version,
-          ...ctx.recoveryFor('version_conflict'),
         },
       );
     }
@@ -305,7 +302,6 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
           {
             doi,
             servers: rejections.map((f) => f.server),
-            ...ctx.recoveryFor('upstream_unavailable'),
           },
           { cause: rejections[0]?.error },
         );
@@ -313,7 +309,6 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       throw ctx.fail('doi_not_found', `No preprint found for ${doi} on ${servers.join(' or ')}.`, {
         doi,
         servers,
-        ...ctx.recoveryFor('doi_not_found'),
       });
     }
 
@@ -328,7 +323,6 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
           server,
           version: requestedVersion,
           availableVersions: versions,
-          ...ctx.recoveryFor('version_not_found'),
         },
       );
     }
@@ -372,7 +366,6 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
         server,
         version,
         sourceUrl: result.sourceUrl,
-        ...ctx.recoveryFor('fulltext_unavailable'),
       });
     }
 
@@ -385,7 +378,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       throw ctx.fail(
         'offset_out_of_range',
         `Offset ${input.offset} is past the end of the text (totalChars: ${totalChars}).`,
-        { offset: input.offset, totalChars, ...ctx.recoveryFor('offset_out_of_range') },
+        { offset: input.offset, totalChars },
       );
     }
 

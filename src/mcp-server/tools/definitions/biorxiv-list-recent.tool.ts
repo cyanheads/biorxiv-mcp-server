@@ -277,20 +277,15 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     // Validate dates: shape first, then real-calendar-date (rejects overflow days
     // like 2024-02-30 that the shape regex accepts but no calendar holds), then range.
     if (!DATE_REGEX.test(input.start_date) || !DATE_REGEX.test(input.end_date)) {
-      throw ctx.fail('invalid_date_range', 'Date must be in YYYY-MM-DD format.', {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', 'Date must be in YYYY-MM-DD format.');
     }
     if (!isValidCalendarDate(input.start_date) || !isValidCalendarDate(input.end_date)) {
-      throw ctx.fail('invalid_date_range', 'Date must be a real calendar date (YYYY-MM-DD).', {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', 'Date must be a real calendar date (YYYY-MM-DD).');
     }
     if (input.start_date > input.end_date) {
       throw ctx.fail(
         'invalid_date_range',
         `start_date (${input.start_date}) must be on or before end_date (${input.end_date}).`,
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
 
@@ -302,7 +297,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       throw ctx.fail(
         'invalid_funder',
         `"${funderInput}" is not a valid ROR ID — expected 9 characters: 0, six letters or digits, and two checksum digits (e.g. 021nxhr62), bare or after https://ror.org/.`,
-        { funder: funderInput, ...ctx.recoveryFor('invalid_funder') },
+        { funder: funderInput },
       );
     }
     if (funder && input.server === 'medrxiv') {
@@ -329,7 +324,6 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       throw ctx.fail(
         'invalid_category',
         `Category "${category}" is not valid for ${serverLabel}${scope}.`,
-        { ...ctx.recoveryFor('invalid_category') },
       );
     }
     const filters = { category, funder };
@@ -517,12 +511,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
             { cause: rejections[0] },
           );
         }
-        throw ctx.fail(
-          'upstream_unavailable',
-          message,
-          { servers, ...ctx.recoveryFor('upstream_unavailable') },
-          { cause: rejections[0] },
-        );
+        throw ctx.fail('upstream_unavailable', message, { servers }, { cause: rejections[0] });
       }
 
       // A server that never answered contributes no pagination entry, so nothing

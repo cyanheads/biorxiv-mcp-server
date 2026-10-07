@@ -349,25 +349,21 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     if (input.date_from && !DATE_REGEX.test(input.date_from)) {
       throw ctx.fail('invalid_date_range', 'date_from must be in YYYY-MM-DD format.', {
         date_from: input.date_from,
-        ...ctx.recoveryFor('invalid_date_range'),
       });
     }
     if (input.date_from && !isValidCalendarDate(input.date_from)) {
       throw ctx.fail('invalid_date_range', 'date_from is not a real calendar date (YYYY-MM-DD).', {
         date_from: input.date_from,
-        ...ctx.recoveryFor('invalid_date_range'),
       });
     }
     if (input.date_to && !DATE_REGEX.test(input.date_to)) {
       throw ctx.fail('invalid_date_range', 'date_to must be in YYYY-MM-DD format.', {
         date_to: input.date_to,
-        ...ctx.recoveryFor('invalid_date_range'),
       });
     }
     if (input.date_to && !isValidCalendarDate(input.date_to)) {
       throw ctx.fail('invalid_date_range', 'date_to is not a real calendar date (YYYY-MM-DD).', {
         date_to: input.date_to,
-        ...ctx.recoveryFor('invalid_date_range'),
       });
     }
     if (input.date_from && input.date_to && input.date_from > input.date_to) {
@@ -377,7 +373,6 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         {
           date_from: input.date_from,
           date_to: input.date_to,
-          ...ctx.recoveryFor('invalid_date_range'),
         },
       );
     }
@@ -408,7 +403,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         throw ctx.fail(
           'invalid_cursor_mark',
           cause.message,
-          { cursor_mark: input.cursor_mark, ...ctx.recoveryFor('invalid_cursor_mark') },
+          { cursor_mark: input.cursor_mark },
           { cause },
         );
       }
@@ -430,12 +425,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           { cause },
         );
       }
-      throw ctx.fail(
-        'search_unavailable',
-        `EuropePMC search failed: ${cause.message}`,
-        { ...ctx.recoveryFor('search_unavailable') },
-        { cause },
-      );
+      throw ctx.fail('search_unavailable', `EuropePMC search failed: ${cause.message}`, undefined, {
+        cause,
+      });
     }
 
     const { hitCount, results: epmcResults, nextCursorMark } = epmcSearchResult;

@@ -12,7 +12,7 @@ import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-g
 import type { FullTextFetchResult } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
 import { ESCAPED, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
-import { recoveryHint, rejection } from '../helpers/rejection.js';
+import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
 const mockFetchFullText = vi.fn();
@@ -237,9 +237,13 @@ describe('biorxivGetFulltextTool', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'upstream_unavailable', retryable: true, servers: ['biorxiv', 'medrxiv'] },
     });
-    expect(recoveryHint(err)).toContain('Retry');
     expect(err.cause).toBeInstanceOf(Error);
     expect(mockFetchFullText).not.toHaveBeenCalled();
+
+    const result = await runToolContract(biorxivGetFulltextTool, { doi: DOI } as never, {
+      context: { errors: biorxivGetFulltextTool.errors },
+    });
+    expect(envelopeHint(result)).toContain('Retry');
   });
 
   it('throws retryable rate_limited with the origin Retry-After wait and the metadata fallback', async () => {
