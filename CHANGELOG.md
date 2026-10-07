@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-07
+
+Updates @cyanheads/mcp-ts-core to 0.13.13: tool errors now carry a request id, client error data no longer exposes stack traces, request context, or root causes, and the Docker image installs dependencies natively per architecture.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-22 · ⚠️ Breaking
 
 Adds a bioRxiv funder filter and awards field, defaults biorxiv_list_recent to omit abstracts, and cleans Highwire markup from titles and abstracts
