@@ -7,13 +7,13 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
 <div align="center">
 
-[![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/cyanheads/biorxiv-mcp-server/releases/latest/download/biorxiv-mcp-server.mcpb) [![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=biorxiv-mcp-server&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBjeWFuaGVhZHMvYmlvcnhpdi1tY3Atc2VydmVyIl19) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?%7B%22name%22%3A%22biorxiv-mcp-server%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cyanheads/biorxiv-mcp-server%22%5D%7D)
+[![Install in Claude Desktop](https://img.shields.io/badge/Install_in-Claude_Desktop-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/cyanheads/biorxiv-mcp-server/releases/latest/download/biorxiv-mcp-server.mcpb) [![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=biorxiv-mcp-server&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBjeWFuaGVhZHMvYmlvcnhpdi1tY3Atc2VydmVyIl19) [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode:mcp/install?%7B%22name%22%3A%22biorxiv-mcp-server%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40cyanheads%2Fbiorxiv-mcp-server%22%5D%7D)
 
 [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-67E8F9?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
@@ -46,69 +46,47 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 ### `biorxiv_get_preprint` <sub>tool</sub>
 
-- Batch fetch up to 10 DOIs in a single request
-- Accepts a bare DOI or a pasted form of one — `https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or article-page suffix (`.full`, `.full.pdf`, `.article-metrics`, …) — and reports the bare DOI
-- Each DOI returns its full revision history in `revisions[]` — one API call per DOI, no enumeration loop
-- Includes title, authors, abstract, category, license, grant award numbers (`awards`), JATS XML full-text link (`jatsxmlUrl`), and published journal DOI (`publishedJournalDoi`) once accepted
-- `awards` holds each award value as upstream records it (one value can run several grants together), deduplicated; funder names are left out because `api.biorxiv.org` attributes them to unrelated organizations
-- Scope to `biorxiv`, `medrxiv`, or `both` (default `both`); when `both`, each DOI fans out in parallel and partial failures report per-DOI in `failed[]`
-- Each `failed[]` entry carries a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag — a DOI is only reported `not_found` when every attempted server answered
-- A rate-limited lookup (HTTP 429) reports `reason: "rate_limited"` rather than folding into `upstream_unavailable`, carrying `retryAfter` — the wait in seconds `api.biorxiv.org` asked for
+- Takes up to 10 DOIs per call, bare or pasted (`https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or `.full` suffix), scoped to `biorxiv`, `medrxiv`, or `both` (default `both`)
+- Each preprint returns its full revision history in `revisions[]` — title, authors, abstract, category, license, `awards`, `jatsxmlUrl`, and `publishedJournalDoi` once accepted. Funder names are left out because `api.biorxiv.org` attributes them to unrelated organizations
+- A DOI that fails lands in `failed[]` with a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag; `not_found` only when every attempted server answered
 
 ---
 
 ### `biorxiv_list_recent` <sub>tool</sub>
 
-- Optional server-side category filter — pass a value from `biorxiv_list_categories`, in any case, with `_`, `-`, or a space (`Cell Biology`, `cell_biology`, `cell-biology`)
-- A server that answers the filter with its unfiltered listing is left out with a notice, never returned as filtered; `invalid_category` when no server applied it
-- Optional `funder` filter by ROR ID, bare (`021nxhr62`) or as `https://ror.org/021nxhr62`, checked against the ROR pattern and checksum before any request; combines with `category`
-- The funder filter is bioRxiv-only — medRxiv records carry no funder data — so `server="both"` queries bioRxiv alone with a notice, and `server="medrxiv"` raises `invalid_funder`
-- A ROR ID `api.biorxiv.org` has no funder record for raises `invalid_funder`, never an empty page
-- Fixed page size of 30 (API constraint); advance with integer `cursor` (0, 30, 60, …)
-- Abstracts are omitted by default — they are about three quarters of a page — and every other record field is returned; `include_abstract: true` adds them for the whole page, and `biorxiv_get_preprint` returns them for up to 10 DOIs per call
-- Response includes a `total` count per server; a cursor past the last page is marked `exhausted: true` rather than reading as zero results in the interval
-- When `server="both"` (default), per-server pagination state is independent (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); one server not answering is named in `failed[]` while the other's page still returns
-- Every attempted server failing raises a retryable `upstream_unavailable` (or `rate_limited`) error instead of an empty page
+- Takes a `start_date`/`end_date` interval, `server` (default `both`), and optional `category` (a value from `biorxiv_list_categories`) and bioRxiv-only `funder` (a ROR ID) filters; a filter the API ignored or cannot apply raises `invalid_category` or `invalid_funder` rather than returning an unfiltered or empty page
+- Pages of 30 advance with an integer `cursor`; pagination is per server (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`), a cursor past the last page is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
+- Abstracts are omitted by default (about three quarters of a page); `include_abstract: true` adds them
 
 ---
 
 ### `biorxiv_search_preprints` <sub>tool</sub>
 
-- Query and/or author required (author maps to an EuropePMC `AUTH:"…"` field query, ANDed with the keyword query); optional `date_from`/`date_to` range and `server` scope (default `both`)
-- Up to 100 results per page (default 25); `cursor_mark` pages through the same ranked list; a page past the last match comes back empty with a notice saying so, and a token EuropePMC does not recognize raises `invalid_cursor_mark`
-- An EuropePMC response missing its result list is retried, never reported as zero matches; one that persists on a first page raises `search_unavailable`
-- EuropePMC powers relevance ranking (indexes new preprints within 1–2 days of posting); the bioRxiv/medRxiv API enriches matches with canonical metadata
-- Enriched results carry the same latest-revision fields as `biorxiv_get_preprint`, including `type`, `license`, `awards`, and `authorCorrespondingInstitution`
-- Enrichment failures degrade to EuropePMC-only metadata, surfaced via `partial_results` and a per-record `enrichment_error` (`service_error`, `rate_limited`, or `not_found`); those records' abstracts come from one EuropePMC lookup keyed by their DOIs, and a failed lookup leaves them without one, with a notice
-- Abstracts are included by default; `include_abstract: false` drops them from every result, enriched and fallback alike, for a response about a third the size, keeping every other field
-- A EuropePMC rate limit (HTTP 429) raises a retryable `rate_limited` error carrying the origin's `Retry-After` wait — the search itself has no metadata to fall back on, unlike enrichment
+- Takes `query` and/or `author`, optional `date_from`/`date_to` and `server` (default `both`); up to 100 results per page (default 25), paged with `cursor_mark`
+- EuropePMC ranks the matches (it indexes new preprints within 1–2 days of posting) and the bioRxiv/medRxiv API enriches them with the same fields as `biorxiv_get_preprint`; a record left with EuropePMC metadata only carries `enriched: false` and an `enrichment_error` (`service_error`, `rate_limited`, `not_found`), with `partial_results` set
+- Abstracts are included by default; `include_abstract: false` drops them for a response about a third the size
 
 ---
 
 ### `biorxiv_get_published_version` <sub>tool</sub>
 
-- Uses the `/pubs/{server}/{doi}` endpoint for richer metadata than the `publishedJournalDoi` field on `biorxiv_get_preprint`
-- Returns journal DOI, journal name, published date, and corresponding-author institution; the output `server` field names which server answered (never `"both"`)
-- Scope to `biorxiv`, `medrxiv`, or `both` (default `both`) — the two servers share their DOI prefixes, so a DOI alone doesn't identify one
-- `10.64898/` DOIs, which `/pubs` cannot look up by preprint DOI, resolve through the preprint's own journal DOI; when the crosswalk has no record either way, that journal DOI returns alone, without journal name or date, with a notice saying so
-- No server answering raises a retryable `upstream_unavailable`, or `rate_limited` with the origin's wait on an HTTP 429 — never `doi_not_found`, which would assert an absence nothing established
+- Takes one preprint DOI and `server` (default `both` — the two servers share their DOI prefixes); `10.64898/` DOIs, which the `/pubs` crosswalk cannot key on, resolve through the preprint's own journal DOI
+- Returns journal DOI, journal name, published date, corresponding-author institution, and the `server` that answered; no server answering raises a retryable `upstream_unavailable` or `rate_limited`, never `doi_not_found`
 
 ---
 
 ### `biorxiv_get_fulltext` <sub>tool</sub>
 
-- Fetches the rendered HTML article page (`www.{server}.org/content/{doi}v{N}.full`) and extracts Markdown — there is no keyless JATS source
-- Reads the latest version, or the one requested by `version` or a `vN` suffix on the DOI (the two must agree; a version the preprint lacks raises `version_not_found`), confirmed via the details API first; only DOI resolution fans out across `biorxiv`/`medrxiv`/`both` (default `both`) — the full-text fetch itself targets whichever server answered, named in the output `server` field
-- Long articles page via `offset`/`limit` character chunking (default `limit` 20,000, max 50,000); response reports `totalChars`, `remainingChars`, `hasMore`, and a full-article `wordCount` counted from the same Markdown, and the extracted article is cached per version so paging costs one origin fetch
-- PDF-only preprints and blocked/challenge pages return a typed `fulltext_unavailable` error routing to `biorxiv_get_preprint`
-- An origin rate limit (HTTP 429) — on either the article-page host or `api.biorxiv.org` during resolution — returns a retryable `rate_limited` error carrying the origin's `Retry-After` wait, with the recovery hint naming which origin is limiting
+- Takes a DOI, `server` (default `both`), and an optional `version` (or a `vN` suffix — the two must agree; a version the preprint lacks raises `version_not_found`); extracts Markdown from the rendered HTML article page, since there is no keyless JATS source, and names the answering `server`
+- Pages via `offset`/`limit` characters (default 20,000, max 50,000), reporting `totalChars`, `remainingChars`, `hasMore`, and `wordCount`; the extracted article is cached per version, so paging costs one origin fetch
+- PDF-only preprints and blocked pages raise `fulltext_unavailable`, routing to `biorxiv_get_preprint`
 
 ---
 
 ### `biorxiv_list_categories` <sub>tool</sub>
 
-- No API call — hardcoded static list (25 bioRxiv + 51 medRxiv categories), limited to the ones the listing API actually filters on
-- Use to validate category strings before passing to `biorxiv_list_recent`
+- No API call — a static list of 25 bioRxiv and 51 medRxiv categories, limited to the ones the listing API filters on
+- Use it to pick a `category` for `biorxiv_list_recent`
 
 ## Features
 
@@ -257,6 +235,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name and capped at `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`). A secret inside a free-form value is not redacted. | `false` |
 | `OTEL_ENABLED` | Enable OpenTelemetry instrumentation. | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
