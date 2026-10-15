@@ -2,6 +2,9 @@
  * @fileoverview Tests for BiorxivFullTextService — full-text HTML fetch, Markdown
  * extraction, challenge/block detection, 429 rate-limit classification,
  * unavailable-vs-transient classification, and the per-version ctx.state cache.
+ * Extraction on trimmed Highwire article pages runs the real htmlExtractor, so
+ * citation labels, reference text, and omitted tables are asserted on what
+ * defuddle actually returns.
  * @module tests/services/biorxiv-fulltext/biorxiv-fulltext-service.test
  */
 
@@ -10,8 +13,17 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { parseHTML } from 'linkedom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
+import {
+  authorYearVariant,
+  BIORXIV_015347,
+  BIORXIV_596311,
+  HIGHWIRE_FIXTURES,
+  type HighwireFixture,
+  MEDRXIV_20062463,
+} from '../../helpers/highwire-fixtures.js';
 
 const mockFetch = vi.fn();
 const mockExtract = vi.fn();
@@ -61,6 +73,18 @@ function httpError(status: number, retryAfter?: string): McpError {
     responseBody: BLOCK_PAGE_HTML,
     ...(retryAfter !== undefined && { retryAfter }),
   });
+}
+
+/**
+ * Markdown read as the text it renders: backslash escapes dropped, each link
+ * reduced to its text (a URL may hold one level of parentheses), whitespace
+ * collapsed.
+ */
+function markdownAsText(markdown: string): string {
+  return markdown
+    .replace(/\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+    .replace(/\\(.)/g, '$1')
+    .replace(/\s+/g, ' ');
 }
 
 const ARTICLE_HTML =
@@ -192,21 +216,157 @@ describe('BiorxivFullTextService', () => {
     if (result.kind === 'article') expect(result.title).toBeUndefined();
   });
 
-  it('caches under the v2 key generation, never reading a v1 entry back', async () => {
+  it('caches under the v3 key generation, never reading a v1 or v2 entry back', async () => {
     mockFetch.mockResolvedValue(makeHtmlResponse(ARTICLE_HTML));
     mockExtract.mockResolvedValue({ content: 'Fresh extraction.' });
     const ctx = tenantCtx();
-    await ctx.state.set(`fulltext/v1/biorxiv/${DOI}/1`, {
+    const stale = {
       markdown: 'Stale body from an older build.',
       wordCount: 113,
       sourceUrl: `https://www.biorxiv.org/content/${DOI}v1.full`,
-    });
+    };
+    await ctx.state.set(`fulltext/v1/biorxiv/${DOI}/1`, stale);
+    await ctx.state.set(`fulltext/v2/biorxiv/${DOI}/1`, stale);
 
     const result = await service.fetchFullText('biorxiv', DOI, '1', ctx);
     expect(result.kind === 'article' && result.markdown).toBe('Fresh extraction.');
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(await ctx.state.get(`fulltext/v2/biorxiv/${DOI}/1`)).toMatchObject({
+    expect(await ctx.state.get(`fulltext/v3/biorxiv/${DOI}/1`)).toMatchObject({
       markdown: 'Fresh extraction.',
+    });
+  });
+
+  // ── Extraction on Highwire article pages ─────────────────────────────────────
+
+  describe('extraction on Highwire article pages (real extractor)', () => {
+    /** The article result for one fixture page, run through the real htmlExtractor. */
+    async function extract(fixture: HighwireFixture, ctx = tenantCtx()) {
+      mockFetch.mockResolvedValue(makeHtmlResponse(fixture.html));
+      const result = await service.fetchFullText(fixture.server, fixture.doi, fixture.version, ctx);
+      if (result.kind !== 'article') throw new Error(`Expected an article, got ${result.reason}`);
+      return result;
+    }
+
+    beforeEach(async () => {
+      const { htmlExtractor } = await vi.importActual<
+        typeof import('@cyanheads/mcp-ts-core/utils')
+      >('@cyanheads/mcp-ts-core/utils');
+      mockExtract.mockImplementation((html: string, options: object) =>
+        htmlExtractor.extract(html, options),
+      );
+    });
+
+    describe.each(HIGHWIRE_FIXTURES.map((f) => [f.sourceUrl, f] as const))(
+      '%s',
+      (_url, fixture) => {
+        it('keeps every inline citation, figure, and table label as the page prints it', async () => {
+          const { markdown } = await extract(fixture);
+          for (const label of fixture.labels) expect(markdown).toContain(label);
+          // What the stripped labels used to leave behind: empty parentheses, a
+          // bare dash between markers, and footnote syntax renumbering them.
+          expect(markdown).not.toMatch(/\(\s*[*;,\s–-]*\)/);
+          expect(markdown).not.toMatch(/<sup>\s*[–,]*\s*<\/sup>/);
+          expect(markdown).not.toContain('[^');
+        });
+
+        it('keeps the whole bibliographic text of every reference entry on the page', async () => {
+          const { markdown } = await extract(fixture);
+          // Read off the page itself, so every entry is checked, authors to pages.
+          const entries = [...parseHTML(fixture.html).document.querySelectorAll('div.ref-list li')]
+            .map((li) => li.querySelector('.cit-metadata')?.textContent ?? '')
+            .map((text) => text.replace(/\s+/g, ' ').trim());
+          expect(entries).toHaveLength(fixture.referenceTitles.length);
+          const text = markdownAsText(markdown);
+          for (const entry of entries) expect(text).toContain(entry);
+          expect(markdown).not.toContain('↵');
+        });
+
+        it('names each table the page carries without cells, with its absolute popup URL', async () => {
+          const result = await extract(fixture);
+          if (fixture.tables.length === 0) {
+            expect(result).not.toHaveProperty('omittedTables');
+          } else {
+            expect(result.omittedTables).toEqual(fixture.tables);
+          }
+          // The callout chrome that stood in for the cells is gone from the text;
+          // each table's caption stays where the table sat.
+          expect(result.markdown).not.toMatch(/View this table|View popup|View inline|powerpoint/i);
+          for (const { label } of fixture.tables) expect(result.markdown).toContain(label);
+        });
+      },
+    );
+
+    // Only these two pages carry `.cit-extra` link-outs to drop.
+    it.each([BIORXIV_015347, BIORXIV_596311].map((f) => [f.sourceUrl, f] as const))(
+      'drops the broken OpenURL link-outs and keeps each reference DOI as a doi.org link: %s',
+      async (_url, fixture) => {
+        const { markdown } = await extract(fixture);
+        expect(markdown).not.toMatch(/openurl|OpenUrl|PubMed\]|Web of Science/i);
+        for (const doi of fixture.referenceDois) {
+          expect(markdown).toContain(`[${doi}](https://doi.org/${doi})`);
+        }
+      },
+    );
+
+    it('keeps author-year citation labels, which carry no number to renumber', async () => {
+      const fixture = authorYearVariant();
+      const { markdown } = await extract(fixture);
+      for (const label of fixture.authorYearLabels) expect(markdown).toContain(label);
+      expect(markdown).not.toMatch(/\(\s*[*;,\s–-]*\)/);
+      expect(markdown).not.toContain('[^');
+    });
+
+    it('does not list a table whose cells the page does carry', async () => {
+      const withCells = {
+        ...BIORXIV_015347,
+        html: BIORXIV_015347.html.replace(
+          '<div class="table-caption">',
+          '<table><tr><th>Animal</th><th>Seroconverted</th></tr><tr><td>Dog</td><td>2/4</td></tr></table><div class="table-caption">',
+        ),
+      };
+      const result = await extract(withCells);
+      expect(result).not.toHaveProperty('omittedTables');
+      expect(result.markdown).toContain('Seroconverted');
+      expect(result.markdown).not.toMatch(/View this table|View popup|View inline|powerpoint/i);
+    });
+
+    it.each([
+      [
+        'its id',
+        (html: string) => html.replace('<span class="table-label">Table 1.</span>', ''),
+        'T1',
+      ],
+      [
+        'a neutral label when it has no id either',
+        (html: string) =>
+          html
+            .replace('<span class="table-label">Table 1.</span>', '')
+            .replace('<div id="T1" class="table pos-float">', '<div class="table pos-float">'),
+        'Unlabelled table',
+      ],
+    ])('lists a cell-less table with no printed label under %s', async (_how, strip, label) => {
+      const result = await extract({ ...BIORXIV_015347, html: strip(BIORXIV_015347.html) });
+      expect(result.omittedTables).toEqual([{ label, url: BIORXIV_015347.tables[0]?.url }]);
+      expect(result.markdown).not.toMatch(/View this table|View popup|View inline|powerpoint/i);
+      expect(result.markdown).toContain('Susceptibility of dogs, pigs, chickens, and ducks');
+    });
+
+    it('extracts a page with no .fulltext-view container unchanged in kind', async () => {
+      const result = await extract({
+        ...BIORXIV_596311,
+        html: '<!DOCTYPE html><html><head><title>Plain page</title></head><body><article><h1>Plain page</h1><p>Macrophages drive limb regeneration in axolotls, and their depletion blocks blastema formation entirely.</p></article></body></html>',
+      });
+      expect(result.markdown).toContain('Macrophages drive limb regeneration');
+      expect(result).not.toHaveProperty('omittedTables');
+    });
+
+    it('serves the omitted tables back from the cache with the article', async () => {
+      const ctx = tenantCtx();
+      const first = await extract(MEDRXIV_20062463, ctx);
+      const second = await extract(MEDRXIV_20062463, ctx);
+      expect(second).toEqual(first);
+      expect(second.omittedTables).toEqual(MEDRXIV_20062463.tables);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -244,6 +404,17 @@ describe('BiorxivFullTextService', () => {
         expect(result.retryAfter).toBeUndefined();
         expect(result.detail).not.toContain('soon');
       }
+    });
+
+    it('treats Retry-After: 0 exactly like a 429 with no header', async () => {
+      mockFetch.mockRejectedValue(httpError(429, '0'));
+      const zero = await service.fetchFullText('biorxiv', DOI, '1', tenantCtx());
+      mockFetch.mockRejectedValue(httpError(429));
+      const none = await service.fetchFullText('biorxiv', DOI, '1', tenantCtx());
+
+      expect(zero).toEqual(none);
+      expect(zero).not.toHaveProperty('retryAfter');
+      expect(JSON.stringify(zero)).not.toContain('0-second');
     });
 
     it('keeps the origin block-page HTML out of the returned result', async () => {

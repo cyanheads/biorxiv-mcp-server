@@ -9,7 +9,8 @@
  * 10.1101/ DOI prefix, so the default server="both" resolves the DOI against both
  * in parallel; the fan-out is narrower than biorxiv_get_published_version's — only
  * the resolution step fans out, and the full-text fetch targets the single server
- * that answered. Long articles are paged with offset/limit character chunking.
+ * that answered. Long articles are paged with offset/limit character chunking;
+ * the tables the page carries no cells for (`omittedTables`) ride on every chunk.
  * Full text is best-effort HTML→Markdown, not structured JATS; preprints that are
  * PDF-only or whose page is blocked return a typed `fulltext_unavailable` error
  * routing to biorxiv_get_preprint, while an origin rate limit (HTTP 429) routes to
@@ -38,7 +39,7 @@ import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/ser
 export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
   title: 'Get Preprint Full Text',
   description:
-    'Retrieve a preprint\'s full text as best-effort Markdown, extracted from its rendered HTML article page. Reads the latest version unless one is requested (the version input, or a vN suffix on the DOI), confirms it via the details API, then fetches and extracts the body — abstract, sections, and references. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) resolves the DOI against both in parallel and the response reports which server answered. This is HTML-to-Markdown extraction, not structured JATS: section structure is approximate and not guaranteed. Long articles exceed a single response, so use offset and limit to page through them (the response reports totalChars, remainingChars, and hasMore); paging is cheap because the extracted article is cached per version for an hour after the first read, so only the first chunk pays for a fetch. Not every preprint has an extractable HTML page — some are PDF-only and some origins block programmatic access — in which case a fulltext_unavailable error routes you to biorxiv_get_preprint for the title, abstract, and metadata. For a preprint that has been published in a journal, the journal\'s version may have richer full text elsewhere.',
+    'Retrieve a preprint\'s full text as best-effort Markdown, extracted from its rendered HTML article page. Reads the latest version unless one is requested (the version input, or a vN suffix on the DOI), confirms it via the details API, then fetches and extracts the body — abstract, sections, inline citation labels, and the reference list. Table cells are not on the article page: each table appears as its caption, and omittedTables names it with the URL that serves its cells. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) resolves the DOI against both in parallel and the response reports which server answered. This is HTML-to-Markdown extraction, not structured JATS: section structure is approximate and not guaranteed. Long articles exceed a single response, so use offset and limit to page through them (the response reports totalChars, remainingChars, and hasMore); paging is cheap because the extracted article is cached per version for an hour after the first read, so only the first chunk pays for a fetch. Not every preprint has an extractable HTML page — some are PDF-only and some origins block programmatic access — in which case a fulltext_unavailable error routes you to biorxiv_get_preprint for the title, abstract, and metadata. For a preprint that has been published in a journal, the journal\'s version may have richer full text elsewhere.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -73,10 +74,9 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       .number()
       .int()
       .min(1)
-      .max(50000)
       .default(20000)
       .describe(
-        'Maximum number of characters to return in this chunk. Default 20,000; increase toward 50,000 for large context windows. Check the length field for the actual count returned.',
+        'Maximum number of characters to return in this chunk. Default 20,000; a value past the remaining text returns the rest of the article. Check the length field for the actual count returned.',
       ),
   }),
 
@@ -126,6 +126,23 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       .boolean()
       .describe(
         'True when more text follows this chunk. When true, call again with offset = offset + length.',
+      ),
+    omittedTables: z
+      .array(
+        z
+          .object({
+            label: z.string().describe('The table label as the article prints it, e.g. "Table 1".'),
+            url: z
+              .string()
+              .describe(
+                "The article origin's page that serves this table's cells. Not fetched by this tool.",
+              ),
+          })
+          .describe('One table whose cells content does not include.'),
+      )
+      .optional()
+      .describe(
+        "Tables the article page names without their cells — content keeps each one's caption, and the cells live on a separate page at url. The same list on every chunk. Absent when the article has none.",
       ),
   }),
 
@@ -189,7 +206,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       retryable: true,
       when: 'Either origin returned HTTP 429 for this host — the article page (www.biorxiv.org / www.medrxiv.org) during the full-text fetch, or api.biorxiv.org during version resolution.',
       recovery:
-        'Wait the retryAfter seconds before calling again; the recovery hint names which origins are limiting and what still works meanwhile.',
+        'Wait the retryAfter seconds when present, otherwise a minute or two, before calling again; the recovery hint names which origins are limiting and what still works meanwhile.',
     },
     {
       reason: 'fulltext_unavailable',
@@ -392,7 +409,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       ctx.enrich.truncated({
         shown: length,
         cap: input.limit,
-        guidance: `Full text truncated at the ${input.limit}-character limit. Call biorxiv_get_fulltext again with version=${version}, offset=${end} to read the next chunk.`,
+        guidance: `Full text truncated at the ${input.limit}-character limit. Call biorxiv_get_fulltext again with doi=${doi}, version=${version}, offset=${end} to read the next chunk.`,
       });
     }
 
@@ -410,6 +427,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       totalChars,
       remainingChars,
       hasMore,
+      ...(result.omittedTables && { omittedTables: result.omittedTables }),
     };
   },
 
@@ -432,12 +450,21 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
     lines.push(
       '\n> Extracted from the rendered HTML page — section structure is best-effort and not guaranteed (this is not JATS). Treat headings and reference formatting as approximate.',
     );
+    const tables = result.omittedTables ?? [];
+    if (tables.length > 0) {
+      lines.push(
+        `\n**${tables.length === 1 ? '1 table' : `${tables.length} tables`} not included:** the article page carries only each caption; the cells are served at:`,
+      );
+      for (const table of tables) lines.push(`- ${escapeMarkdown(table.label)}: ${table.url}`);
+    }
     lines.push('\n---\n');
     lines.push(result.content);
     if (result.hasMore) {
       lines.push(
         `\n---\n_Call biorxiv_get_fulltext again with doi=${result.doi}, version=${result.version}, offset=${end} to read the next chunk._`,
       );
+    } else if (tables.length > 0) {
+      lines.push('\n---\n_End of extracted text. The table cells listed above are not included._');
     } else {
       lines.push('\n---\n_End of extracted text._');
     }

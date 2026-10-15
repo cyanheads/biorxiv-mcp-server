@@ -1,17 +1,23 @@
 /**
  * @fileoverview Tests for biorxiv_get_fulltext tool — both-server DOI resolution,
  * version resolution, the typed error contract (including rate_limited and
- * upstream_unavailable), offset/limit chunking, and format rendering.
+ * upstream_unavailable), offset/limit chunking, omitted tables on every chunk,
+ * and format rendering.
  * @module tests/tools/biorxiv-get-fulltext.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import type { FullTextFetchResult } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
 import { ESCAPED, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { rateLimitError } from '../helpers/rate-limit.js';
+import {
+  declaredRateLimitRecovery,
+  RATE_LIMIT_RECOVERY_OPENING,
+  rateLimitError,
+} from '../helpers/rate-limit.js';
 import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
@@ -156,6 +162,8 @@ describe('biorxivGetFulltextTool', () => {
     expect(enrichment.truncated).toBe(true);
     expect(enrichment.shown).toBe(30);
     expect(enrichment.cap).toBe(30);
+    // The notice names every argument the next call needs, as format() does.
+    expect(enrichment.notice).toContain(`doi=${DOI}, version=2, offset=30`);
   });
 
   it('reads a middle chunk and reaches the end on the final call', async () => {
@@ -192,6 +200,112 @@ describe('biorxivGetFulltextTool', () => {
     expect(result.hasMore).toBe(true);
     expect(result.wordCount).toBe(20);
     expect(biorxivGetFulltextTool.output.parse(result).wordCount).toBe(20);
+  });
+
+  // ── limit (no ceiling) ───────────────────────────────────────────────────────
+
+  it('accepts a limit above 50,000 and returns the rest of the text when it runs past the end', async () => {
+    mockFetchFullText.mockResolvedValue(articleResult('E'.repeat(70_000)));
+    const result = await runToolContract(
+      biorxivGetFulltextTool,
+      { doi: DOI, offset: 5_000, limit: 60_000 } as never,
+      { context: { errors: biorxivGetFulltextTool.errors } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      offset: 5_000,
+      length: 60_000,
+      totalChars: 70_000,
+      remainingChars: 5_000,
+      hasMore: true,
+    });
+
+    const rest = await runToolContract(
+      biorxivGetFulltextTool,
+      { doi: DOI, offset: 65_000, limit: 1_000_000 } as never,
+      { context: { errors: biorxivGetFulltextTool.errors } },
+    );
+    expect(rest.isError).toBeFalsy();
+    expect(rest.structuredContent).toMatchObject({
+      length: 5_000,
+      remainingChars: 0,
+      hasMore: false,
+    });
+    expect(rest.structuredContent).not.toHaveProperty('truncated');
+  });
+
+  it('advertises no ceiling on limit in tools/list beyond the safe-integer bound', () => {
+    const schema = z.toJSONSchema(biorxivGetFulltextTool.input, { io: 'input' }) as {
+      properties: Record<string, { maximum?: number; minimum?: number }>;
+    };
+    // `.int()` always emits the safe-integer bound; nothing lower may appear.
+    expect(schema.properties.limit).toMatchObject({
+      minimum: 1,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
+  });
+
+  // ── Omitted tables ───────────────────────────────────────────────────────────
+
+  describe('tables the page carries no cells for', () => {
+    const TABLES = [
+      {
+        label: 'Table 1',
+        url: 'https://www.medrxiv.org/highwire/markup/160719/expansion?width=1000&height=500&iframe=true',
+      },
+      {
+        label: 'Table S2*',
+        url: 'https://www.medrxiv.org/highwire/markup/160732/expansion?width=1000&height=500&iframe=true',
+      },
+    ];
+
+    async function chunk(offset: number, limit: number) {
+      const result = await runToolContract(
+        biorxivGetFulltextTool,
+        { doi: DOI, offset, limit } as never,
+        { context: { errors: biorxivGetFulltextTool.errors } },
+      );
+      return {
+        structured: result.structuredContent as Record<string, unknown>,
+        text: (result.content[0] as { text: string }).text,
+      };
+    }
+
+    beforeEach(() => {
+      mockFetchFullText.mockResolvedValue({
+        kind: 'article',
+        markdown: TWENTY_WORDS,
+        sourceUrl: SOURCE_URL,
+        omittedTables: TABLES,
+      } satisfies FullTextFetchResult);
+    });
+
+    it.each([
+      ['first', 0],
+      ['middle', 60],
+      ['last', 140],
+    ])('names every omitted table on both surfaces of the %s chunk', async (_which, offset) => {
+      const { structured, text } = await chunk(offset, 50);
+      expect(structured.omittedTables).toEqual(TABLES);
+      for (const { url } of TABLES) expect(text).toContain(url);
+      expect(text).toContain('Table 1');
+      // The label is upstream text, escaped like every other upstream field.
+      expect(text).toContain('Table S2\\*:');
+      expect(text).toMatch(/2 tables/i);
+    });
+
+    it('says on the final chunk that the text ends without those cells', async () => {
+      const { structured, text } = await chunk(140, 50);
+      expect(structured.hasMore).toBe(false);
+      expect(text).toMatch(/End of extracted text.*table cells listed above are not included/is);
+    });
+
+    it('leaves the field and the notice out for an article with no omitted tables', async () => {
+      mockFetchFullText.mockResolvedValue(articleResult(TWENTY_WORDS));
+      const { structured, text } = await chunk(0, 50);
+      expect(structured).not.toHaveProperty('omittedTables');
+      expect(text).not.toMatch(/tables? not included|omitted/i);
+    });
   });
 
   it('throws offset_out_of_range when offset is past the end', async () => {
@@ -244,6 +358,12 @@ describe('biorxivGetFulltextTool', () => {
       context: { errors: biorxivGetFulltextTool.errors },
     });
     expect(envelopeHint(result)).toContain('Retry');
+  });
+
+  it('declares a rate_limited recovery that holds when the origin named no wait', () => {
+    expect(declaredRateLimitRecovery(biorxivGetFulltextTool.errors)).toBe(
+      `${RATE_LIMIT_RECOVERY_OPENING}calling again; the recovery hint names which origins are limiting and what still works meanwhile.`,
+    );
   });
 
   it('throws retryable rate_limited with the origin Retry-After wait and the metadata fallback', async () => {

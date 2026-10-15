@@ -1,7 +1,10 @@
 /**
  * @fileoverview BiorxivFullTextService — fetches a preprint's rendered full-text
  * HTML page from the bioRxiv/medRxiv website (`www.{server}.org/content/{doi}v{N}.full`)
- * and extracts readable Markdown via the framework HTML extractor.
+ * and extracts readable Markdown via the framework HTML extractor. The page is
+ * reshaped first (`prepareArticlePage`) so the extractor keeps inline citation
+ * labels and reference text, and the tables the page carries no cells for are
+ * returned by name with the URL that serves them.
  *
  * This is a DISTINCT fetch path from BiorxivApiService: it EXPECTS an HTML
  * document (the rendered article page), so it never routes through the JSON
@@ -11,7 +14,7 @@
  * the extractor.
  *
  * Extracted articles are cached in `ctx.state` under
- * `fulltext/v2/{server}/{doi}/{version}` for {@link FULLTEXT_CACHE_TTL_SECONDS}
+ * `fulltext/v3/{server}/{doi}/{version}` for {@link FULLTEXT_CACHE_TTL_SECONDS}
  * seconds, so paging a long article with offset/limit costs one origin fetch and
  * one extraction instead of one per chunk. `ctx.state` is tenant-scoped, which is
  * the intended blast radius — no cross-tenant or process-wide sharing. Only
@@ -27,6 +30,7 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, htmlExtractor, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { parseHTML } from 'linkedom';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import { parseRetryAfterSeconds, SERVER_VERSION } from '@/services/shared.js';
@@ -67,15 +71,90 @@ const EXPECTED_STATUSES = [...DETERMINISTIC_UNAVAILABLE_STATUSES, 429];
 const FULLTEXT_CACHE_TTL_SECONDS = 3_600;
 
 /**
- * Cache key: `fulltext/v2/{server}/{doi}/{version}`. Slash-delimited because the
+ * Cache key: `fulltext/v3/{server}/{doi}/{version}`. Slash-delimited because the
  * storage layer validates keys against `[a-zA-Z0-9_.\-/]` — a colon separator is
  * rejected outright, and a DOI's own `/` and `.` are already inside the allowed
- * set. The `v2` segment is the cached-value schema generation — bump it when
+ * set. The `v3` segment is the cached-value schema generation — bump it when
  * {@link CachedArticle} changes so entries written by an older build are never
- * read back under the new shape. (`v2` dropped the extractor's `wordCount`.)
+ * read back under the new shape. (`v2` dropped the extractor's `wordCount`; `v3`
+ * added `omittedTables` and keeps citation labels and reference text.)
  */
 const cacheKeyFor = (server: BiorxivServer, doi: string, version: string): string =>
-  `fulltext/v2/${server}/${doi}/${version}`;
+  `fulltext/v3/${server}/${doi}/${version}`;
+
+/**
+ * Rewrites the article container so the extractor keeps what its cleanup rules
+ * strip from Highwire pages, and lists the tables the page carries no cells for.
+ * Defuddle removes every `a[href^="#"]` whose class contains `ref` — every
+ * `a.xref-bibr` / `a.xref-fig` / `a.xref-table` label — leaving `()` behind; its
+ * footnote pass renumbers numeric citations (`[^1]–[^3]` for `1–16`); and its
+ * `metadata` partial selector removes each reference's `div.cit-metadata`. The
+ * framework extractor exposes none of those switches, and turning them off
+ * globally would re-admit the page chrome they exist to strip, so the page is
+ * reshaped here instead:
+ *
+ * - each cross-reference anchor becomes its own label text;
+ * - in the reference list, the `↵` backlinks go, every `.cit-extra` link-out but
+ *   the DOI one goes (the OpenURL ones are an unexpanded `{openurl}` template,
+ *   the PubMed ones often a truncated `access_num`), the DOI one becomes a
+ *   `doi.org` link labelled with the DOI, and every `class` and `id` is dropped
+ *   so no selector matches the entries;
+ * - every `div.table` loses its callout links ("View popup", "Download
+ *   powerpoint"). One without a `<table>` holds only a caption and a link to the
+ *   origin's expansion page, where the cells live: the caption stays in place,
+ *   and the table is returned with that page's URL, under its printed label, or
+ *   its `id` when it prints none. The cells are never fetched: each would cost
+ *   a request to an origin that rate-limits after a handful.
+ *
+ * A page without the container is returned unchanged.
+ */
+function prepareArticlePage(
+  html: string,
+  sourceUrl: string,
+): { html: string; omittedTables: OmittedTable[] } {
+  const { document } = parseHTML(html);
+  const view = document.querySelector(FULLTEXT_CONTENT_SELECTOR);
+  if (!view) return { html, omittedTables: [] };
+
+  for (const anchor of view.querySelectorAll('a[class^="xref-"]')) {
+    anchor.replaceWith(document.createTextNode(anchor.textContent ?? ''));
+  }
+
+  for (const refList of view.querySelectorAll('div.ref-list')) {
+    for (const backlink of refList.querySelectorAll('a.rev-xref-ref')) backlink.remove();
+    for (const extra of refList.querySelectorAll('.cit-extra')) {
+      for (const link of extra.querySelectorAll('a')) {
+        const doi = link.classList.contains('cit-ref-sprinkles-doi')
+          ? new URL(link.getAttribute('href') ?? '', sourceUrl).searchParams.get('access_num')
+          : null;
+        if (!doi) {
+          link.remove();
+          continue;
+        }
+        link.setAttribute('href', `https://doi.org/${doi}`);
+        link.textContent = doi;
+      }
+    }
+    for (const el of refList.querySelectorAll('[class], [id]')) {
+      el.removeAttribute('class');
+      el.removeAttribute('id');
+    }
+  }
+
+  const omittedTables: OmittedTable[] = [];
+  for (const table of view.querySelectorAll('div.table')) {
+    const href = table.querySelector('a.table-expand-popup')?.getAttribute('href');
+    for (const callout of table.querySelectorAll('.table-callout-links')) callout.remove();
+    if (!href || table.querySelector('table')) continue;
+    const label =
+      table.querySelector('.table-label')?.textContent?.trim().replace(/[.:]$/, '') ||
+      table.getAttribute('id') ||
+      'Unlabelled table';
+    omittedTables.push({ label, url: new URL(href, sourceUrl).href });
+  }
+
+  return { html: document.toString(), omittedTables };
+}
 
 /**
  * Reads a cached extraction, treating any storage failure as a miss. A key the
@@ -131,6 +210,17 @@ function isChallengePage(html: string): boolean {
 }
 
 /**
+ * A table the article page names but carries no cells for. Highwire serves a
+ * table's cells from a separate expansion page; `url` is that page.
+ */
+export interface OmittedTable {
+  /** The table's label as the page prints it, without trailing punctuation (`Table 1`). */
+  label: string;
+  /** Absolute URL of the origin page that serves this table's cells. */
+  url: string;
+}
+
+/**
  * Discriminated result of a full-text fetch. `article` carries the extracted
  * Markdown plus best-effort metadata; `unavailable` records why no readable full
  * text was produced so the tool can raise a typed error and route the agent to
@@ -146,6 +236,8 @@ export type FullTextFetchResult =
       markdown: string;
       title?: string;
       sourceUrl: string;
+      /** Tables the page names without cells, in page order; absent when none. */
+      omittedTables?: OmittedTable[];
     }
   | {
       kind: 'unavailable';
@@ -287,7 +379,8 @@ export class BiorxivFullTextService {
       };
     }
 
-    const extracted = await htmlExtractor.extract(html, {
+    const page = prepareArticlePage(html, sourceUrl);
+    const extracted = await htmlExtractor.extract(page.html, {
       url: sourceUrl,
       format: 'markdown',
       contentSelector: FULLTEXT_CONTENT_SELECTOR,
@@ -307,6 +400,7 @@ export class BiorxivFullTextService {
       markdown,
       ...(extracted.title && { title: extracted.title }),
       sourceUrl,
+      ...(page.omittedTables.length > 0 && { omittedTables: page.omittedTables }),
     };
     // Success path only — an unavailable result must recover on a later call.
     if (cacheKey) {
