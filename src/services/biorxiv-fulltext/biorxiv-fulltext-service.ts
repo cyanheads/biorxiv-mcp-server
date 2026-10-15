@@ -106,7 +106,9 @@ const cacheKeyFor = (server: BiorxivServer, doi: string, version: string): strin
  *   its `id` when it prints none. The cells are never fetched: each would cost
  *   a request to an origin that rate-limits after a handful.
  *
- * A page without the container is returned unchanged.
+ * A page without the container is returned unchanged. An `href` that does not
+ * parse as a URL counts as no link: the page is upstream markup, and one bad
+ * link must not cost the caller the whole article.
  */
 function prepareArticlePage(
   html: string,
@@ -125,7 +127,7 @@ function prepareArticlePage(
     for (const extra of refList.querySelectorAll('.cit-extra')) {
       for (const link of extra.querySelectorAll('a')) {
         const doi = link.classList.contains('cit-ref-sprinkles-doi')
-          ? new URL(link.getAttribute('href') ?? '', sourceUrl).searchParams.get('access_num')
+          ? URL.parse(link.getAttribute('href') ?? '', sourceUrl)?.searchParams.get('access_num')
           : null;
         if (!doi) {
           link.remove();
@@ -145,12 +147,13 @@ function prepareArticlePage(
   for (const table of view.querySelectorAll('div.table')) {
     const href = table.querySelector('a.table-expand-popup')?.getAttribute('href');
     for (const callout of table.querySelectorAll('.table-callout-links')) callout.remove();
-    if (!href || table.querySelector('table')) continue;
+    const url = href ? URL.parse(href, sourceUrl) : null;
+    if (!url || table.querySelector('table')) continue;
     const label =
       table.querySelector('.table-label')?.textContent?.trim().replace(/[.:]$/, '') ||
       table.getAttribute('id') ||
       'Unlabelled table';
-    omittedTables.push({ label, url: new URL(href, sourceUrl).href });
+    omittedTables.push({ label, url: url.href });
   }
 
   return { html: document.toString(), omittedTables };

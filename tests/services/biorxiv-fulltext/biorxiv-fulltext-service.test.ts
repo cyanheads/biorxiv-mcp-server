@@ -351,6 +351,20 @@ describe('BiorxivFullTextService', () => {
       expect(result.markdown).toContain('Susceptibility of dogs, pigs, chickens, and ducks');
     });
 
+    it('reads a link-out or table popup href that does not parse as a URL as no link', async () => {
+      const malformed = BIORXIV_015347.html
+        .replace(/href="\/lookup\/external-ref\?access_num=10\.1056[^"]*"/, 'href="http://["')
+        .replace(/href="\/highwire\/markup\/1231680\/expansion\?width[^"]*"/, 'href="http://["');
+      expect(malformed.match(/href="http:\/\/\["/g)).toHaveLength(2);
+      const result = await extract({ ...BIORXIV_015347, html: malformed });
+      expect(result.markdown).not.toContain('10.1056/NEJMoa2001017');
+      expect(result.markdown).toContain(
+        '[10.1038/s41586-020-2012-7](https://doi.org/10.1038/s41586-020-2012-7)',
+      );
+      expect(result).not.toHaveProperty('omittedTables');
+      expect(result.markdown).toContain('Susceptibility of dogs, pigs, chickens, and ducks');
+    });
+
     it('extracts a page with no .fulltext-view container unchanged in kind', async () => {
       const result = await extract({
         ...BIORXIV_596311,
