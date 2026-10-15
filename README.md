@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/biorxiv-mcp-server</h1>
   <p><b>Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.</b>
-  <div>6 Tools</div>
+  <div>7 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. Fetch preprints by DOI, browse by date interval or subject category, search by keyword and author, resolve journal-publication crosswalks, and extract full text from the rendered article page, from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. Fetch preprints by DOI, browse by date interval or subject category, search by keyword and author, resolve journal-publication crosswalks or list them by journal publication date, and extract full text from the rendered article page, from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -39,6 +39,7 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 | `biorxiv_list_recent` | List preprints posted or updated within a date interval, with optional server, category, and funder filters |
 | `biorxiv_search_preprints` | Search preprints by keyword and/or author via EuropePMC for relevance ranking, enriched with bioRxiv/medRxiv metadata |
 | `biorxiv_get_published_version` | Resolve a preprint DOI to its journal publication record (journal DOI, name, published date) |
+| `biorxiv_list_published_versions` | List preprints that appeared as journal articles within a journal publication-date interval, whenever they were posted |
 | `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown extracted from its rendered HTML article page |
 | `biorxiv_list_categories` | List valid subject category strings for bioRxiv and medRxiv |
 
@@ -75,10 +76,20 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 ---
 
+### `biorxiv_list_published_versions` <sub>tool</sub>
+
+- Takes a `start_date`/`end_date` interval of journal publication dates and `server` (default `both`); each row is the record `biorxiv_get_published_version` returns, so a week's publications include preprints posted years earlier, and every `preprintDoi` (`10.1101/` or `10.64898/`) feeds the DOI tools
+- Pages of 100 rows per server advance with an integer `cursor`; pagination is per server, a cursor past one server's last row is marked `exhausted: true` with no `total`, and a server that did not answer is named in `failed[]`
+- Abstracts are omitted by default (about three quarters of a page); `include_abstract: true` adds them
+
+---
+
 ### `biorxiv_get_fulltext` <sub>tool</sub>
 
 - Takes a DOI, `server` (default `both`), and an optional `version` (or a `vN` suffix — the two must agree; a version the preprint lacks raises `version_not_found`); extracts Markdown from the rendered HTML article page, since there is no keyless JATS source, and names the answering `server`
-- Pages via `offset`/`limit` characters (default 20,000, max 50,000), reporting `totalChars`, `remainingChars`, `hasMore`, and `wordCount`; the extracted article is cached per version, so paging costs one origin fetch
+- Keeps inline citation, figure, and table labels as printed (`(1–16)`, `(Fig. 1a)`) and every reference entry's bibliographic text, with the DOI of an entry that has one as a `doi.org` link
+- The article page carries no table cells: each table keeps its caption in the text, and `omittedTables` names it with the URL that serves its cells, on every chunk and in the rendered text
+- Pages via `offset`/`limit` characters (default 20,000; a `limit` past the remaining text returns the rest), reporting `totalChars`, `remainingChars`, `hasMore`, and `wordCount`; the extracted article is cached per version, so paging costs one origin fetch
 - PDF-only preprints and blocked pages raise `fulltext_unavailable`, routing to `biorxiv_get_preprint`
 
 ---
@@ -97,7 +108,7 @@ bioRxiv-specific:
 - `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff; a 429 is classified as a retryable `rate_limited` error carrying the parsed `Retry-After` wait, with the upstream response body kept out of the payload
 - `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword and/or author results, classified the same way on a 429
 - `BiorxivFullTextService` fetches and extracts Markdown from the rendered HTML article pages on `www.biorxiv.org` / `www.medrxiv.org` — a distinct origin from the JSON API
-- Two-server fan-out via `Promise.allSettled` — both `biorxiv` and `medrxiv` queried in parallel when `server="both"`, results merged and deduplicated by DOI
+- Two-server fan-out via `Promise.allSettled` — both `biorxiv` and `medrxiv` queried in parallel when `server="both"`, with each result naming the server that answered and listings keeping per-server pagination
 - Polite `User-Agent` header including a mailto address (`BIORXIV_MAILTO` env var) per Cold Spring Harbor Lab API guidelines
 - Pairs with **pubmed-mcp-server** (post-publication), **openalex-mcp-server** (citation analytics), and **crossref-mcp-server** (DOI metadata)
 
@@ -279,7 +290,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point — registers tools and initializes services. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six tools across bioRxiv and medRxiv. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven tools across bioRxiv and medRxiv. |
 | `src/services/biorxiv` | `BiorxivApiService` — details, publications, and crosswalk endpoint wrappers with retry. |
 | `src/services/biorxiv-fulltext` | `BiorxivFullTextService` — rendered HTML article page fetch and Markdown extraction. |
 | `src/services/europe-pmc` | `EuropePmcService` — preprint keyword/author search endpoint wrapper. |

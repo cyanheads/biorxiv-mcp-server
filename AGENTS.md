@@ -2,10 +2,10 @@
 
 **Server:** biorxiv-mcp-server
 **Version:** 0.3.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.13`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.6
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -213,6 +213,7 @@ src/
       biorxiv-list-recent.tool.ts
       biorxiv-search-preprints.tool.ts
       biorxiv-get-published-version.tool.ts
+      biorxiv-list-published-versions.tool.ts
       biorxiv-get-fulltext.tool.ts
       biorxiv-list-categories.tool.ts
 ```
@@ -236,12 +237,12 @@ src/
 - **Category spelling:** the listing API filters only on lowercase with `/` and `_` read as a space (`hiv aids`), and answers anything else with its unfiltered listing, echoing `messages[0].category: "all"`. `BiorxivApiService` owns the spelling and flags `categoryIgnored`; never present a flagged page as filtered.
 - **Funder data:** upstream funder `name`s and ROR `id`s on records are misattributed — expose only `awards` (verbatim, never split), never a funder name or ID. The listing's `funder` filter takes a bare ROR ID (`normalizeRorId()` strips the URL form and checks the checksum), is bioRxiv-only, and `"funder value not found"` (flagged `funderNotFound`) is an error, never an empty page.
 - **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"`, including for DOI-resolution tools — both servers issue `10.1101/` DOIs, so the DOI never identifies the server and a single-server default silently misses records held by the other. Fan out via `Promise.allSettled` when `"both"` and name the answering server in the output.
-- **Pagination:** integer `cursor` offset (0, 30, 60, …). Page size is fixed at 30 by the API — do not expose a `limit` parameter.
-- **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous.
+- **Pagination:** integer `cursor` offset. Page size is fixed by the API — 30 on `biorxiv_list_recent` (0, 30, 60, …), 100 on `biorxiv_list_published_versions` (0, 100, 200, …) — do not expose a `limit` parameter.
+- **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous. A server whose cursor overshot is flagged `exhausted`: the posting-date listing reports `total: 0` there, and the publication-date listing reports no total at all, so its exhausted entry carries none.
 - **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. Enrichment routes based on `input.server` — when explicit ("biorxiv" or "medrxiv"), always use that server. `10.1101/` prefix is used as a hint only within `server="both"` to prefer bioRxiv first, but is not a reliable discriminator (both servers share this prefix). The ranked search stays `resulttype=lite`, which never carries an abstract; records that fall back to EuropePMC metadata get theirs from one DOI-keyed `resultType=core` query (`getAbstracts`), made only when abstracts are requested and something fell back. A failed lookup is a notice, never a failed search.
-- **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and every abstract a record carries must all appear in the rendered markdown, not just counts. `include_abstract` (default `false` on `biorxiv_list_recent`, `true` on `biorxiv_search_preprints`) removes the abstract from both surfaces together and no other field.
+- **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and every abstract a record carries must all appear in the rendered markdown, not just counts. `include_abstract` (default `false` on `biorxiv_list_recent` and `biorxiv_list_published_versions`, `true` on `biorxiv_search_preprints`) removes the abstract from both surfaces together and no other field.
 - **Upstream text in `format()`:** run titles and abstracts through `normalizeUpstreamText()` in the service (never in `format()`), and pass every upstream free-text field through `escapeMarkdown()` where `format()` interpolates it. It escapes only characters that would change rendering (`A\*T`, `\<COMP id>`; `p<0.05` and `cc_by` stay raw), because agents copy spans out of `content[]` — keep it that narrow. Never escape DOIs, URLs, `structuredContent`, or `biorxiv_get_fulltext`'s extracted `content`.
-- **Polite access:** include `BIORXIV_MAILTO` in the `User-Agent` header when set: `biorxiv-mcp-server/0.1.0 (mailto:${config.mailto})`. The env var is optional — omit the mailto segment when not configured.
+- **Polite access:** include `BIORXIV_MAILTO` in the `User-Agent` header when set: `biorxiv-mcp-server/${SERVER_VERSION} (mailto:${config.mailto})`. The env var is optional — omit the mailto segment when not configured.
 
 ---
 
@@ -396,7 +397,7 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] `BIORXIV_MAILTO` included in outbound User-Agent header when set (optional env var)
 - [ ] DOI input normalized and validated with `normalizeDoi()` before calling API
 - [ ] Two-server fan-out uses `Promise.allSettled`; partial failures reported per-DOI in `failed[]`
-- [ ] `biorxiv_list_recent` with `server="both"` surfaces per-server pagination state, not a merged cursor
+- [ ] `biorxiv_list_recent` and `biorxiv_list_published_versions` with `server="both"` surface per-server pagination state, not a merged cursor
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
