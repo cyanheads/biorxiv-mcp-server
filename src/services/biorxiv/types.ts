@@ -67,7 +67,7 @@ export interface RawDetailsResponse {
   }>;
 }
 
-/** A single crosswalk record from /pubs/{server}/{doi} */
+/** A single crosswalk record from /pubs — keyed by DOI or listed by publication-date interval */
 export interface RawPublishedRecord {
   preprint_abstract?: string;
   preprint_author_corresponding?: string;
@@ -82,13 +82,19 @@ export interface RawPublishedRecord {
   published_journal?: string;
 }
 
-/** Envelope returned by /pubs/{server}/{doi} */
+/**
+ * Envelope returned by /pubs. An interval page reports `total` as a string
+ * ("449") and echoes `cursor` as a number at 0 and a string after it; a page
+ * with no rows ("no articles found …") carries `status` alone.
+ */
 export interface RawPublishedResponse {
   collection?: RawPublishedRecord[];
   messages?: Array<{
     status?: string;
-    total?: number;
+    interval?: string;
+    total?: number | string;
     count?: number;
+    cursor?: number | string;
   }>;
 }
 
@@ -159,6 +165,22 @@ export interface PublishedVersion {
   publishedDate?: string;
   publishedDoi?: string;
   publishedJournal?: string;
+}
+
+/** Per-server result from the /pubs publication-date interval listing */
+export interface PublishedListingResult {
+  pagination: {
+    cursor: number;
+    /** Rows in the interval; absent when the page held none, since upstream then reports no total */
+    total?: number;
+  };
+  publications: PublishedVersion[];
+  /**
+   * Rows upstream returned on this page, counting any dropped for naming no
+   * preprint — the offset the next page starts from, and zero only when the
+   * page was empty upstream.
+   */
+  rowCount: number;
 }
 
 /** Hardcoded subject category taxonomy for bioRxiv and medRxiv */

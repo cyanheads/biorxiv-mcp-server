@@ -1,7 +1,8 @@
 /**
  * @fileoverview BiorxivApiService — wraps api.biorxiv.org endpoints for
  * preprint details (/details), date-range listing (/details with date interval),
- * and crosswalk (/pubs, keyed by preprint DOI or by journal DOI). Owns the
+ * crosswalk (/pubs, keyed by preprint DOI or by journal DOI), and journal
+ * publications by publication-date interval (/pubs with date interval). Owns the
  * category taxonomy and the API's category spelling, and flags a listing whose
  * category filter the API ignored or whose funder ROR ID it does not know. All
  * methods retry with exponential backoff. Parses and normalizes raw JSON into
@@ -32,6 +33,7 @@ import type {
   ListingFilters,
   ListingResult,
   PreprintRevision,
+  PublishedListingResult,
   PublishedVersion,
   RawDetailsResponse,
   RawPreprintRevision,
@@ -265,6 +267,20 @@ function normalizePublished(record: RawPublishedRecord): PublishedVersion | unde
   return pv;
 }
 
+/** An envelope count, which arrives as a number or a numeric string; undefined when absent or unreadable. */
+function parseCount(raw: number | string | undefined): number | undefined {
+  const value = typeof raw === 'string' ? Number.parseInt(raw, 10) : raw;
+  return Number.isInteger(value) ? value : undefined;
+}
+
+/**
+ * Total budget for one interval-listing call — every attempt, backoff, and
+ * honored `Retry-After` — kept under the 60-second request timeout MCP SDK
+ * clients default to, so a hung origin surfaces as this server's classified
+ * error rather than a client-side transport timeout.
+ */
+const LISTING_DEADLINE_MS = 50_000;
+
 // ─── Service class ───────────────────────────────────────────────────────────
 
 export class BiorxivApiService {
@@ -454,6 +470,65 @@ export class BiorxivApiService {
     );
     const record = records.find((r) => r.preprint_doi?.toLowerCase() === wanted);
     return record ? normalizePublished(record) : undefined;
+  }
+
+  /**
+   * List the preprints published as journal articles within a journal
+   * publication-date interval on a single server, 100 rows per page from
+   * `cursor`, a plain row offset. Upstream answers an empty interval and a
+   * cursor at or past the last row alike — "no articles found", no total — so
+   * `total` is absent whenever the page is empty, and only the caller knows
+   * which of the two it asked for. A row naming no preprint is dropped, so
+   * `rowCount` — every row upstream returned — is what a cursor advances by.
+   *
+   * One deadline bounds every attempt and backoff, so a hung origin settles
+   * the call before an MCP client's 60-second request timeout.
+   * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
+   */
+  async getPublishedListing(
+    server: BiorxivServer,
+    startDate: string,
+    endDate: string,
+    cursor: number,
+    ctx: Context,
+  ): Promise<PublishedListingResult> {
+    const url = `${this.baseUrl}/pubs/${server}/${startDate}/${endDate}/${cursor}/json`;
+    try {
+      return await withRetry(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(url, Math.min(20_000, remainingMs), ctx, {
+            signal,
+            headers: { 'User-Agent': this.userAgent },
+            expectedStatuses: EXPECTED_STATUSES,
+          });
+          const text = await response.text();
+          if (detectHtmlError(text)) {
+            throw serviceUnavailable(
+              'api.biorxiv.org returned HTML — likely rate-limited or down.',
+              { url },
+            );
+          }
+          const data = JSON.parse(text) as RawPublishedResponse;
+          const rows = data.collection ?? [];
+          const publications = rows.flatMap((record) => normalizePublished(record) ?? []);
+          const total = parseCount(data.messages?.[0]?.total);
+          return {
+            publications,
+            pagination: { cursor, ...(total !== undefined && { total }) },
+            rowCount: rows.length,
+          };
+        },
+        {
+          operation: 'BiorxivApiService.getPublishedListing',
+          context: ctx,
+          baseDelayMs: 500,
+          signal: ctx.signal,
+          deadlineMs: LISTING_DEADLINE_MS,
+        },
+      );
+    } catch (err) {
+      rethrowClassified(err);
+    }
   }
 
   /** Fetch the raw `/pubs/{server}/{key}` collection, keyed by an already path-encoded DOI. */

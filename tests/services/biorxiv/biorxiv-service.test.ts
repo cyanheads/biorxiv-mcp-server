@@ -9,17 +9,41 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import { findRateLimit } from '@/services/shared.js';
+import {
+  MEDRXIV_C100_ROWS,
+  NO_ARTICLES,
+  PUBLISHED_64898,
+  PUBS_ROW_1101,
+  PUBS_ROW_64898,
+} from '../../helpers/pubs-fixtures.js';
 import { rateLimitError } from '../../helpers/rate-limit.js';
 
 // Stub out fetchWithTimeout and withRetry so no real HTTP calls are made
 const mockFetch = vi.fn();
 
+type RetryFn = (
+  fn: (attempt: { signal: AbortSignal; remainingMs: number }) => Promise<unknown>,
+  options?: { signal?: AbortSignal },
+) => Promise<unknown>;
+
+/**
+ * withRetry runs the operation once, handing it the attempt a single
+ * unbounded try would get; a test that needs the real retry ladder sets `impl`.
+ */
+const retry = vi.hoisted(() => ({ impl: undefined as RetryFn | undefined }));
+
 vi.mock('@cyanheads/mcp-ts-core/utils', () => ({
   fetchWithTimeout: (...args: unknown[]) => mockFetch(...args),
-  withRetry: async (fn: () => Promise<unknown>) => fn(),
+  withRetry: ((fn, options) =>
+    retry.impl
+      ? retry.impl(fn, options)
+      : fn({
+          signal: options?.signal ?? new AbortController().signal,
+          remainingMs: Number.POSITIVE_INFINITY,
+        })) satisfies RetryFn,
 }));
 
 // Stub server config to avoid env var requirements
@@ -81,6 +105,8 @@ const API_CALLS = {
     s.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx),
   getListing: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
     s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx),
+  getPublishedListing: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
+    s.getPublishedListing('biorxiv', '2026-09-01', '2026-09-07', 0, ctx),
   getPublishedVersion: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
     s.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
   getPublishedVersionByJournalDoi: (
@@ -104,6 +130,7 @@ describe('BiorxivApiService', () => {
   beforeEach(() => {
     service = new BiorxivApiService(MOCK_CONFIG, MOCK_STORAGE);
     mockFetch.mockReset();
+    retry.impl = undefined;
   });
 
   // ── getDetails ──────────────────────────────────────────────────────────────
@@ -533,6 +560,241 @@ describe('BiorxivApiService', () => {
         service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
       ).rejects.toThrow();
     });
+
+    // The DOI-keyed form shares the `/pubs` envelope type with the interval
+    // listing, whose `messages` carry string totals and cursors. This path reads
+    // the collection alone, so whatever the envelope says leaves it unchanged.
+    it('reads only the collection of a live-shaped envelope and keys the URL by DOI', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', cursor: '100', count: 1, total: '449' }],
+          collection: [PUBS_ROW_64898],
+        }),
+      );
+      const result = await service.getPublishedVersionByJournalDoi(
+        '10.1038/s41467-026-77129-4',
+        '10.64898/2026.01.10.693661',
+        'biorxiv',
+        createMockContext(),
+      );
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/biorxiv/10.1038/s41467-026-77129-4/json',
+      );
+      expect(result).toEqual(PUBLISHED_64898);
+    });
+
+    it('answers undefined for the empty status a 10.64898/ DOI key draws', async () => {
+      // Live: the DOI-keyed form never parses a 10.64898/ DOI.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'no articles found for published version of ' }],
+          collection: [],
+        }),
+      );
+      const result = await service.getPublishedVersion(
+        '10.64898/2026.01.10.693661',
+        'biorxiv',
+        createMockContext(),
+      );
+      expect(result).toBeUndefined();
+    });
+  });
+
+  // ── getPublishedListing ─────────────────────────────────────────────────────
+
+  describe('getPublishedListing', () => {
+    const list = (server: 'biorxiv' | 'medrxiv', cursor: number) =>
+      service.getPublishedListing(server, '2026-09-01', '2026-09-07', cursor, createMockContext());
+
+    it('requests the interval page and parses the string total (live page-0 envelope)', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [
+            { status: 'ok', interval: '2026-09-01:2026-09-07', cursor: 0, count: 2, total: '449' },
+          ],
+          collection: [PUBS_ROW_64898, PUBS_ROW_1101],
+        }),
+      );
+      const result = await list('biorxiv', 0);
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/biorxiv/2026-09-01/2026-09-07/0/json',
+      );
+      expect(result.pagination).toEqual({ cursor: 0, total: 449 });
+      expect(result.publications).toEqual([
+        PUBLISHED_64898,
+        {
+          preprintDoi: '10.1101/2025.11.21.689628',
+          publishedDoi: '10.1038/s42003-026-10580-7',
+          publishedJournal: 'Communications Biology',
+          publishedDate: '2026-09-03',
+          preprintTitle:
+            'Observations of anisotropic paramagnetic and diamagnetic susceptibility in the primate brain',
+          preprintAuthors: PUBS_ROW_1101.preprint_authors,
+          preprintCategory: 'neuroscience',
+          preprintDate: '2025-11-22',
+          preprintAbstract: PUBS_ROW_1101.preprint_abstract,
+          preprintAuthorCorresponding: 'Jingjia Chen',
+          preprintAuthorCorrespondingInstitution: 'New York University',
+        },
+      ]);
+    });
+
+    it('reads a later page, whose cursor echo is a string', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [
+            {
+              status: 'ok',
+              interval: '2026-09-01:2026-09-07',
+              cursor: '100',
+              count: 3,
+              total: '103',
+            },
+          ],
+          collection: MEDRXIV_C100_ROWS,
+        }),
+      );
+      const result = await list('medrxiv', 100);
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/medrxiv/2026-09-01/2026-09-07/100/json',
+      );
+      expect(result.pagination).toEqual({ cursor: 100, total: 103 });
+      expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+        MEDRXIV_C100_ROWS.map((r) => r.preprint_doi),
+      );
+    });
+
+    it.each([
+      ['a cursor at the end', 449],
+      ['a cursor past the end', 500],
+      ['an empty interval', 0],
+    ])('reports no total for "no articles found" (%s)', async (_label, cursor) => {
+      mockFetch.mockResolvedValue(makeResponse({ messages: [NO_ARTICLES], collection: [] }));
+      const result = await list('biorxiv', cursor);
+      expect(result.publications).toEqual([]);
+      expect(result.pagination).toEqual({ cursor });
+      expect(result.rowCount).toBe(0);
+    });
+
+    it('accepts a numeric total and drops one that is not a count', async () => {
+      mockFetch.mockResolvedValueOnce(
+        makeResponse({ messages: [{ status: 'ok', total: 12 }], collection: [PUBS_ROW_1101] }),
+      );
+      expect((await list('biorxiv', 0)).pagination).toEqual({ cursor: 0, total: 12 });
+      mockFetch.mockResolvedValueOnce(
+        makeResponse({ messages: [{ status: 'ok', total: 'n/a' }], collection: [PUBS_ROW_1101] }),
+      );
+      expect((await list('biorxiv', 0)).pagination).toEqual({ cursor: 0 });
+    });
+
+    it('keeps a sparse row sparse and drops a row naming no preprint', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', total: '2' }],
+          collection: [
+            { preprint_doi: '10.1101/2025.01.01.000001', published_journal: 'eLife' },
+            { published_doi: '10.7554/eLife.00001' },
+          ],
+        }),
+      );
+      const { publications, rowCount } = await list('biorxiv', 0);
+      expect(publications).toEqual([
+        { preprintDoi: '10.1101/2025.01.01.000001', publishedJournal: 'eLife' },
+      ]);
+      // The dropped row still occupies its upstream offset.
+      expect(rowCount).toBe(2);
+    });
+
+    it('normalizes Highwire markup out of each title and abstract', async () => {
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok', total: '1' }],
+          collection: [
+            {
+              ...PUBS_ROW_1101,
+              preprint_title: 'TGF[beta] signaling in <i>E. coli</i>',
+              preprint_abstract: 'AO_SCPLOWBSTRACTC_SCPLOWWe report a method.',
+            },
+          ],
+        }),
+      );
+      const [publication] = (await list('biorxiv', 0)).publications;
+      expect(publication?.preprintTitle).toBe('TGFβ signaling in E. coli');
+      expect(publication?.preprintAbstract).toBe('We report a method.');
+    });
+
+    it('throws serviceUnavailable when API returns HTML error page', async () => {
+      mockFetch.mockResolvedValue(makeHtmlResponse());
+      await expect(list('biorxiv', 0)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+      });
+    });
+
+    it.each([
+      ['20 s while the deadline leaves more', Number.POSITIVE_INFINITY, 20_000],
+      ['the time the deadline has left once it is under 20 s', 7_000, 7_000],
+    ])('bounds an attempt at %s, on the attempt signal', async (_label, remainingMs, expected) => {
+      const attempt = new AbortController();
+      retry.impl = (fn) => fn({ signal: attempt.signal, remainingMs });
+      mockFetch.mockResolvedValue(makeResponse({ messages: [NO_ARTICLES] }));
+      await list('biorxiv', 0);
+      const [, timeoutMs, , options] = mockFetch.mock.calls[0] as [
+        string,
+        number,
+        unknown,
+        { signal?: AbortSignal },
+      ];
+      expect(timeoutMs).toBe(expected);
+      // The attempt's own signal, which the deadline aborts — not the caller's.
+      expect(options.signal).toBe(attempt.signal);
+    });
+
+    describe('against an origin that never answers', () => {
+      beforeEach(async () => {
+        vi.useFakeTimers();
+        const { withRetry } = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
+          '@cyanheads/mcp-ts-core/utils',
+        );
+        retry.impl = withRetry as RetryFn;
+        // Each attempt hangs until its own timeout or the attempt signal fires,
+        // as fetchWithTimeout does against an origin that accepts and stalls.
+        mockFetch.mockImplementation(
+          (_url: string, timeoutMs: number, _ctx: unknown, options: { signal: AbortSignal }) =>
+            new Promise((_resolve, reject) => {
+              const timer = setTimeout(
+                () => reject(new McpError(JsonRpcErrorCode.Timeout, 'attempt timed out')),
+                timeoutMs,
+              );
+              options.signal.addEventListener('abort', () => {
+                clearTimeout(timer);
+                reject(new McpError(JsonRpcErrorCode.Timeout, 'attempt aborted'));
+              });
+            }),
+        );
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('settles inside one 50 s budget, under a client 60 s request timeout', async () => {
+        const started = Date.now();
+        let settledAt: number | undefined;
+        const call = list('biorxiv', 0).catch((err: unknown) => {
+          settledAt = Date.now();
+          return err;
+        });
+        await vi.advanceTimersByTimeAsync(90_000);
+        const err = await call;
+
+        expect(err).toBeInstanceOf(McpError);
+        expect((err as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+        expect(settledAt).toBeDefined();
+        expect((settledAt as number) - started).toBeLessThanOrEqual(50_000);
+        // Four unbounded 20 s attempts plus backoff would run past a minute.
+        expect(mockFetch.mock.calls.length).toBeGreaterThan(1);
+      });
+    });
   });
 
   // ── getCategories / isValidCategory ────────────────────────────────────────
@@ -921,6 +1183,22 @@ describe('BiorxivApiService', () => {
       expect((err as McpError).code).toBe(JsonRpcErrorCode.RateLimited);
       expect((err as McpError).data?.retryAfter).toBeUndefined();
       expect((err as McpError).data?.reason).toBe('rate_limited');
+    });
+
+    it('treats Retry-After: 0 exactly like a 429 with no header', async () => {
+      const ctx = createMockContext();
+      mockFetch.mockRejectedValue(httpError(429, '0'));
+      const zero = (await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e)) as McpError;
+      mockFetch.mockRejectedValue(httpError(429));
+      const none = (await API_CALLS.getDetails(service, ctx).catch((e: unknown) => e)) as McpError;
+
+      expect(zero.message).toBe(none.message);
+      expect(zero.data).toEqual(none.data);
+      expect(zero.data).not.toHaveProperty('retryAfter');
+      expect(zero.message).not.toContain('0-second');
+      expect(zero.data?.recovery).toMatchObject({
+        hint: expect.stringContaining('a minute or two'),
+      });
     });
 
     it('names the wait in a recovery hint the caller can act on', async () => {

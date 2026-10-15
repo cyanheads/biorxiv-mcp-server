@@ -8,6 +8,7 @@ export { biorxivGetFulltextTool } from './biorxiv-get-fulltext.tool.js';
 export { biorxivGetPreprintTool } from './biorxiv-get-preprint.tool.js';
 export { biorxivGetPublishedVersionTool } from './biorxiv-get-published-version.tool.js';
 export { biorxivListCategoriesTool } from './biorxiv-list-categories.tool.js';
+export { biorxivListPublishedVersionsTool } from './biorxiv-list-published-versions.tool.js';
 export { biorxivListRecentTool } from './biorxiv-list-recent.tool.js';
 export { biorxivSearchPreprintsTool } from './biorxiv-search-preprints.tool.js';
 
@@ -15,6 +16,7 @@ import { biorxivGetFulltextTool } from './biorxiv-get-fulltext.tool.js';
 import { biorxivGetPreprintTool } from './biorxiv-get-preprint.tool.js';
 import { biorxivGetPublishedVersionTool } from './biorxiv-get-published-version.tool.js';
 import { biorxivListCategoriesTool } from './biorxiv-list-categories.tool.js';
+import { biorxivListPublishedVersionsTool } from './biorxiv-list-published-versions.tool.js';
 import { biorxivListRecentTool } from './biorxiv-list-recent.tool.js';
 import { biorxivSearchPreprintsTool } from './biorxiv-search-preprints.tool.js';
 
@@ -23,6 +25,7 @@ export const allToolDefinitions = [
   biorxivListRecentTool,
   biorxivGetPreprintTool,
   biorxivGetPublishedVersionTool,
+  biorxivListPublishedVersionsTool,
   biorxivSearchPreprintsTool,
   biorxivGetFulltextTool,
 ] as const;
