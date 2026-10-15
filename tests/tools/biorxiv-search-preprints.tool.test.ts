@@ -3,6 +3,7 @@
  * @module tests/tools/biorxiv-search-preprints.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +11,12 @@ import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorx
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { europePmcRateLimitError, rateLimitError } from '../helpers/rate-limit.js';
+import {
+  declaredRateLimitRecovery,
+  europePmcRateLimitError,
+  RATE_LIMIT_RECOVERY_OPENING,
+  rateLimitError,
+} from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockEpmcSearch = vi.fn();
@@ -208,28 +214,65 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(() => biorxivSearchPreprintsTool.input.parse({ query: '' })).toThrow();
   });
 
-  it('throws invalid_date_range for malformed date_from', async () => {
-    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
-    const input = biorxivSearchPreprintsTool.input.parse({
-      query: 'CRISPR',
-      date_from: 'not-a-date',
-    });
-    await expect(biorxivSearchPreprintsTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_date_range' },
+  describe.each(['date_from', 'date_to'] as const)('a malformed %s', (bound) => {
+    it.each(['2026-9-1', '2026-09-01T00:00:00Z', ' 2026-09-01', '   ', 'not-a-date', '01/15/2024'])(
+      'rejects %j at the schema as -32602, before any search',
+      async (value) => {
+        const result = await runToolContract(
+          biorxivSearchPreprintsTool,
+          { query: 'drought tolerance', [bound]: value } as never,
+          { context: { errors: biorxivSearchPreprintsTool.errors } },
+        );
+        expect(result.isError).toBe(true);
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.message).toContain(bound);
+        expect(mockEpmcSearch).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe.each<['date_from' | 'date_to', { date_from?: string; date_to?: string }]>([
+    ['date_from', { date_to: '2026-09-30' }],
+    ['date_to', { date_from: '2026-09-01' }],
+  ])('a blank %s', (bound, other) => {
+    it('behaves exactly as if the key were omitted — search call and queryEcho alike', async () => {
+      const run = (input: Record<string, unknown>) =>
+        runToolContract(biorxivSearchPreprintsTool, input as never, {
+          context: { errors: biorxivSearchPreprintsTool.errors },
+        });
+      const base = { query: 'drought tolerance', server: 'biorxiv', limit: 1, ...other };
+
+      const blank = await run({ ...base, [bound]: '' });
+      const omitted = await run(base);
+
+      expect(blank.isError).toBeFalsy();
+      expect(mockEpmcSearch).toHaveBeenCalledTimes(2);
+      const [blankCall, omittedCall] = mockEpmcSearch.mock.calls.map((call) => call[0]);
+      expect(blankCall).toEqual(omittedCall);
+      expect(blankCall).toMatchObject({ dateFrom: other.date_from, dateTo: other.date_to });
+      const echo = (r: typeof blank) => (r.structuredContent as { queryEcho: unknown }).queryEcho;
+      expect(echo(blank)).toEqual(echo(omitted));
+      expect(echo(blank)).not.toHaveProperty(bound);
+      const text = (r: typeof blank) =>
+        r.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+      expect(text(blank)).toBe(text(omitted));
     });
   });
 
-  it('throws invalid_date_range for malformed date_to', async () => {
-    const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
-    const input = biorxivSearchPreprintsTool.input.parse({
-      query: 'CRISPR',
-      date_to: '01/15/2024',
-    });
-    await expect(biorxivSearchPreprintsTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_date_range' },
-    });
+  it('advertises the YYYY-MM-DD pattern on both date bounds in tools/list, neither required', () => {
+    const schema = z.toJSONSchema(biorxivSearchPreprintsTool.input, { io: 'input' }) as {
+      properties: Record<string, { type?: string; pattern?: string }>;
+      required?: string[];
+    };
+    for (const bound of ['date_from', 'date_to']) {
+      expect(schema.properties[bound]).toMatchObject({
+        type: 'string',
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+      });
+      expect(schema.required ?? []).not.toContain(bound);
+    }
   });
 
   it('throws invalid_date_range when date_from is after date_to', async () => {
@@ -332,6 +375,12 @@ describe('biorxivSearchPreprintsTool', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'search_unavailable' },
     });
+  });
+
+  it('declares a rate_limited recovery that holds when the origin named no wait', () => {
+    expect(declaredRateLimitRecovery(biorxivSearchPreprintsTool.errors)).toBe(
+      `${RATE_LIMIT_RECOVERY_OPENING}searching again. biorxiv_list_recent queries api.biorxiv.org, which this limit does not cover, so try a date-range listing meanwhile.`,
+    );
   });
 
   it('throws rate_limited, not search_unavailable, when EuropePMC returns 429', async () => {

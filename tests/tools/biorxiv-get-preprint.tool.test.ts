@@ -9,7 +9,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { rateLimitError } from '../helpers/rate-limit.js';
+import {
+  declaredRateLimitRecovery,
+  RATE_LIMIT_RECOVERY_OPENING,
+  rateLimitError,
+} from '../helpers/rate-limit.js';
 import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetDetails = vi.fn();
@@ -298,6 +302,12 @@ describe('biorxivGetPreprintTool', () => {
   });
 
   // ── Rate limiting ───────────────────────────────────────────────────────────
+
+  it('declares a rate_limited recovery that holds when the origin named no wait', () => {
+    expect(declaredRateLimitRecovery(biorxivGetPreprintTool.errors)).toBe(
+      `${RATE_LIMIT_RECOVERY_OPENING}retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.`,
+    );
+  });
 
   it('marks a rate-limited DOI rate_limited in failed[] and carries the wait, keeping the batch alive', async () => {
     mockGetDetails.mockImplementation((doi: string) =>

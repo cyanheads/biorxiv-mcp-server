@@ -1,13 +1,14 @@
 /**
  * @fileoverview Tests for shared service utilities — detectHtmlError,
  * SERVER_VERSION, normalizeUpstreamText, normalizeDoi, normalizeRorId,
- * escapeMarkdown, parseRetryAfterSeconds, and findRateLimit.
+ * escapeMarkdown, parseRetryAfterSeconds, findRateLimit, and describeWait.
  * @module tests/services/shared.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import {
+  describeWait,
   detectHtmlError,
   escapeMarkdown,
   findRateLimit,
@@ -567,7 +568,12 @@ describe('parseRetryAfterSeconds', () => {
   it('reads the RFC 9110 delta-seconds form as a whole-second wait', () => {
     expect(parseRetryAfterSeconds('94')).toBe(94);
     expect(parseRetryAfterSeconds('  30  ')).toBe(30);
-    expect(parseRetryAfterSeconds('0')).toBe(0);
+  });
+
+  it('reads a zero delta as no usable wait, so callers word it like a missing header', () => {
+    expect(parseRetryAfterSeconds('0')).toBeUndefined();
+    expect(parseRetryAfterSeconds(' 0 ')).toBeUndefined();
+    expect(parseRetryAfterSeconds('000')).toBeUndefined();
   });
 
   it('converts the RFC 9110 HTTP-date form to a wait from now', () => {
@@ -577,15 +583,27 @@ describe('parseRetryAfterSeconds', () => {
     expect(seconds).toBeLessThanOrEqual(120);
   });
 
-  it('clamps an HTTP-date already in the past to zero rather than a negative wait', () => {
+  it('reads an HTTP-date already in the past as no usable wait rather than a zero or negative one', () => {
     const past = new Date(Date.now() - 60_000).toUTCString();
-    expect(parseRetryAfterSeconds(past)).toBe(0);
+    expect(parseRetryAfterSeconds(past)).toBeUndefined();
   });
 
   it('returns undefined for an unparseable or absent value so callers word it generically', () => {
     expect(parseRetryAfterSeconds('soon')).toBeUndefined();
     expect(parseRetryAfterSeconds(undefined)).toBeUndefined();
     expect(parseRetryAfterSeconds(94)).toBeUndefined();
+  });
+});
+
+describe('describeWait', () => {
+  it('names a wait in seconds, singular for one', () => {
+    expect(describeWait(1)).toBe('1 second');
+    expect(describeWait(2)).toBe('2 seconds');
+    expect(describeWait(94)).toBe('94 seconds');
+  });
+
+  it('falls back to a generic phrase when no usable wait was named', () => {
+    expect(describeWait(undefined)).toBe('a minute or two');
   });
 });
 

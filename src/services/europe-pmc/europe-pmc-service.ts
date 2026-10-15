@@ -178,9 +178,10 @@ export class EuropePmcService {
     }
     let q = terms.join(' AND ');
 
+    // A blank bound is absent, never an open `[X TO ]` clause.
     if (options.dateFrom || options.dateTo) {
-      const from = options.dateFrom ?? '1900-01-01';
-      const to = options.dateTo ?? '9999-12-31';
+      const from = options.dateFrom || '1900-01-01';
+      const to = options.dateTo || '9999-12-31';
       q += ` AND FIRST_PDATE:[${from} TO ${to}]`;
     }
 

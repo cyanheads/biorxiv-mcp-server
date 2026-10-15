@@ -299,6 +299,22 @@ describe('EuropePmcService', () => {
     expect(decoded).toContain('FIRST_PDATE:[2024-01-01 TO');
   });
 
+  it('reads a blank dateFrom as absent, keeping the sentinel lower bound', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test', dateFrom: '', dateTo: '2024-06-30' }, ctx);
+    const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
+    expect(decoded).toContain('FIRST_PDATE:[1900-01-01 TO 2024-06-30]');
+  });
+
+  it('reads a blank dateTo as absent, keeping the sentinel upper bound', async () => {
+    mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    const ctx = createMockContext();
+    await service.search({ query: 'test', dateFrom: '2024-01-01', dateTo: '' }, ctx);
+    const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
+    expect(decoded).toContain('FIRST_PDATE:[2024-01-01 TO 9999-12-31]');
+  });
+
   it('caps pageSize at 100 even when limit exceeds 100', async () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
@@ -467,6 +483,26 @@ describe('EuropePmcService', () => {
       expect((err as McpError).code).toBe(JsonRpcErrorCode.RateLimited);
       expect((err as McpError).data?.retryAfter).toBeUndefined();
       expect((err as McpError).data?.reason).toBe('rate_limited');
+    });
+
+    it('treats Retry-After: 0 exactly like a 429 with no header', async () => {
+      const ctx = createMockContext();
+      mockFetch.mockRejectedValue(httpError(429, '0'));
+      const zero = (await service
+        .search({ query: 'CRISPR' }, ctx)
+        .catch((e: unknown) => e)) as McpError;
+      mockFetch.mockRejectedValue(httpError(429));
+      const none = (await service
+        .search({ query: 'CRISPR' }, ctx)
+        .catch((e: unknown) => e)) as McpError;
+
+      expect(zero.message).toBe(none.message);
+      expect(zero.data).toEqual(none.data);
+      expect(zero.data).not.toHaveProperty('retryAfter');
+      expect(zero.message).not.toContain('0-second');
+      expect(zero.data?.recovery).toMatchObject({
+        hint: expect.stringContaining('a minute or two'),
+      });
     });
 
     it('leaves retryAfter absent when the Retry-After header is unparseable', async () => {

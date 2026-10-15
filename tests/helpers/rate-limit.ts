@@ -38,6 +38,23 @@ export function rateLimitError(retryAfter?: number): McpError {
 }
 
 /**
+ * The static `recovery` a tool declares for `rate_limited` — the text the
+ * framework sends for a hintless failure. A 429 carries `retryAfter` only when
+ * the origin named a usable wait, so this text must hold without one.
+ */
+export function declaredRateLimitRecovery(
+  errors: readonly { reason: string; recovery: string }[] | undefined,
+): string {
+  const entry = errors?.find((e) => e.reason === 'rate_limited');
+  if (!entry) throw new Error('tool declares no rate_limited reason');
+  return entry.recovery;
+}
+
+/** Opening every `rate_limited` recovery shares: it holds when `retryAfter` is absent. */
+export const RATE_LIMIT_RECOVERY_OPENING =
+  'Wait the retryAfter seconds when present, otherwise a minute or two, before ';
+
+/**
  * The upstream 429 response body EuropePMC returns. Assert its absence to prove
  * the service kept `fetchWithTimeout`'s `data.body` / `data.responseBody` out of
  * the payload.

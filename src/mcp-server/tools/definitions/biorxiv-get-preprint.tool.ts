@@ -189,7 +189,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       retryable: true,
       when: 'No DOI resolved and at least one lookup was rejected with HTTP 429 by api.biorxiv.org.',
       recovery:
-        'Wait the retryAfter seconds before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
+        'Wait the retryAfter seconds when present, otherwise a minute or two, before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
     },
   ],
 

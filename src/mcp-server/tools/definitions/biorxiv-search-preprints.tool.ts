@@ -47,7 +47,9 @@ import {
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
-const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+/** A blank from a form client is "unset", never a value to validate. */
+const blankAsUnset = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => (value === '' ? undefined : value), schema);
 
 type EnrichmentError = 'service_error' | 'not_found' | 'rate_limited';
 
@@ -144,11 +146,18 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         .enum(['biorxiv', 'medrxiv', 'both'])
         .default('both')
         .describe('Server scope for enrichment. "both" checks all matching DOIs on both servers.'),
-      date_from: z
-        .string()
-        .optional()
-        .describe('Earliest first-publication date filter (YYYY-MM-DD).'),
-      date_to: z.string().optional().describe('Latest first-publication date filter (YYYY-MM-DD).'),
+      date_from: blankAsUnset(
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional(),
+      ).describe('Earliest first-publication date filter (YYYY-MM-DD).'),
+      date_to: blankAsUnset(
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional(),
+      ).describe('Latest first-publication date filter (YYYY-MM-DD).'),
       limit: z
         .number()
         .int()
@@ -307,7 +316,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'date_from or date_to is malformed, or date_from is after date_to.',
+      when: 'date_from or date_to is not a real calendar date (2024-02-30, 2024-13-01), or date_from is after date_to.',
       recovery: 'Provide valid YYYY-MM-DD dates where date_from is on or before date_to.',
     },
     {
@@ -331,7 +340,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       retryable: true,
       when: 'The EuropePMC search endpoint rejected the keyword search with HTTP 429. Distinct from a rate-limited enrichment call, which degrades to EuropePMC-only metadata instead of failing.',
       recovery:
-        'Wait the retryAfter seconds before searching again. biorxiv_list_recent queries api.biorxiv.org, which this limit does not cover, so try a date-range listing meanwhile.',
+        'Wait the retryAfter seconds when present, otherwise a minute or two, before searching again. biorxiv_list_recent queries api.biorxiv.org, which this limit does not cover, so try a date-range listing meanwhile.',
     },
   ],
 
@@ -343,22 +352,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       limit: input.limit,
     });
 
-    // Validate date inputs before calling EuropePMC: shape first, then
-    // real-calendar-date (rejects overflow days like 2024-02-30 that the shape
-    // regex accepts but no calendar holds), then range.
-    if (input.date_from && !DATE_REGEX.test(input.date_from)) {
-      throw ctx.fail('invalid_date_range', 'date_from must be in YYYY-MM-DD format.', {
-        date_from: input.date_from,
-      });
-    }
+    // The schema already holds both bounds to YYYY-MM-DD; what it cannot see is
+    // a real calendar date (2024-02-30 has the shape and no calendar holds it)
+    // or the order of the two.
     if (input.date_from && !isValidCalendarDate(input.date_from)) {
       throw ctx.fail('invalid_date_range', 'date_from is not a real calendar date (YYYY-MM-DD).', {
         date_from: input.date_from,
-      });
-    }
-    if (input.date_to && !DATE_REGEX.test(input.date_to)) {
-      throw ctx.fail('invalid_date_range', 'date_to must be in YYYY-MM-DD format.', {
-        date_to: input.date_to,
       });
     }
     if (input.date_to && !isValidCalendarDate(input.date_to)) {

@@ -382,9 +382,11 @@ export function escapeMarkdown(text: string): string {
 /**
  * Reads a `Retry-After` header value as a wait in whole seconds. RFC 9110 §10.2.3
  * allows either delta-seconds or an HTTP-date; the date form is converted to a
- * wait from now and clamped at zero. Returns undefined for an absent, malformed,
- * or unparseable value so callers fall back to generic wording rather than
- * echoing an uninterpretable header into agent-facing prose.
+ * wait from now. Returns undefined for an absent, malformed, or unparseable
+ * value, and for a wait of zero or less (`0`, an HTTP-date already past): by the
+ * time a 429 surfaces, `withRetry` has re-sent the request without waiting, so
+ * a zero wait is no usable wait. Callers then fall back to generic wording
+ * rather than telling an agent to wait 0 seconds and walk back into the limiter.
  *
  * Shared by every fetch path — the JSON API, the full-text article origin, and
  * EuropePMC each surface the same header and must read it identically.
@@ -392,10 +394,15 @@ export function escapeMarkdown(text: string): string {
 export function parseRetryAfterSeconds(raw: unknown): number | undefined {
   if (typeof raw !== 'string') return;
   const trimmed = raw.trim();
-  if (/^\d+$/.test(trimmed)) return Number(trimmed);
-  const dateMs = Date.parse(trimmed);
-  if (Number.isNaN(dateMs)) return;
-  return Math.max(0, Math.round((dateMs - Date.now()) / 1000));
+  let seconds: number;
+  if (/^\d+$/.test(trimmed)) {
+    seconds = Number(trimmed);
+  } else {
+    const dateMs = Date.parse(trimmed);
+    if (Number.isNaN(dateMs)) return;
+    seconds = Math.round((dateMs - Date.now()) / 1000);
+  }
+  return seconds > 0 ? seconds : undefined;
 }
 
 /**
@@ -434,7 +441,8 @@ export function findRateLimit(errors: readonly unknown[]): { retryAfter?: number
  * named no usable wait.
  */
 export function describeWait(seconds: number | undefined): string {
-  return seconds === undefined ? 'a minute or two' : `${seconds} seconds`;
+  if (seconds === undefined) return 'a minute or two';
+  return seconds === 1 ? '1 second' : `${seconds} seconds`;
 }
 
 /**

@@ -9,7 +9,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
 import type { PublishedVersion } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { rateLimitError } from '../helpers/rate-limit.js';
+import {
+  declaredRateLimitRecovery,
+  RATE_LIMIT_RECOVERY_OPENING,
+  rateLimitError,
+} from '../helpers/rate-limit.js';
 import { recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetPublishedVersion = vi.fn();
@@ -232,6 +236,12 @@ describe('biorxivGetPublishedVersionTool', () => {
     const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
     expect(recoveryHint(err)).toMatch(/both/i);
     expect(recoveryHint(err)).not.toMatch(/has not been accepted/i);
+  });
+
+  it('declares a rate_limited recovery that holds when the origin named no wait', () => {
+    expect(declaredRateLimitRecovery(biorxivGetPublishedVersionTool.errors)).toBe(
+      `${RATE_LIMIT_RECOVERY_OPENING}retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.`,
+    );
   });
 
   it('throws retryable rate_limited with the origin wait when the lookup was rate-limited', async () => {

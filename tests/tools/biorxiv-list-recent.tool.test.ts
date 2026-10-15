@@ -9,7 +9,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-list-recent.tool.js';
 import type { ListingResult, PreprintRevision } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { rateLimitError } from '../helpers/rate-limit.js';
+import {
+  declaredRateLimitRecovery,
+  RATE_LIMIT_RECOVERY_OPENING,
+  rateLimitError,
+} from '../helpers/rate-limit.js';
 import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetListing = vi.fn();
@@ -480,6 +484,12 @@ describe('biorxivListRecentTool', () => {
       { context: { errors: biorxivListRecentTool.errors } },
     );
     expect(envelopeHint(result)).toMatch(/retry/i);
+  });
+
+  it('declares a rate_limited recovery that holds when the origin named no wait', () => {
+    expect(declaredRateLimitRecovery(biorxivListRecentTool.errors)).toBe(
+      `${RATE_LIMIT_RECOVERY_OPENING}retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.`,
+    );
   });
 
   it('throws rate_limited instead of upstream_unavailable when one of the two failures is a 429', async () => {

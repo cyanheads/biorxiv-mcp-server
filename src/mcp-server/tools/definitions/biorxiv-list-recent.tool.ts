@@ -260,7 +260,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       retryable: true,
       when: 'Every attempted server failed and at least one was rejected with HTTP 429 by api.biorxiv.org.',
       recovery:
-        'Wait the retryAfter seconds before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
+        'Wait the retryAfter seconds when present, otherwise a minute or two, before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
     },
   ],
 

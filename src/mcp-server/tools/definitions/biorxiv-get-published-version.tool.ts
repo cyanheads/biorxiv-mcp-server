@@ -121,7 +121,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       retryable: true,
       when: 'No published record was established and at least one crosswalk or preprint lookup was rejected with HTTP 429 by api.biorxiv.org.',
       recovery:
-        'Wait the retryAfter seconds before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
+        'Wait the retryAfter seconds when present, otherwise a minute or two, before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
     },
   ],
 
