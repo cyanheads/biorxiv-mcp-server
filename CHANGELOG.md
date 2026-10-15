@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-15
+
+Adds biorxiv_list_published_versions, which lists preprints published as journal articles by journal publication date. biorxiv_get_fulltext keeps citation labels and reference text, names tables whose cells are not on the page, and drops its 50,000-character limit ceiling.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-07
 
 Updates @cyanheads/mcp-ts-core to 0.13.13: tool errors now carry a request id, client error data no longer exposes stack traces, request context, or root causes, and the Docker image installs dependencies natively per architecture.

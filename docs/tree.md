@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-10-07 12:10:56
+Generated on: 2026-10-15 12:23:16
 
 ```text
 biorxiv-mcp-server/
@@ -27,6 +27,7 @@ biorxiv-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -151,6 +152,7 @@ biorxiv-mcp-server/
 │   │           ├── biorxiv-get-preprint.tool.ts
 │   │           ├── biorxiv-get-published-version.tool.ts
 │   │           ├── biorxiv-list-categories.tool.ts
+│   │           ├── biorxiv-list-published-versions.tool.ts
 │   │           ├── biorxiv-list-recent.tool.ts
 │   │           ├── biorxiv-search-preprints.tool.ts
 │   │           └── index.ts
@@ -169,8 +171,15 @@ biorxiv-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── fixtures/
+│   │   └── highwire/
+│   │       ├── biorxiv-015347v1.html
+│   │       ├── biorxiv-596311v1.html
+│   │       └── medrxiv-20062463v1.html
 │   ├── helpers/
+│   │   ├── highwire-fixtures.ts
 │   │   ├── markdown-fixtures.ts
+│   │   ├── pubs-fixtures.ts
 │   │   ├── rate-limit.ts
 │   │   └── rejection.ts
 │   ├── prompts/
@@ -191,6 +200,7 @@ biorxiv-mcp-server/
 │       ├── biorxiv-get-published-version.fallback.test.ts
 │       ├── biorxiv-get-published-version.tool.test.ts
 │       ├── biorxiv-list-categories.tool.test.ts
+│       ├── biorxiv-list-published-versions.tool.test.ts
 │       ├── biorxiv-list-recent.category.test.ts
 │       ├── biorxiv-list-recent.funder.test.ts
 │       ├── biorxiv-list-recent.tool.test.ts
