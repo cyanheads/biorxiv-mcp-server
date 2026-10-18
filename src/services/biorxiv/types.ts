@@ -176,9 +176,10 @@ export interface PublishedListingResult {
   };
   publications: PublishedVersion[];
   /**
-   * Rows upstream returned on this page, counting any dropped for naming no
-   * preprint — the offset the next page starts from, and zero only when the
-   * page was empty upstream.
+   * Upstream rows this page served — the requested slice of the upstream
+   * page, counting any dropped for naming no preprint. The cursor plus this
+   * count is the offset the next page starts from; zero only when the page
+   * was empty upstream.
    */
   rowCount: number;
 }

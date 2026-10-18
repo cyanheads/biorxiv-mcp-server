@@ -8,8 +8,10 @@
  * and run through the framework extractor. bioRxiv and medRxiv share the
  * 10.1101/ DOI prefix, so the default server="both" resolves the DOI against both
  * in parallel; the fan-out is narrower than biorxiv_get_published_version's — only
- * the resolution step fans out, and the full-text fetch targets the single server
- * that answered. Long articles are paged with offset/limit character chunking;
+ * the resolution step fans out, it ends the moment the server holding the DOI
+ * answers (the other lookup is cut short, so a stalled server never spends the
+ * article page's budget), and the full-text fetch targets that one server. Long
+ * articles are paged with offset/limit character chunking;
  * the tables the page carries no cells for (`omittedTables`) ride on every chunk.
  * Full text is best-effort HTML→Markdown, not structured JATS; preprints that are
  * PDF-only or whose page is blocked return a typed `fulltext_unavailable` error
@@ -30,11 +32,46 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { defaultIsTransient } from '@cyanheads/mcp-ts-core/utils';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import { getBiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
-import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/services/shared.js';
+import {
+  CALL_BUDGET_MS,
+  describeWait,
+  escapeMarkdown,
+  findRateLimit,
+  firstHit,
+  normalizeDoi,
+  remainingBudgetMs,
+  startCallDeadline,
+} from '@/services/shared.js';
+
+/**
+ * Whether the article-page fetch ended on the call's budget running out before
+ * the page had failed at all: it was never requested, or its one request was
+ * still waiting when the budget cut it off. A page that timed out, answered an
+ * error, or dropped the connection on its own failed, whatever was left.
+ */
+function endedOnCallBudget(err: McpError): boolean {
+  const data = err.data as { reason?: unknown; retryAttempts?: unknown } | undefined;
+  if (data?.reason !== 'retry_deadline_exceeded') return false;
+  if (data.retryAttempts === 0) return true;
+  // The budget's abort reaches a request in flight, headers or body, as
+  // `fetchWithTimeout`'s FetchSignalTimeout.
+  const { cause } = err;
+  return (
+    data.retryAttempts === 1 &&
+    cause instanceof McpError &&
+    (cause.data as { errorSource?: unknown } | undefined)?.errorSource === 'FetchSignalTimeout'
+  );
+}
+
+/** A share of the call's budget as an error message states it: `500 ms`, `49.5 s`. */
+function describeDuration(ms: number): string {
+  return ms < 1_000 ? `${ms} ms` : `${(ms / 1_000).toFixed(1)} s`;
+}
 
 export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
   title: 'Get Preprint Full Text',
@@ -196,9 +233,9 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       reason: 'upstream_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       retryable: true,
-      when: 'No attempted server resolved the DOI and at least one lookup failed against api.biorxiv.org.',
+      when: "No attempted server resolved the DOI and at least one lookup failed against api.biorxiv.org; the version lookup used most of the call's time budget, so the article page was never requested or had not answered when the budget ran out; or the article page (www.biorxiv.org / www.medrxiv.org) did not answer within the call.",
       recovery:
-        'Retry the request after a short delay — the preprint may well exist; api.biorxiv.org did not answer.',
+        'Retry the request after a short delay — the preprint may well exist; api.biorxiv.org did not answer the version lookup.',
     },
     {
       reason: 'rate_limited',
@@ -261,32 +298,31 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
 
     // Resolve the preprint and its versions via the JSON details API — this
     // confirms the requested version exists (or supplies the latest), and gives
-    // clean not-found handling. Only this step fans out; the full-text fetch
-    // targets the server that answered.
+    // clean not-found handling. Only this step fans out, and it ends the moment
+    // the server holding the DOI answers; the full-text fetch targets that server.
     const service = getBiorxivApiService();
+    // One budget for resolution and the article page, which run one after another.
+    const deadline = startCallDeadline();
     const servers: BiorxivServer[] =
       input.server === 'both' ? ['biorxiv', 'medrxiv'] : [input.server];
-    const settled = await Promise.allSettled(
-      servers.map((server) => service.getDetails(doi, server, ctx)),
+    const { hit, outcomes } = await firstHit(
+      servers.map(
+        (server) => (signal: AbortSignal) => service.getDetails(doi, server, deadline, ctx, signal),
+      ),
+      (revisions) => revisions.length > 0,
+      ctx.signal,
+    );
+    // A cancelled call is not resolved from the leg that finished first, nor
+    // reported as a failed lookup.
+    ctx.signal.throwIfAborted();
+    // Only the lookups that had answered when resolution ended.
+    const rejections = outcomes.flatMap((r, i) =>
+      r?.status === 'rejected' ? [{ server: servers[i] as BiorxivServer, error: r.reason }] : [],
     );
 
-    let resolved: { server: BiorxivServer; versions: string[] } | undefined;
-    for (const [i, settledResult] of settled.entries()) {
-      if (settledResult.status === 'fulfilled' && settledResult.value.length > 0) {
-        resolved = {
-          server: servers[i] as BiorxivServer,
-          versions: settledResult.value.map((r) => r.version ?? '1'),
-        };
-        break;
-      }
-    }
-
-    if (!resolved) {
+    if (!hit) {
       // "Not found" is a claim about what the servers reported, so a server that
       // never answered leaves absence unestablished — and retryable.
-      const rejections = settled.flatMap((r, i) =>
-        r.status === 'rejected' ? [{ server: servers[i] as BiorxivServer, error: r.reason }] : [],
-      );
       if (rejections.length > 0) {
         const detail = rejections
           .map(
@@ -329,7 +365,8 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       });
     }
 
-    const { server, versions } = resolved;
+    const server = servers[hit.leg] as BiorxivServer;
+    const versions = hit.value.map((r) => r.version ?? '1');
     const latestVersion = versions.at(-1) ?? '1';
     if (requestedVersion !== undefined && !versions.includes(requestedVersion)) {
       throw ctx.fail(
@@ -344,7 +381,56 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       );
     }
     const version = requestedVersion ?? latestVersion;
-    const result = await getBiorxivFullTextService().fetchFullText(server, doi, version, ctx);
+    // The page is requested whatever is left of the budget — none at all still
+    // serves a cached extraction — so resolution's share is measured here.
+    const pageBudgetMs = remainingBudgetMs(deadline);
+    const lookupMs = CALL_BUDGET_MS - pageBudgetMs;
+    const result = await getBiorxivFullTextService()
+      .fetchFullText(server, doi, version, deadline, ctx)
+      .catch((err: unknown) => {
+        // A fetch the caller's cancellation stopped is that cancellation.
+        ctx.signal.throwIfAborted();
+        // Only a page that never answered — a timeout, a 5xx, a network error, the
+        // budget running out — is the retryable outage resolution reports, on the
+        // other origin. An origin 4xx or an extractor rejection keeps its own code.
+        if (!(err instanceof McpError && defaultIsTransient(err))) throw err;
+        // The slow lookup left the page too little of the budget to answer in:
+        // that, not the page, is what failed.
+        if (lookupMs > pageBudgetMs && endedOnCallBudget(err)) {
+          const unanswered = servers.filter((_, i) => outcomes[i]?.status !== 'fulfilled');
+          const resolved = `before ${server} resolved the DOI${unanswered.length > 0 ? ` (${unanswered.join(' and ')} did not answer)` : ''}`;
+          throw ctx.fail(
+            'upstream_unavailable',
+            (err.data as { retryAttempts?: unknown }).retryAttempts === 0
+              ? `Version lookup for ${doi} used the call's whole ${CALL_BUDGET_MS / 1000} s time budget ${resolved}, so the ${server} article page was never requested.`
+              : `Version lookup for ${doi} used ${describeDuration(lookupMs)} of the call's ${CALL_BUDGET_MS / 1000} s time budget ${resolved}, so the ${server} article page got only the remaining ${describeDuration(pageBudgetMs)} and had not answered when the budget ran out.`,
+            {
+              doi,
+              server,
+              version,
+              recovery: {
+                hint: `Call biorxiv_get_fulltext again with server="${server}" — the preprint is on ${server}, so the retry spends the call's whole time budget there: the version lookup, then the article page.`,
+              },
+            },
+            { cause: err },
+          );
+        }
+        throw ctx.fail(
+          'upstream_unavailable',
+          `The ${server} article page for ${doi} v${version} did not answer — ${err instanceof Error ? err.message : String(err)}`,
+          {
+            doi,
+            server,
+            version,
+            recovery: {
+              hint: `Retry after a short delay — the www.${server}.org article page did not answer. api.biorxiv.org resolved this preprint, so biorxiv_get_preprint still serves its title, abstract, and metadata meanwhile.`,
+            },
+          },
+          { cause: err },
+        );
+      });
+    // A page served from the cache settles even after the caller has gone.
+    ctx.signal.throwIfAborted();
     if (result.kind === 'unavailable') {
       if (result.reason === 'rate_limited') {
         // Dynamic recovery — the origin's own wait is more actionable than the
@@ -357,9 +443,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
         // while that origin is limiting too sends them back into the limit, and a
         // retry re-runs resolution, so the wait must clear whichever origin asked
         // for the longer one.
-        const metadataLimit = findRateLimit(
-          settled.flatMap((r) => (r.status === 'rejected' ? [r.reason] : [])),
-        );
+        const metadataLimit = findRateLimit(rejections.map((f) => f.error));
         const waits = [result.retryAfter, metadataLimit?.retryAfter].filter(
           (n): n is number => n !== undefined,
         );

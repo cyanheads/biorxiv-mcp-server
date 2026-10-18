@@ -52,7 +52,13 @@ describe('DOI input — bare DOIs already accepted reach the service unchanged',
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({ dois: [doi], server: 'biorxiv' });
     const result = await biorxivGetPreprintTool.handler(input, ctx);
-    expect(mockGetDetails).toHaveBeenCalledWith(doi, 'biorxiv', expect.anything());
+    expect(mockGetDetails).toHaveBeenCalledWith(
+      doi,
+      'biorxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(result.preprints[0]?.doi).toBe(doi);
   });
 
@@ -61,7 +67,13 @@ describe('DOI input — bare DOIs already accepted reach the service unchanged',
     const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
     const input = biorxivGetPublishedVersionTool.input.parse({ doi, server: 'biorxiv' });
     const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
-    expect(mockGetPublishedVersion).toHaveBeenCalledWith(doi, 'biorxiv', expect.anything());
+    expect(mockGetPublishedVersion).toHaveBeenCalledWith(
+      doi,
+      'biorxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(result.preprintDoi).toBe(doi);
   });
 
@@ -80,8 +92,20 @@ describe('DOI input — bare DOIs already accepted reach the service unchanged',
       const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
       const input = biorxivGetFulltextTool.input.parse({ doi, server: 'biorxiv' });
       const result = await biorxivGetFulltextTool.handler(input, ctx);
-      expect(mockGetDetails).toHaveBeenCalledWith(doi, 'biorxiv', expect.anything());
-      expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', doi, '2', expect.anything());
+      expect(mockGetDetails).toHaveBeenCalledWith(
+        doi,
+        'biorxiv',
+        expect.any(Number),
+        expect.anything(),
+        expect.any(AbortSignal),
+      );
+      expect(mockFetchFullText).toHaveBeenCalledWith(
+        'biorxiv',
+        doi,
+        '2',
+        expect.any(Number),
+        expect.anything(),
+      );
       expect(result.doi).toBe(doi);
       expect(result.version).toBe('2');
     },
@@ -153,18 +177,16 @@ describe('DOI input — pasted forms normalize to the bare DOI', () => {
     mockFetchFullText.mockReset();
   });
 
-  it('biorxiv_get_preprint resolves every pasted form, reporting the bare DOI', async () => {
+  it('biorxiv_get_preprint reads every pasted form as the bare DOI, looked up once', async () => {
     mockGetDetails.mockResolvedValue([{ doi: BARE, version: '2', server: 'biorxiv' }]);
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
-    const input = biorxivGetPreprintTool.input.parse({
-      dois: PASTED_FORMS.slice(0, 10),
-      server: 'biorxiv',
-    });
+    const input = biorxivGetPreprintTool.input.parse({ dois: PASTED_FORMS, server: 'biorxiv' });
     const result = await biorxivGetPreprintTool.handler(input, ctx);
     expect(result.failed).toEqual([]);
-    expect(result.preprints).toHaveLength(10);
-    expect(new Set(result.preprints.map((p) => p.doi))).toEqual(new Set([BARE]));
-    for (const call of mockGetDetails.mock.calls) expect(call[0]).toBe(BARE);
+    expect(result.unprocessed).toEqual([]);
+    expect(result.preprints.map((p) => p.doi)).toEqual([BARE]);
+    expect(mockGetDetails).toHaveBeenCalledTimes(1);
+    expect(mockGetDetails.mock.calls[0]?.[0]).toBe(BARE);
   });
 
   it.each(PASTED_FORMS)('biorxiv_get_published_version resolves %s', async (doi) => {
@@ -172,7 +194,13 @@ describe('DOI input — pasted forms normalize to the bare DOI', () => {
     const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
     const input = biorxivGetPublishedVersionTool.input.parse({ doi, server: 'biorxiv' });
     const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
-    expect(mockGetPublishedVersion).toHaveBeenCalledWith(BARE, 'biorxiv', expect.anything());
+    expect(mockGetPublishedVersion).toHaveBeenCalledWith(
+      BARE,
+      'biorxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(result.preprintDoi).toBe(BARE);
   });
 
@@ -216,13 +244,31 @@ describe('biorxiv_get_fulltext — requested version', () => {
   it('reads the latest revision for a bare DOI', async () => {
     const result = await run({ doi: BARE });
     expect(result.version).toBe('3');
-    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', BARE, '3', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'biorxiv',
+      BARE,
+      '3',
+      expect.any(Number),
+      expect.anything(),
+    );
   });
 
   it('honors a vN suffix as the requested version, resolving the bare DOI', async () => {
     const result = await run({ doi: `${BARE}v2` });
-    expect(mockGetDetails).toHaveBeenCalledWith(BARE, 'biorxiv', expect.anything());
-    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', BARE, '2', expect.anything());
+    expect(mockGetDetails).toHaveBeenCalledWith(
+      BARE,
+      'biorxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'biorxiv',
+      BARE,
+      '2',
+      expect.any(Number),
+      expect.anything(),
+    );
     expect(result).toMatchObject({ doi: BARE, version: '2' });
     expect(result.sourceUrl).toContain(`${BARE}v2.full`);
   });
@@ -235,7 +281,13 @@ describe('biorxiv_get_fulltext — requested version', () => {
   it('honors an explicit version input', async () => {
     const result = await run({ doi: BARE, version: 2 });
     expect(result.version).toBe('2');
-    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', BARE, '2', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'biorxiv',
+      BARE,
+      '2',
+      expect.any(Number),
+      expect.anything(),
+    );
   });
 
   it('accepts a vN suffix and version input that agree', async () => {

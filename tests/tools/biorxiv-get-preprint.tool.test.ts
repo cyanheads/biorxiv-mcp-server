@@ -3,11 +3,19 @@
  * @module tests/tools/biorxiv-get-preprint.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
+import { CALL_BUDGET_MS } from '@/services/shared.js';
+import {
+  answerAfter,
+  type LegStub,
+  neverAnswers,
+  routeLegs,
+  settle,
+} from '../helpers/call-budget.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import {
   declaredRateLimitRecovery,
@@ -208,12 +216,11 @@ describe('biorxivGetPreprintTool', () => {
     expect(() => biorxivGetPreprintTool.input.parse({ dois: [] })).toThrow();
   });
 
-  it('rejects dois array longer than 10 at schema parse time', () => {
-    const tooMany = Array.from(
-      { length: 11 },
-      (_, i) => `10.1101/2024.01.${String(i + 1).padStart(2, '0')}.000001`,
-    );
-    expect(() => biorxivGetPreprintTool.input.parse({ dois: tooMany })).toThrow();
+  it('accepts 200 dois entries and rejects a 201st at schema parse time', () => {
+    const entries = (n: number) =>
+      Array.from({ length: n }, (_, i) => `10.1101/2024.01.01.${String(i + 1).padStart(6, '0')}`);
+    expect(biorxivGetPreprintTool.input.parse({ dois: entries(200) }).dois).toHaveLength(200);
+    expect(() => biorxivGetPreprintTool.input.parse({ dois: entries(201) })).toThrow(/200/);
   });
 
   it('defaults server to "both" when omitted', () => {
@@ -431,6 +438,850 @@ describe('biorxivGetPreprintTool', () => {
     expect(result.preprints[0]?.revisions).toHaveLength(2);
   });
 
+  // ── Batch cap and remainder ─────────────────────────────────────────────────
+
+  describe('batch cap and remainder', () => {
+    /** `n` distinct bare DOIs, numbered from `from`. */
+    const dois = (n: number, from = 1) =>
+      Array.from(
+        { length: n },
+        (_, i) => `10.1101/2024.01.01.${String(from + i).padStart(6, '0')}`,
+      );
+    const FIRST_10 = dois(10);
+    const [ELEVENTH] = dois(1, 11) as [string];
+
+    /** bioRxiv holds every DOI; medRxiv answers with an empty collection. */
+    const onBiorxiv = (doi: string, server: string) =>
+      Promise.resolve(server === 'biorxiv' ? [{ doi, version: '1', server: 'biorxiv' }] : []);
+    const entry = (doi: string) => ({
+      doi,
+      revisions: [{ doi, version: '1', server: 'biorxiv' }],
+    });
+    /** Every lookup made, as `server:doi`, sorted. */
+    const lookups = () =>
+      mockGetDetails.mock.calls.map(([doi, server]) => `${String(server)}:${String(doi)}`).sort();
+    const bothServers = (list: string[]) =>
+      list.flatMap((doi) => [`biorxiv:${doi}`, `medrxiv:${doi}`]).sort();
+
+    async function contract(input: Record<string, unknown>) {
+      const result = await runToolContract(biorxivGetPreprintTool, input as never, {
+        context: { errors: biorxivGetPreprintTool.errors },
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      return { result, structured: result.structuredContent as Record<string, unknown>, text };
+    }
+
+    beforeEach(() => {
+      mockGetDetails.mockReset();
+      mockGetDetails.mockImplementation(onBiorxiv);
+    });
+
+    it('looks up the first 10 distinct DOIs and returns the 11th in unprocessed on both surfaces', async () => {
+      const { result, structured, text } = await contract({
+        dois: [...FIRST_10, ELEVENTH],
+        server: 'both',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockGetDetails).toHaveBeenCalledTimes(20);
+      expect(lookups()).toEqual(bothServers(FIRST_10));
+      expect(structured.preprints).toEqual(FIRST_10.map(entry));
+      expect(structured.failed).toEqual([]);
+      expect(structured.unprocessed).toEqual([ELEVENTH]);
+      expect(structured).toMatchObject({ truncated: true, shown: 10, cap: 10 });
+      expect(structured.notice).toBe(
+        'Looked up the first 10 distinct DOIs; 1 more is in unprocessed — pass unprocessed as dois in another call to continue.',
+      );
+      expect(text).toContain(`## Unprocessed DOIs (1)\n- ${ELEVENTH}`);
+      expect(text).toContain(
+        '> Looked up the first 10 distinct DOIs; 1 more is in unprocessed — pass unprocessed as dois in another call to continue.',
+      );
+    });
+
+    it('10 distinct DOIs: unprocessed is empty and the rest of the output is unchanged', async () => {
+      const { structured, text } = await contract({ dois: FIRST_10, server: 'both' });
+
+      expect(mockGetDetails).toHaveBeenCalledTimes(20);
+      expect(structured).toEqual({ preprints: FIRST_10.map(entry), failed: [], unprocessed: [] });
+      expect(text).not.toContain('Unprocessed');
+      expect(text).not.toContain('not looked up');
+    });
+
+    it('looks up 10 of 200 entries and returns the other 190 in input order', async () => {
+      const all = dois(200);
+      const { structured, text } = await contract({ dois: all, server: 'both' });
+
+      expect(mockGetDetails).toHaveBeenCalledTimes(20);
+      expect(structured.unprocessed).toEqual(all.slice(10));
+      expect(structured).toMatchObject({ truncated: true, shown: 10, cap: 10 });
+      // Every one of the 190, in input order, on the content surface too.
+      const listed = all
+        .slice(10)
+        .map((doi) => `- ${doi}`)
+        .join('\n');
+      expect(text).toContain(`## Unprocessed DOIs (190)\n${listed}\n`);
+    });
+
+    it('rejects 201 entries with -32602, naming the 200 ceiling', async () => {
+      const { result } = await contract({ dois: dois(201), server: 'both' });
+
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as { error: { code: number; message: string } };
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.message).toContain('<=200');
+      expect(mockGetDetails).not.toHaveBeenCalled();
+    });
+
+    it('an invalid entry takes no place: "not-a-doi" plus 10 valid DOIs looks up all 10', async () => {
+      const { structured } = await contract({ dois: ['not-a-doi', ...FIRST_10], server: 'both' });
+
+      expect(lookups()).toEqual(bothServers(FIRST_10));
+      expect(structured.preprints).toEqual(FIRST_10.map(entry));
+      expect(structured.failed).toEqual([
+        expect.objectContaining({ doi: 'not-a-doi', reason: 'invalid_doi_format' }),
+      ]);
+      expect(structured.unprocessed).toEqual([]);
+    });
+
+    it('an invalid entry past the cap goes to failed[], never unprocessed', async () => {
+      const { structured } = await contract({
+        dois: [...FIRST_10, 'not-a-doi', ELEVENTH],
+        server: 'both',
+      });
+
+      expect(lookups()).toEqual(bothServers(FIRST_10));
+      expect(structured.failed).toEqual([
+        expect.objectContaining({ doi: 'not-a-doi', reason: 'invalid_doi_format' }),
+      ]);
+      expect(structured.unprocessed).toEqual([ELEVENTH]);
+    });
+
+    it('one DOI sent bare, as a doi.org URL, and with a v1 suffix is one lookup and one entry', async () => {
+      const [doi] = FIRST_10 as [string];
+      const { structured } = await contract({
+        dois: [doi, `https://doi.org/${doi}`, `${doi}v1`],
+        server: 'both',
+      });
+
+      expect(lookups()).toEqual(bothServers([doi]));
+      expect(structured).toEqual({ preprints: [entry(doi)], failed: [], unprocessed: [] });
+    });
+
+    it('a repeated DOI takes no place under the cap', async () => {
+      const repeats = FIRST_10.slice(0, 5).map((doi) => `doi:${doi}`);
+      const { structured } = await contract({ dois: [...FIRST_10, ...repeats], server: 'both' });
+
+      expect(mockGetDetails).toHaveBeenCalledTimes(20);
+      expect(structured.preprints).toEqual(FIRST_10.map(entry));
+      expect(structured.unprocessed).toEqual([]);
+    });
+
+    it('keeps preprints, failed, and unprocessed in input order on both surfaces when earlier lookups answer last', async () => {
+      vi.useFakeTimers();
+      try {
+        const v = dois(12);
+        const outcome = (doi: string, server: string) => {
+          if (doi === v[1]) return Promise.resolve([]);
+          if (doi === v[3]) return Promise.reject(new Error('ECONNREFUSED'));
+          return onBiorxiv(doi, server);
+        };
+        // Each lookup answers 1 s later than the one after it, so completion order is input order reversed.
+        mockGetDetails.mockImplementation((doi: string, server: string) =>
+          answerAfter(1_000 * (12 - v.indexOf(doi)), undefined).then(() => outcome(doi, server)),
+        );
+        const input = [v[0], v[1], 'bad-doi', ...v.slice(2, 10), v[10], `doi:${v[0]}`, v[11]];
+        const { value } = await settle(
+          runToolContract(biorxivGetPreprintTool, { dois: input, server: 'both' } as never, {
+            context: { errors: biorxivGetPreprintTool.errors },
+          }),
+        );
+        const result = value as Awaited<ReturnType<typeof runToolContract>>;
+        const structured = result.structuredContent as Record<string, { doi: string }[]>;
+        const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+
+        const found = [v[0], v[2], ...v.slice(4, 10)];
+        expect(structured.preprints?.map((p) => p.doi)).toEqual(found);
+        expect(structured.failed?.map((f) => f.doi)).toEqual([v[1], 'bad-doi', v[3]]);
+        expect(structured.failed).toMatchObject([
+          { reason: 'not_found' },
+          { reason: 'invalid_doi_format' },
+          { reason: 'upstream_unavailable' },
+        ]);
+        expect(structured.unprocessed).toEqual([v[10], v[11]]);
+        // content[] lists each section in the same input order.
+        expect([...text.matchAll(/^### (.+)$/gm)].map(([, doi]) => doi)).toEqual(found);
+        expect([...text.matchAll(/^- \*\*(.+?)\*\*:/gm)].map(([, doi]) => doi)).toEqual([
+          v[1],
+          'bad-doi',
+          v[3],
+        ]);
+        expect(text).toContain(`## Unprocessed DOIs (2)\n- ${v[10]}\n- ${v[11]}\n`);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('11 DOIs whose first 10 are not found return 10 not_found entries and 1 unprocessed, not doi_not_found', async () => {
+      mockGetDetails.mockResolvedValue([]);
+      const { result, structured } = await contract({
+        dois: [...FIRST_10, ELEVENTH],
+        server: 'both',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.preprints).toEqual([]);
+      expect(structured.failed).toEqual(
+        FIRST_10.map((doi) => ({
+          doi,
+          error: 'Not found on bioRxiv or medRxiv.',
+          reason: 'not_found',
+          retryable: false,
+        })),
+      );
+      expect(structured.unprocessed).toEqual([ELEVENTH]);
+      // A not_found entry will not change on retry, so the notice names none.
+      expect(structured.notice).toBe(
+        'Looked up the first 10 distinct DOIs; 1 more is in unprocessed — pass unprocessed as dois in another call to continue.',
+      );
+    });
+
+    it('11 DOIs whose first 10 failed upstream return them retryable alongside the unprocessed one', async () => {
+      mockGetDetails.mockRejectedValue(new Error('ECONNREFUSED'));
+      const { result, structured, text } = await contract({
+        dois: [...FIRST_10, ELEVENTH],
+        server: 'both',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.failed).toEqual(
+        FIRST_10.map((doi) =>
+          expect.objectContaining({ doi, reason: 'upstream_unavailable', retryable: true }),
+        ),
+      );
+      expect(structured.unprocessed).toEqual([ELEVENTH]);
+      // Following the remainder recipe alone would never retry these ten.
+      const notice =
+        'Looked up the first 10 distinct DOIs; 1 more is in unprocessed — pass unprocessed as dois in another call to continue. 10 failed[] entries are retryable — include their DOIs in a later call, after any retryAfter wait.';
+      expect(structured.notice).toBe(notice);
+      expect(text).toContain(`> ${notice}`);
+    });
+
+    it('names the retryable failed[] entries next to the remainder, counting only rate_limited and upstream_unavailable', async () => {
+      const v = dois(12);
+      mockGetDetails.mockImplementation((doi: string, server: string) => {
+        if (doi === v[0]) return Promise.reject(rateLimitError(30));
+        if (doi === v[1]) return Promise.reject(new Error('ECONNREFUSED'));
+        if (doi === v[2]) return Promise.resolve([]);
+        return onBiorxiv(doi, server);
+      });
+      const { structured, text } = await contract({ dois: [...v, 'not-a-doi'], server: 'both' });
+
+      expect(structured.failed).toMatchObject([
+        { doi: v[0], reason: 'rate_limited', retryable: true, retryAfter: 30 },
+        { doi: v[1], reason: 'upstream_unavailable', retryable: true },
+        { doi: v[2], reason: 'not_found', retryable: false },
+        { doi: 'not-a-doi', reason: 'invalid_doi_format', retryable: false },
+      ]);
+      expect(structured.unprocessed).toEqual([v[10], v[11]]);
+      const notice =
+        'Looked up the first 10 distinct DOIs; 2 more are in unprocessed — pass unprocessed as dois in another call to continue. 2 failed[] entries are retryable — include their DOIs in a later call, after any retryAfter wait.';
+      expect(structured.notice).toBe(notice);
+      expect(text).toContain(`> ${notice}`);
+    });
+
+    it('names one retryable failed[] entry in the singular', async () => {
+      mockGetDetails.mockImplementation((doi: string, server: string) =>
+        doi === FIRST_10[4] ? Promise.reject(rateLimitError(5)) : onBiorxiv(doi, server),
+      );
+      const { structured, text } = await contract({
+        dois: [...FIRST_10, ELEVENTH],
+        server: 'both',
+      });
+
+      const notice =
+        'Looked up the first 10 distinct DOIs; 1 more is in unprocessed — pass unprocessed as dois in another call to continue. 1 failed[] entry is retryable — include its DOI in a later call, after any retryAfter wait.';
+      expect(structured.notice).toBe(notice);
+      expect(text).toContain(`> ${notice}`);
+    });
+
+    it('more than 10 entries that are all invalid still raise invalid_doi_format', async () => {
+      const bad = Array.from({ length: 12 }, (_, i) => `not-a-doi-${i}`);
+      const err = await rejection(
+        biorxivGetPreprintTool.handler(
+          biorxivGetPreprintTool.input.parse({ dois: bad }),
+          createMockContext({ errors: biorxivGetPreprintTool.errors }),
+        ),
+      );
+
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_doi_format' },
+      });
+      expect(mockGetDetails).not.toHaveBeenCalled();
+    });
+
+    it('many forms of one absent DOI are one lookup and still raise doi_not_found', async () => {
+      mockGetDetails.mockResolvedValue([]);
+      const [doi] = FIRST_10 as [string];
+      const forms = Array.from({ length: 15 }, (_, i) => `${doi}v${i + 1}`);
+      const err = await rejection(
+        biorxivGetPreprintTool.handler(
+          biorxivGetPreprintTool.input.parse({ dois: forms, server: 'both' }),
+          createMockContext({ errors: biorxivGetPreprintTool.errors }),
+        ),
+      );
+
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'doi_not_found' },
+      });
+      expect(lookups()).toEqual(bothServers([doi]));
+      // The DOI that was looked up, once and bare, never the 15 raw forms.
+      expect(err.message).toBe(`None of the requested DOIs were found: ${doi}`);
+    });
+
+    describe('batch-level error messages', () => {
+      /** `n` entries no DOI pattern matches. */
+      const invalid = (n: number) =>
+        Array.from({ length: n }, (_, i) => `https://example.org/not-a-doi-${i}`);
+
+      it.each([
+        [1, ''],
+        [10, ''],
+        [11, ', and 1 more'],
+        [200, ', and 190 more'],
+      ])(
+        'invalid_doi_format for %i invalid entries names at most the first 10, then a count, on both surfaces',
+        async (n, rest) => {
+          const bad = invalid(n);
+          const { result, text } = await contract({ dois: bad, server: 'both' });
+
+          const message = `Invalid DOI format: ${bad.slice(0, 10).join(', ')}${rest}`;
+          const { error } = result.structuredContent as {
+            error: { code: number; message: string; data: { reason: string } };
+          };
+          expect(error).toMatchObject({
+            code: JsonRpcErrorCode.ValidationError,
+            message,
+            data: { reason: 'invalid_doi_format' },
+          });
+          // The whole line, so a message that runs on past the expected end still fails.
+          expect(text).toContain(`Error: ${message}\n`);
+          if (n > 10) expect(text).not.toContain(bad[10]);
+          expect(mockGetDetails).not.toHaveBeenCalled();
+        },
+      );
+
+      it('doi_not_found names the DOIs looked up, bare, and the invalid entries apart from them', async () => {
+        mockGetDetails.mockResolvedValue([]);
+        const [a, b] = FIRST_10 as [string, string];
+        const { result, text } = await contract({
+          dois: [`https://doi.org/${a}`, 'not-a-doi', `${b}v2`],
+          server: 'both',
+        });
+
+        const message = `None of the requested DOIs were found: ${a}, ${b}. Invalid DOI format: not-a-doi`;
+        const { error } = result.structuredContent as {
+          error: { code: number; message: string; data: { reason: string } };
+        };
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.NotFound,
+          message,
+          data: { reason: 'doi_not_found' },
+        });
+        expect(text).toContain(`Error: ${message}\n`);
+      });
+
+      it('doi_not_found bounds the invalid entries it names the same way', async () => {
+        mockGetDetails.mockResolvedValue([]);
+        const [a] = FIRST_10 as [string];
+        const bad = invalid(150);
+        const { result } = await contract({ dois: [...bad, a], server: 'both' });
+
+        const { error } = result.structuredContent as { error: { message: string } };
+        expect(error.message).toBe(
+          `None of the requested DOIs were found: ${a}. Invalid DOI format: ${bad.slice(0, 10).join(', ')}, and 140 more`,
+        );
+      });
+    });
+
+    it('lists unprocessed DOIs in content[] raw, never Markdown-escaped', async () => {
+      const marked = ['10.1101/2024.*emph*.1', '10.1101/2024_under_score'];
+      const { structured, text } = await contract({
+        dois: [...FIRST_10, ...marked],
+        server: 'both',
+      });
+
+      expect(structured.unprocessed).toEqual(marked);
+      expect(text).toContain(`## Unprocessed DOIs (2)\n- ${marked[0]}\n- ${marked[1]}`);
+      expect(text).not.toContain('\\*emph\\*');
+      expect(text).not.toContain('\\_under\\_');
+    });
+
+    it('hands every lookup the one deadline, 50 s after the call started', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+        const startedAt = Date.now();
+        await contract({ dois: FIRST_10, server: 'both' });
+
+        expect(mockGetDetails.mock.calls.map((call) => call[2])).toEqual(
+          Array.from({ length: 20 }, () => startedAt + 50_000),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a lookup the call deadline stopped as upstream_unavailable, never not_found', async () => {
+      const [found, stopped] = FIRST_10 as [string, string];
+      mockGetDetails.mockImplementation((doi: string, server: string) => {
+        if (doi === found) return onBiorxiv(doi, server);
+        return server === 'biorxiv'
+          ? Promise.reject(
+              new McpError(JsonRpcErrorCode.Timeout, 'Retry deadline exceeded.', {
+                reason: 'retry_deadline_exceeded',
+              }),
+            )
+          : Promise.resolve([]);
+      });
+      const { structured } = await contract({ dois: [found, stopped], server: 'both' });
+
+      expect(structured.preprints).toEqual([entry(found)]);
+      expect(structured.failed).toEqual([
+        expect.objectContaining({ doi: stopped, reason: 'upstream_unavailable', retryable: true }),
+      ]);
+    });
+  });
+
+  // ── Cancellation ────────────────────────────────────────────────────────────
+
+  describe('cancellation', () => {
+    const SECOND = '10.1101/2024.02.01.000002';
+
+    it('rethrows a cancellation rather than returning the DOIs that resolved first', async () => {
+      const controller = new AbortController();
+      const cancelled = new Error('cancelled by caller');
+      mockGetDetails.mockImplementation((doi: string) => {
+        if (doi === REVISION.doi) return Promise.resolve([REVISION]);
+        controller.abort(cancelled);
+        return Promise.reject(new Error('aborted'));
+      });
+      const ctx = createMockContext({
+        errors: biorxivGetPreprintTool.errors,
+        signal: controller.signal,
+      });
+      const input = biorxivGetPreprintTool.input.parse({ dois: [REVISION.doi, SECOND] });
+      const err = await rejection(biorxivGetPreprintTool.handler(input, ctx));
+      expect(err).toBe(cancelled);
+    });
+
+    it('settles a cancelled call as RequestCancelled even when DOIs are left in unprocessed', async () => {
+      const controller = new AbortController();
+      const dois = Array.from(
+        { length: 11 },
+        (_, i) => `10.1101/2024.03.01.${String(i + 1).padStart(6, '0')}`,
+      );
+      mockGetDetails.mockImplementation((doi: string) => {
+        if (doi !== dois[9]) return Promise.resolve([{ doi, version: '1' }]);
+        controller.abort(new Error('cancelled by caller'));
+        return Promise.reject(new Error('aborted'));
+      });
+      const result = await runToolContract(biorxivGetPreprintTool, { dois } as never, {
+        context: { errors: biorxivGetPreprintTool.errors, signal: controller.signal },
+      });
+
+      // The runner settles any throw after the abort as RequestCancelled, so the
+      // message is what shows the caller's reason was rethrown, not a lookup failure.
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({
+        error: { code: JsonRpcErrorCode.RequestCancelled, message: 'cancelled by caller' },
+      });
+      expect(result.content).toEqual([{ type: 'text', text: 'Error: cancelled by caller' }]);
+    });
+
+    it('still reports a lookup that failed while the signal was live in failed[]', async () => {
+      const controller = new AbortController();
+      mockGetDetails.mockImplementation((doi: string) =>
+        doi === REVISION.doi ? Promise.resolve([REVISION]) : Promise.reject(new Error('aborted')),
+      );
+      const ctx = createMockContext({
+        errors: biorxivGetPreprintTool.errors,
+        signal: controller.signal,
+      });
+      const input = biorxivGetPreprintTool.input.parse({
+        dois: [REVISION.doi, SECOND],
+        server: 'biorxiv',
+      });
+      const result = await biorxivGetPreprintTool.handler(input, ctx);
+
+      expect(controller.signal.aborted).toBe(false);
+      expect(result.preprints.map((p) => p.doi)).toEqual([REVISION.doi]);
+      expect(result.failed).toEqual([
+        expect.objectContaining({ doi: SECOND, reason: 'upstream_unavailable', retryable: true }),
+      ]);
+    });
+  });
+
+  // ── Per-DOI resolution across both servers ──────────────────────────────────
+
+  describe('per-DOI resolution across both servers', () => {
+    const [A, B, C] = [
+      '10.1101/2024.05.01.000001',
+      '10.1101/2024.05.02.000002',
+      '10.1101/2024.05.03.000003',
+    ] as const;
+    /** The revisions `server` holds for `doi`. */
+    const held = (doi: string, server: string) => [{ doi, version: '1', server }];
+    /** A stubbed lookup that rejects with `error` once `ms` of (fake) time has passed. */
+    const failAfter = (ms: number, error: unknown) =>
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(error), ms));
+    /** What a lookup stopped by the call's budget reports. */
+    const DEADLINE_MESSAGE = 'The lookup exceeded its 50000ms retry deadline after 4 attempts.';
+
+    /** The leg signal each getDetails call was handed: by server, or by `server:doi`. */
+    let legSignals: Record<string, AbortSignal | undefined>;
+
+    /** A stubbed lookup, handed the signal it runs on and the deadline the handler passed. */
+    type LookupStub = (signal: AbortSignal, deadline: number) => Promise<unknown>;
+    /**
+     * A lookup against an origin that never answers, stopped by the retry
+     * ladder's expiry at the deadline the handler passed — so when it settles
+     * shows what budget the handler gave it.
+     */
+    const outlastsBudget: LookupStub = (signal, deadline) =>
+      neverAnswers(signal, deadline - Date.now());
+
+    /**
+     * Routes each getDetails call to the stub for its `server:doi` pair, recording
+     * the leg signal it was handed and running the stub on the signal the service
+     * itself would use — that one, or else `ctx.signal`.
+     */
+    const routeLookups = (stubs: Record<string, LookupStub>) =>
+      mockGetDetails.mockImplementation(
+        (
+          doi: string,
+          server: string,
+          deadline: number,
+          ctx: { signal: AbortSignal },
+          signal?: AbortSignal,
+        ) => {
+          const key = `${server}:${doi}`;
+          legSignals[key] = signal;
+          const stub = stubs[key];
+          if (!stub) throw new Error(`No stub for the ${key} lookup.`);
+          return stub(signal ?? ctx.signal, deadline);
+        },
+      );
+    /** The legs whose signal had aborted, as `server:doi` or server, sorted. */
+    const abortedLegs = () =>
+      Object.entries(legSignals)
+        .filter(([, signal]) => signal?.aborted)
+        .map(([leg]) => leg)
+        .sort();
+
+    const call = (
+      input: Record<string, unknown>,
+      ctx = createMockContext({ errors: biorxivGetPreprintTool.errors }),
+    ) =>
+      settle(
+        Promise.resolve(
+          biorxivGetPreprintTool.handler(biorxivGetPreprintTool.input.parse(input), ctx),
+        ),
+      );
+    const contractCall = async (input: Record<string, unknown>, signal?: AbortSignal) => {
+      const { value, elapsedMs } = await settle(
+        runToolContract(biorxivGetPreprintTool, input as never, {
+          context: { errors: biorxivGetPreprintTool.errors, ...(signal && { signal }) },
+        }),
+      );
+      const result = value as Awaited<ReturnType<typeof runToolContract>>;
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      return { result, text, elapsedMs };
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+      mockGetDetails.mockReset();
+      legSignals = {};
+    });
+    afterEach(() => vi.useRealTimers());
+
+    describe.each<[string, LegStub]>([
+      ['stalls', (signal) => neverAnswers(signal, CALL_BUDGET_MS)],
+      ['answers empty a second later', () => answerAfter(2_000, [])],
+      ['is rate-limited a second later', () => failAfter(2_000, rateLimitError(45))],
+    ])('while the server that does not hold the DOI %s', (_how, otherLeg) => {
+      it.each([
+        ['biorxiv', 'medrxiv'],
+        ['medrxiv', 'biorxiv'],
+      ])('settles the DOI the moment %s, the server holding it, answers', async (holder, other) => {
+        routeLegs(
+          mockGetDetails,
+          { [holder]: () => answerAfter(1_000, held(A, holder)), [other]: otherLeg },
+          legSignals,
+        );
+        const { value, elapsedMs } = await call({ dois: [A], server: 'both' });
+
+        expect(elapsedMs).toBe(1_000);
+        expect(value).toEqual({
+          preprints: [{ doi: A, revisions: held(A, holder) }],
+          failed: [],
+          unprocessed: [],
+        });
+        expect(mockGetDetails).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('aborts the lookup still running on the other server, never the one that answered or the caller', async () => {
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: () => answerAfter(1_000, held(A, 'biorxiv')),
+          medrxiv: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+        },
+        legSignals,
+      );
+      const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
+      await call({ dois: [A], server: 'both' }, ctx);
+
+      expect(legSignals.medrxiv?.aborted).toBe(true);
+      expect(legSignals.biorxiv?.aborted).toBe(false);
+      expect(ctx.signal.aborted).toBe(false);
+    });
+
+    it('settles every found DOI on its own holding server while the other server stalls on all of them, on both surfaces', async () => {
+      routeLookups({
+        [`biorxiv:${A}`]: () => answerAfter(1_000, held(A, 'biorxiv')),
+        [`medrxiv:${A}`]: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+        [`biorxiv:${B}`]: () => answerAfter(2_000, held(B, 'biorxiv')),
+        [`medrxiv:${B}`]: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+        [`biorxiv:${C}`]: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+        [`medrxiv:${C}`]: () => answerAfter(1_500, held(C, 'medrxiv')),
+      });
+      const { result, text, elapsedMs } = await contractCall({ dois: [A, B, C], server: 'both' });
+
+      expect(elapsedMs).toBe(2_000);
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({
+        preprints: [
+          { doi: A, revisions: held(A, 'biorxiv') },
+          { doi: B, revisions: held(B, 'biorxiv') },
+          { doi: C, revisions: held(C, 'medrxiv') },
+        ],
+        failed: [],
+        unprocessed: [],
+      });
+      expect(text).toContain('## Preprints (3)');
+      expect(text).toContain(`**DOI:** ${A}\n**Server:** biorxiv`);
+      expect(text).toContain(`**DOI:** ${B}\n**Server:** biorxiv`);
+      expect(text).toContain(`**DOI:** ${C}\n**Server:** medrxiv`);
+      expect(text).not.toContain('Failed DOIs');
+      // Each lookup on a server that does not hold its DOI was cut short; none that answered was.
+      expect(abortedLegs()).toEqual([`biorxiv:${C}`, `medrxiv:${A}`, `medrxiv:${B}`]);
+    });
+
+    it('waits for the server holding the DOI exactly as long as before when it answers last', async () => {
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: () => answerAfter(3_000, held(A, 'biorxiv')),
+          medrxiv: () => answerAfter(1_000, []),
+        },
+        legSignals,
+      );
+      const { value, elapsedMs } = await call({ dois: [A], server: 'both' });
+
+      expect(elapsedMs).toBe(3_000);
+      expect(value).toEqual({
+        preprints: [{ doi: A, revisions: held(A, 'biorxiv') }],
+        failed: [],
+        unprocessed: [],
+      });
+      expect(mockGetDetails).toHaveBeenCalledTimes(2);
+      // Both lookups had answered, so neither was cut short.
+      expect(legSignals.biorxiv?.aborted).toBe(false);
+      expect(legSignals.medrxiv?.aborted).toBe(false);
+    });
+
+    it('makes one lookup per DOI, settling when it answers, when the caller names one server', async () => {
+      routeLegs(
+        mockGetDetails,
+        { medrxiv: () => answerAfter(1_000, held(A, 'medrxiv')) },
+        legSignals,
+      );
+      const { value, elapsedMs } = await call({ dois: [A], server: 'medrxiv' });
+
+      expect(elapsedMs).toBe(1_000);
+      expect(mockGetDetails).toHaveBeenCalledTimes(1);
+      expect(value).toEqual({
+        preprints: [{ doi: A, revisions: held(A, 'medrxiv') }],
+        failed: [],
+        unprocessed: [],
+      });
+    });
+
+    describe('when no server holds the DOI, classification reads both answers', () => {
+      it.each<[string, LookupStub, LookupStub, number, Record<string, unknown>]>([
+        [
+          'both answered empty',
+          () => answerAfter(1_000, []),
+          () => answerAfter(3_000, []),
+          3_000,
+          {
+            doi: B,
+            error: 'Not found on bioRxiv or medRxiv.',
+            reason: 'not_found',
+            retryable: false,
+          },
+        ],
+        [
+          'one answered empty and the other ran out the call budget',
+          () => answerAfter(1_000, []),
+          outlastsBudget,
+          50_000,
+          {
+            doi: B,
+            error: `Lookup failed — medrxiv: ${DEADLINE_MESSAGE}`,
+            reason: 'upstream_unavailable',
+            retryable: true,
+          },
+        ],
+        [
+          'one answered empty and the other was rate-limited',
+          () => answerAfter(1_000, []),
+          () => failAfter(2_000, rateLimitError(30)),
+          2_000,
+          {
+            doi: B,
+            error: `Lookup failed — medrxiv: ${rateLimitError(30).message}`,
+            reason: 'rate_limited',
+            retryable: true,
+            retryAfter: 30,
+          },
+        ],
+        [
+          'both failed, one of them rate-limited',
+          () => failAfter(1_000, new Error('ECONNREFUSED')),
+          () => failAfter(2_000, rateLimitError(30)),
+          2_000,
+          {
+            doi: B,
+            error: `Lookup failed — biorxiv: ECONNREFUSED; medrxiv: ${rateLimitError(30).message}`,
+            reason: 'rate_limited',
+            retryable: true,
+            retryAfter: 30,
+          },
+        ],
+      ])(
+        'in failed[] when %s, on both surfaces',
+        async (_case, biorxiv, medrxiv, settledAt, entry) => {
+          routeLookups({
+            [`biorxiv:${A}`]: () => answerAfter(500, held(A, 'biorxiv')),
+            [`medrxiv:${A}`]: () => answerAfter(400, []),
+            [`biorxiv:${B}`]: biorxiv,
+            [`medrxiv:${B}`]: medrxiv,
+          });
+          const { result, text, elapsedMs } = await contractCall({ dois: [A, B], server: 'both' });
+
+          expect(elapsedMs).toBe(settledAt);
+          expect(result.structuredContent).toEqual({
+            preprints: [{ doi: A, revisions: held(A, 'biorxiv') }],
+            failed: [entry],
+            unprocessed: [],
+          });
+          const wait = entry.retryAfter === undefined ? '' : `, retry after: ${entry.retryAfter}s`;
+          expect(text).toContain(
+            `- **${B}**: ${String(entry.error)} (${String(entry.reason)}, retryable: ${String(entry.retryable)}${wait})`,
+          );
+          // Without a hit every lookup counts, so none was cut short.
+          expect(abortedLegs()).toEqual([]);
+        },
+      );
+
+      it.each<[string, LookupStub, LookupStub, number, number, Record<string, unknown>]>([
+        [
+          'both answered empty',
+          () => answerAfter(1_000, []),
+          () => answerAfter(3_000, []),
+          3_000,
+          JsonRpcErrorCode.NotFound,
+          { reason: 'doi_not_found' },
+        ],
+        [
+          'one answered empty and the other ran out the call budget',
+          () => answerAfter(1_000, []),
+          outlastsBudget,
+          50_000,
+          JsonRpcErrorCode.ServiceUnavailable,
+          { reason: 'upstream_unavailable', retryable: true },
+        ],
+        [
+          'one answered empty and the other was rate-limited',
+          () => answerAfter(1_000, []),
+          () => failAfter(2_000, rateLimitError(30)),
+          2_000,
+          JsonRpcErrorCode.RateLimited,
+          { reason: 'rate_limited', retryable: true, retryAfter: 30 },
+        ],
+      ])(
+        'in the batch error when %s for the only DOI',
+        async (_case, biorxiv, medrxiv, settledAt, code, data) => {
+          routeLookups({ [`biorxiv:${B}`]: biorxiv, [`medrxiv:${B}`]: medrxiv });
+          const { err, elapsedMs } = await call({ dois: [B], server: 'both' });
+
+          expect(elapsedMs).toBe(settledAt);
+          expect(err).toMatchObject({ code, data });
+          expect(abortedLegs()).toEqual([]);
+        },
+      );
+    });
+
+    it('still settles a caller cancellation as RequestCancelled after one DOI resolved and another is pending', async () => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('cancelled by caller')), 5_000);
+      routeLookups({
+        [`biorxiv:${A}`]: () => answerAfter(1_000, held(A, 'biorxiv')),
+        [`medrxiv:${A}`]: (signal) => neverAnswers(signal),
+        [`biorxiv:${B}`]: (signal) => neverAnswers(signal),
+        [`medrxiv:${B}`]: (signal) => neverAnswers(signal),
+      });
+      const { result, elapsedMs } = await contractCall(
+        { dois: [A, B], server: 'both' },
+        controller.signal,
+      );
+
+      expect(elapsedMs).toBe(5_000);
+      expect(result.isError).toBe(true);
+      // The caller's reason, never the pending lookup reported as an upstream failure.
+      expect(result.structuredContent).toEqual({
+        error: { code: JsonRpcErrorCode.RequestCancelled, message: 'cancelled by caller' },
+      });
+      expect(result.content).toEqual([{ type: 'text', text: 'Error: cancelled by caller' }]);
+    });
+
+    it('stops every lookup still running when the caller cancels', async () => {
+      const controller = new AbortController();
+      const cancelled = new Error('cancelled by caller');
+      setTimeout(() => controller.abort(cancelled), 5_000);
+      routeLegs(
+        mockGetDetails,
+        { biorxiv: (signal) => neverAnswers(signal), medrxiv: (signal) => neverAnswers(signal) },
+        legSignals,
+      );
+      const ctx = createMockContext({
+        errors: biorxivGetPreprintTool.errors,
+        signal: controller.signal,
+      });
+      const { err, elapsedMs } = await call({ dois: [A], server: 'both' }, ctx);
+
+      expect(elapsedMs).toBe(5_000);
+      expect(err).toBe(cancelled);
+      expect(abortedLegs()).toEqual(['biorxiv', 'medrxiv']);
+    });
+  });
+
   // ── Security ────────────────────────────────────────────────────────────────
 
   it('puts injection-attempt DOI into failed[] without calling service', async () => {
@@ -462,6 +1313,7 @@ describe('biorxivGetPreprintTool', () => {
     const output = {
       preprints: [{ doi: '10.1101/2024.01.15.575123', revisions: [REVISION] }],
       failed: [],
+      unprocessed: [],
     };
     const blocks = biorxivGetPreprintTool.format!(output);
     expect(blocks[0]?.type).toBe('text');
@@ -482,6 +1334,7 @@ describe('biorxivGetPreprintTool', () => {
           retryable: false,
         },
       ],
+      unprocessed: [],
     };
     const blocks = biorxivGetPreprintTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -506,6 +1359,7 @@ describe('biorxivGetPreprintTool', () => {
           retryable: true,
         },
       ],
+      unprocessed: [],
     };
     const blocks = biorxivGetPreprintTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -527,6 +1381,7 @@ describe('biorxivGetPreprintTool', () => {
     const output = {
       preprints: [{ doi: '10.1101/2024.01.15.575123', revisions: [richRevision] }],
       failed: [],
+      unprocessed: [],
     };
     const blocks = biorxivGetPreprintTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -568,6 +1423,7 @@ describe('biorxivGetPreprintTool', () => {
     const output = {
       preprints: [{ doi: '10.1101/2023.09.16.558066', revisions: [v1, v2] }],
       failed: [],
+      unprocessed: [],
     };
     const blocks = biorxivGetPreprintTool.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -662,6 +1518,7 @@ describe('biorxivGetPreprintTool', () => {
       const blocks = biorxivGetPreprintTool.format!({
         preprints: [{ doi: IDENTIFIERS.doi, revisions: [{ doi: IDENTIFIERS.doi }] }],
         failed: [],
+        unprocessed: [],
       });
       expect((blocks[0] as { text: string }).text).toContain(`### ${IDENTIFIERS.doi}\n`);
     });

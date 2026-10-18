@@ -29,7 +29,15 @@ const mockFetch = vi.fn();
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
   fetchWithTimeout: (...args: unknown[]) => mockFetch(...args),
-  withRetry: async (fn: () => Promise<unknown>) => fn(),
+  // One unbounded attempt, handed the attempt shape the services read.
+  withRetry: async (
+    fn: (attempt: { signal: AbortSignal; remainingMs: number }) => Promise<unknown>,
+    options?: { signal?: AbortSignal },
+  ) =>
+    fn({
+      signal: options?.signal ?? new AbortController().signal,
+      remainingMs: Number.POSITIVE_INFINITY,
+    }),
 }));
 
 vi.mock('@/config/server-config.js', () => ({

@@ -5,7 +5,8 @@
  * publications by publication-date interval (/pubs with date interval). Owns the
  * category taxonomy and the API's category spelling, and flags a listing whose
  * category filter the API ignored or whose funder ROR ID it does not know. All
- * methods retry with exponential backoff. Parses and normalizes raw JSON into
+ * methods retry with exponential backoff inside the calling tool's deadline,
+ * which bounds every attempt and backoff. Parses and normalizes raw JSON into
  * domain types, keeping a record's funder awards but not its misattributed
  * funder names and ROR IDs. Detects HTML error pages, and
  * classifies an origin rate limit (HTTP 429) as its own retryable
@@ -18,13 +19,15 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { McpError, rateLimited, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
+  type CallDeadline,
   describeWait,
   detectHtmlError,
   normalizeUpstreamText,
   parseRetryAfterSeconds,
+  retryWithinBudget,
   SERVER_VERSION,
 } from '@/services/shared.js';
 import type {
@@ -182,7 +185,9 @@ const EXPECTED_STATUSES = [429];
  * rather than spread: only the parsed `Retry-After` crosses into it. Retry is
  * not this function's concern — `withRetry` already honors `data.retryAfter`
  * and fails fast when the requested wait exceeds its cap, so by the time a 429
- * reaches here the waiting is over and only classification is left.
+ * reaches here the waiting is over and only classification is left. A 429 the
+ * budget ran out after arrives here too, in place of the expiry
+ * (`retryWithinBudget`), and is classified the same.
  */
 function rethrowClassified(err: unknown): never {
   const data =
@@ -273,14 +278,6 @@ function parseCount(raw: number | string | undefined): number | undefined {
   return Number.isInteger(value) ? value : undefined;
 }
 
-/**
- * Total budget for one interval-listing call — every attempt, backoff, and
- * honored `Retry-After` — kept under the 60-second request timeout MCP SDK
- * clients default to, so a hung origin surfaces as this server's classified
- * error rather than a client-side transport timeout.
- */
-const LISTING_DEADLINE_MS = 50_000;
-
 // ─── Service class ───────────────────────────────────────────────────────────
 
 export class BiorxivApiService {
@@ -317,15 +314,24 @@ export class BiorxivApiService {
    * Fetch all revisions for a DOI from a single server.
    * Returns an empty collection if the DOI is not found on this server.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
+   * `signal` stops the lookup when it aborts — a fan-out leg's own signal, so
+   * one leg can be cut short without cancelling the call; it defaults to the
+   * caller's `ctx.signal`.
    */
-  async getDetails(doi: string, server: BiorxivServer, ctx: Context): Promise<PreprintRevision[]> {
+  async getDetails(
+    doi: string,
+    server: BiorxivServer,
+    deadline: CallDeadline,
+    ctx: Context,
+    signal: AbortSignal = ctx.signal,
+  ): Promise<PreprintRevision[]> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const url = `${this.baseUrl}/details/${server}/${encodedDoi}/0/json`;
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetchWithTimeout(url, 15_000, ctx, {
-            signal: ctx.signal,
+      return await retryWithinBudget(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(url, Math.min(15_000, remainingMs), ctx, {
+            signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
           });
@@ -343,7 +349,8 @@ export class BiorxivApiService {
           operation: 'BiorxivApiService.getDetails',
           context: ctx,
           baseDelayMs: 500,
-          signal: ctx.signal,
+          signal,
+          deadline,
         },
       );
     } catch (err) {
@@ -368,6 +375,7 @@ export class BiorxivApiService {
     endDate: string,
     cursor: number,
     filters: ListingFilters,
+    deadline: CallDeadline,
     ctx: Context,
   ): Promise<ListingResult> {
     const { category, funder } = filters;
@@ -379,10 +387,10 @@ export class BiorxivApiService {
     if (query.length > 0) url += `?${query.join('&')}`;
 
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetchWithTimeout(url, 20_000, ctx, {
-            signal: ctx.signal,
+      return await retryWithinBudget(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(url, Math.min(20_000, remainingMs), ctx, {
+            signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
           });
@@ -417,6 +425,7 @@ export class BiorxivApiService {
           context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
+          deadline,
         },
       );
     } catch (err) {
@@ -429,15 +438,22 @@ export class BiorxivApiService {
    * Returns undefined when the preprint is not yet published — and for every
    * `10.64898/` DOI, which this path form never parses (see
    * {@link getPublishedVersionByJournalDoi} for the lookup that does resolve them).
+   * The record lives on the server that holds the preprint: the other server
+   * answers an empty collection.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
+   * `signal` stops the lookup when it aborts, as on {@link getDetails}.
    */
   async getPublishedVersion(
     doi: string,
     server: BiorxivServer,
+    deadline: CallDeadline,
     ctx: Context,
+    signal: AbortSignal = ctx.signal,
   ): Promise<PublishedVersion | undefined> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
-    const record = (await this.fetchCrosswalk(encodedDoi, server, 'getPublishedVersion', ctx))[0];
+    const record = (
+      await this.fetchCrosswalk(encodedDoi, server, 'getPublishedVersion', deadline, ctx, signal)
+    )[0];
     return record ? normalizePublished(record) : undefined;
   }
 
@@ -457,6 +473,7 @@ export class BiorxivApiService {
     journalDoi: string,
     preprintDoi: string,
     server: BiorxivServer,
+    deadline: CallDeadline,
     ctx: Context,
   ): Promise<PublishedVersion | undefined> {
     const [registrant = '', ...suffix] = journalDoi.split('/');
@@ -466,7 +483,9 @@ export class BiorxivApiService {
       encodedDoi,
       server,
       'getPublishedVersionByJournalDoi',
+      deadline,
       ctx,
+      ctx.signal,
     );
     const record = records.find((r) => r.preprint_doi?.toLowerCase() === wanted);
     return record ? normalizePublished(record) : undefined;
@@ -474,15 +493,14 @@ export class BiorxivApiService {
 
   /**
    * List the preprints published as journal articles within a journal
-   * publication-date interval on a single server, 100 rows per page from
-   * `cursor`, a plain row offset. Upstream answers an empty interval and a
-   * cursor at or past the last row alike — "no articles found", no total — so
-   * `total` is absent whenever the page is empty, and only the caller knows
-   * which of the two it asked for. A row naming no preprint is dropped, so
-   * `rowCount` — every row upstream returned — is what a cursor advances by.
-   *
-   * One deadline bounds every attempt and backoff, so a hung origin settles
-   * the call before an MCP client's 60-second request timeout.
+   * publication-date interval on a single server: the first `limit` rows of
+   * the 100-row page upstream serves from `cursor`, a plain row offset. The API
+   * takes no page-size parameter, so the slice is taken here, on upstream rows.
+   * Upstream answers an empty interval and a cursor at or past the last row
+   * alike — "no articles found", no total — so `total` is absent whenever the
+   * page is empty, and only the caller knows which of the two it asked for. A
+   * row naming no preprint is dropped after the slice, so `rowCount` — every
+   * row the slice served — is what a cursor advances by.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getPublishedListing(
@@ -490,11 +508,13 @@ export class BiorxivApiService {
     startDate: string,
     endDate: string,
     cursor: number,
+    limit: number,
+    deadline: CallDeadline,
     ctx: Context,
   ): Promise<PublishedListingResult> {
     const url = `${this.baseUrl}/pubs/${server}/${startDate}/${endDate}/${cursor}/json`;
     try {
-      return await withRetry(
+      return await retryWithinBudget(
         async ({ signal, remainingMs }) => {
           const response = await fetchWithTimeout(url, Math.min(20_000, remainingMs), ctx, {
             signal,
@@ -509,7 +529,7 @@ export class BiorxivApiService {
             );
           }
           const data = JSON.parse(text) as RawPublishedResponse;
-          const rows = data.collection ?? [];
+          const rows = (data.collection ?? []).slice(0, limit);
           const publications = rows.flatMap((record) => normalizePublished(record) ?? []);
           const total = parseCount(data.messages?.[0]?.total);
           return {
@@ -523,7 +543,7 @@ export class BiorxivApiService {
           context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
-          deadlineMs: LISTING_DEADLINE_MS,
+          deadline,
         },
       );
     } catch (err) {
@@ -531,19 +551,24 @@ export class BiorxivApiService {
     }
   }
 
-  /** Fetch the raw `/pubs/{server}/{key}` collection, keyed by an already path-encoded DOI. */
+  /**
+   * Fetch the raw `/pubs/{server}/{key}` collection, keyed by an already
+   * path-encoded DOI; `signal` stops the lookup when it aborts.
+   */
   private async fetchCrosswalk(
     encodedKey: string,
     server: BiorxivServer,
     operation: string,
+    deadline: CallDeadline,
     ctx: Context,
+    signal: AbortSignal,
   ): Promise<RawPublishedRecord[]> {
     const url = `${this.baseUrl}/pubs/${server}/${encodedKey}/json`;
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetchWithTimeout(url, 15_000, ctx, {
-            signal: ctx.signal,
+      return await retryWithinBudget(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(url, Math.min(15_000, remainingMs), ctx, {
+            signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
           });
@@ -560,7 +585,8 @@ export class BiorxivApiService {
           operation: `BiorxivApiService.${operation}`,
           context: ctx,
           baseDelayMs: 500,
-          signal: ctx.signal,
+          signal,
+          deadline,
         },
       );
     } catch (err) {

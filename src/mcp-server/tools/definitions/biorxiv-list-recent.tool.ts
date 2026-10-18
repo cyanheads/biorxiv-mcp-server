@@ -39,6 +39,7 @@ import {
   findRateLimit,
   isValidCalendarDate,
   normalizeRorId,
+  startCallDeadline,
 } from '@/services/shared.js';
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -327,6 +328,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       );
     }
     const filters = { category, funder };
+    const deadline = startCallDeadline();
 
     type PaginationEntry = {
       cursor: number;
@@ -344,6 +346,29 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     // Raw rejection values alongside failed[], so the all-failed branch can tell
     // a rate limit from a generic outage and preserve the original as `cause`.
     const rejections: unknown[] = [];
+
+    // No server returned a usable page. A rate limit outranks a generic outage:
+    // both say "retry", but only one says when, and retrying sooner would land
+    // inside the same limit.
+    const unanswered = (message: string, servers: BiorxivServer[]) => {
+      const rateLimit = findRateLimit(rejections);
+      if (rateLimit) {
+        const wait = describeWait(rateLimit.retryAfter);
+        return ctx.fail(
+          'rate_limited',
+          message,
+          {
+            servers,
+            ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
+            recovery: {
+              hint: `Wait ${wait} before retrying — api.biorxiv.org is rate-limiting this host, and every preprint metadata tool queries the same origin.`,
+            },
+          },
+          { cause: rejections[0] },
+        );
+      }
+      return ctx.fail('upstream_unavailable', message, { servers }, { cause: rejections[0] });
+    };
 
     // ctx.enrich.notice is last-wins, so every qualification that applies to this
     // result set is collected here and flushed as one string before returning.
@@ -418,14 +443,24 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     const singleServer = exclusiveServer ?? (target === 'both' ? undefined : target);
 
     if (singleServer) {
-      const r = await service.getListing(
-        singleServer,
-        input.start_date,
-        input.end_date,
-        input.cursor,
-        filters,
-        ctx,
-      );
+      const r = await service
+        .getListing(
+          singleServer,
+          input.start_date,
+          input.end_date,
+          input.cursor,
+          filters,
+          deadline,
+          ctx,
+        )
+        .catch((err: unknown) => {
+          // A listing the caller's cancellation stopped is that cancellation.
+          ctx.signal.throwIfAborted();
+          rejections.push(err);
+          throw unanswered(`${SERVER_LABEL[singleServer]} did not answer — ${errorMessage(err)}`, [
+            singleServer,
+          ]);
+        });
       // No funder record means no filter was applied at all — the empty page
       // says nothing about what the funder posted.
       if (r.funderNotFound) {
@@ -449,9 +484,19 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       // A funder filter never reaches this branch — it narrows the call to bioRxiv.
       const settled = await Promise.allSettled(
         SERVERS.map((server) =>
-          service.getListing(server, input.start_date, input.end_date, input.cursor, filters, ctx),
+          service.getListing(
+            server,
+            input.start_date,
+            input.end_date,
+            input.cursor,
+            filters,
+            deadline,
+            ctx,
+          ),
         ),
       );
+      // A cancelled call is not a partial result, whichever leg the abort reached first.
+      ctx.signal.throwIfAborted();
 
       // Servers that answered but ignored the category filter — their pages are
       // unfiltered, so they are left out rather than mixed in with filtered ones.
@@ -488,30 +533,12 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
           ...failed.map((f) => `${SERVER_LABEL[f.server]}: ${f.error}`),
           ...ignored.map((s) => `${SERVER_LABEL[s]} ignored the category filter "${category}"`),
         ].join('; ');
-        const message =
+        throw unanswered(
           ignored.length === 0
             ? `Neither bioRxiv nor medRxiv answered — ${detail}`
-            : `No server returned a usable page — ${detail}`;
-        const servers = failed.map((f) => f.server);
-        // A rate limit outranks a generic outage: both say "retry", but only one
-        // says when, and retrying sooner would land inside the same limit.
-        const rateLimit = findRateLimit(rejections);
-        if (rateLimit) {
-          const wait = describeWait(rateLimit.retryAfter);
-          throw ctx.fail(
-            'rate_limited',
-            message,
-            {
-              servers,
-              ...(rateLimit.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
-              recovery: {
-                hint: `Wait ${wait} before retrying — api.biorxiv.org is rate-limiting this host, and every preprint metadata tool queries the same origin.`,
-              },
-            },
-            { cause: rejections[0] },
-          );
-        }
-        throw ctx.fail('upstream_unavailable', message, { servers }, { cause: rejections[0] });
+            : `No server returned a usable page — ${detail}`,
+          failed.map((f) => f.server),
+        );
       }
 
       // A server that never answered contributes no pagination entry, so nothing

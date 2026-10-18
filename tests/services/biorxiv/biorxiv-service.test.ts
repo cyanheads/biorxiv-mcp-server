@@ -11,7 +11,13 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
-import { findRateLimit } from '@/services/shared.js';
+import {
+  CALL_BUDGET_MS,
+  type CallDeadline,
+  findRateLimit,
+  startCallDeadline,
+} from '@/services/shared.js';
+import { type FetchCall, hungOrigin, settle, slowOrigin } from '../../helpers/call-budget.js';
 import {
   MEDRXIV_C100_ROWS,
   NO_ARTICLES,
@@ -99,27 +105,43 @@ function httpError(status: number, retryAfter?: string): McpError {
   });
 }
 
-/** Every call BiorxivApiService makes against api.biorxiv.org, by name. */
+type Ctx = ReturnType<typeof createMockContext>;
+
+/**
+ * Every call BiorxivApiService makes against api.biorxiv.org, by name. The
+ * deadline defaults to a fresh call budget.
+ */
 const API_CALLS = {
-  getDetails: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
-    s.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx),
-  getListing: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
-    s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx),
-  getPublishedListing: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
-    s.getPublishedListing('biorxiv', '2026-09-01', '2026-09-07', 0, ctx),
-  getPublishedVersion: (s: BiorxivApiService, ctx: ReturnType<typeof createMockContext>) =>
-    s.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
+  getDetails: (s: BiorxivApiService, ctx: Ctx, deadline = startCallDeadline()) =>
+    s.getDetails('10.1101/2024.01.15.575123', 'biorxiv', deadline, ctx),
+  getListing: (s: BiorxivApiService, ctx: Ctx, deadline = startCallDeadline()) =>
+    s.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, deadline, ctx),
+  getPublishedListing: (s: BiorxivApiService, ctx: Ctx, deadline = startCallDeadline()) =>
+    s.getPublishedListing('biorxiv', '2026-09-01', '2026-09-07', 0, 25, deadline, ctx),
+  getPublishedVersion: (s: BiorxivApiService, ctx: Ctx, deadline = startCallDeadline()) =>
+    s.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', deadline, ctx),
   getPublishedVersionByJournalDoi: (
     s: BiorxivApiService,
-    ctx: ReturnType<typeof createMockContext>,
+    ctx: Ctx,
+    deadline = startCallDeadline(),
   ) =>
     s.getPublishedVersionByJournalDoi(
       '10.1017/S0033291726104693',
       '10.64898/2026.01.07.26343585',
       'medrxiv',
+      deadline,
       ctx,
     ),
 } as const;
+
+/** The timeout each call gives one attempt while the call budget leaves more. */
+const ATTEMPT_TIMEOUT_MS: Record<keyof typeof API_CALLS, number> = {
+  getDetails: 15_000,
+  getListing: 20_000,
+  getPublishedListing: 20_000,
+  getPublishedVersion: 15_000,
+  getPublishedVersionByJournalDoi: 15_000,
+};
 
 const MOCK_CONFIG = {} as AppConfig;
 const MOCK_STORAGE = {} as StorageService;
@@ -154,7 +176,12 @@ describe('BiorxivApiService', () => {
       );
 
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions).toHaveLength(1);
       expect(revisions[0]?.doi).toBe('10.1101/2024.01.15.575123');
       expect(revisions[0]?.title).toBe('Test Preprint');
@@ -165,7 +192,12 @@ describe('BiorxivApiService', () => {
     it('returns empty array when DOI not found', async () => {
       mockFetch.mockResolvedValue(makeResponse({ collection: [] }));
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.01.000001', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.01.000001',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions).toHaveLength(0);
     });
 
@@ -176,7 +208,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions[0]?.title).toBeUndefined();
       expect(revisions[0]?.abstract).toBeUndefined();
       expect(revisions[0]?.authors).toBeUndefined();
@@ -190,7 +227,12 @@ describe('BiorxivApiService', () => {
           makeResponse({ collection: [{ doi: '10.1101/2025.06.23.661133', funder }] }),
         );
         return (
-          await service.getDetails('10.1101/2025.06.23.661133', 'biorxiv', createMockContext())
+          await service.getDetails(
+            '10.1101/2025.06.23.661133',
+            'biorxiv',
+            startCallDeadline(),
+            createMockContext(),
+          )
         )[0];
       };
 
@@ -257,7 +299,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions[0]?.publishedJournalDoi).toBe('10.1038/s41586-024-00001-0');
     });
 
@@ -269,7 +316,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions[0]?.jatsxmlUrl).toBe(jatsUrl);
     });
 
@@ -286,7 +338,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions[0]?.authorCorresponding).toBe('Smith J');
       expect(revisions[0]?.authorCorrespondingInstitution).toBe('MIT');
     });
@@ -295,8 +352,8 @@ describe('BiorxivApiService', () => {
       mockFetch.mockResolvedValue(makeHtmlResponse());
       const ctx = createMockContext();
       await expect(
-        service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx),
-      ).rejects.toThrow();
+        service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', startCallDeadline(), ctx),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
     });
 
     it('returns all revisions when collection has multiple entries', async () => {
@@ -309,7 +366,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions).toHaveLength(2);
     });
 
@@ -327,7 +389,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const revisions = await service.getDetails('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const revisions = await service.getDetails(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revisions[0]?.title).toBe('Editing Staphylococcus aureus genomes');
       expect(revisions[0]?.abstract).toBe('We report a method.');
       expect(revisions[0]?.abstract).not.toMatch(/O_FIG|C_FIG|SRC=|org\.highwire|SCPLOW/);
@@ -350,7 +417,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const [revision] = await service.getDetails('10.64898/2026.08.30.26361755', 'biorxiv', ctx);
+      const [revision] = await service.getDetails(
+        '10.64898/2026.08.30.26361755',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(revision?.title).toBe('ΦXacm4-11 infection dynamics');
       expect(revision?.abstract).toBe(
         'Structured abstract Background: Pro-inflammatory diets threaten health. Methods: We held energy within ±3% and protein ≥98% of baseline. Results: sDII was weakly associated with GHG (Spearman ρ=0.14). Key messages: • Footprints are decoupled (|ρ|≤0.30). • The reduction is small (∼1.1%).',
@@ -371,7 +443,15 @@ describe('BiorxivApiService', () => {
       );
 
       const ctx = createMockContext();
-      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
+      const result = await service.getListing(
+        'biorxiv',
+        '2024-01-01',
+        '2024-01-31',
+        0,
+        {},
+        startCallDeadline(),
+        ctx,
+      );
       expect(result.preprints).toHaveLength(1);
       expect(result.pagination.total).toBe(100);
       expect(result.pagination.cursor).toBe(0);
@@ -386,7 +466,15 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
+      const result = await service.getListing(
+        'biorxiv',
+        '2024-01-01',
+        '2024-01-31',
+        0,
+        {},
+        startCallDeadline(),
+        ctx,
+      );
       expect(result.pagination.total).toBe(915);
     });
 
@@ -397,14 +485,30 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
+      const result = await service.getListing(
+        'biorxiv',
+        '2024-01-01',
+        '2024-01-31',
+        0,
+        {},
+        startCallDeadline(),
+        ctx,
+      );
       expect(result.pagination.total).toBe(0);
     });
 
     it('returns empty preprints when collection is absent', async () => {
       mockFetch.mockResolvedValue(makeResponse({ messages: [{ total: 0, cursor: 0 }] }));
       const ctx = createMockContext();
-      const result = await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx);
+      const result = await service.getListing(
+        'biorxiv',
+        '2024-01-01',
+        '2024-01-31',
+        0,
+        {},
+        startCallDeadline(),
+        ctx,
+      );
       expect(result.preprints).toHaveLength(0);
     });
 
@@ -413,7 +517,15 @@ describe('BiorxivApiService', () => {
         makeResponse({ messages: [{ total: 30, cursor: 30 }], collection: [] }),
       );
       const ctx = createMockContext();
-      await service.getListing('biorxiv', '2024-01-01', '2024-01-31', 30, {}, ctx);
+      await service.getListing(
+        'biorxiv',
+        '2024-01-01',
+        '2024-01-31',
+        30,
+        {},
+        startCallDeadline(),
+        ctx,
+      );
       // URL should contain the offset
       const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
       expect(calledUrl).toContain('/30/');
@@ -428,6 +540,7 @@ describe('BiorxivApiService', () => {
         '2024-01-31',
         0,
         { category: 'Neuroscience' },
+        startCallDeadline(),
         ctx,
       );
       const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
@@ -438,8 +551,8 @@ describe('BiorxivApiService', () => {
       mockFetch.mockResolvedValue(makeHtmlResponse());
       const ctx = createMockContext();
       await expect(
-        service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, ctx),
-      ).rejects.toThrow();
+        service.getListing('biorxiv', '2024-01-01', '2024-01-31', 0, {}, startCallDeadline(), ctx),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
     });
   });
 
@@ -461,7 +574,12 @@ describe('BiorxivApiService', () => {
       );
 
       const ctx = createMockContext();
-      const result = await service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const result = await service.getPublishedVersion(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(result?.preprintDoi).toBe('10.1101/2024.01.15.575123');
       expect(result?.publishedJournal).toBe('Nature');
     });
@@ -469,14 +587,24 @@ describe('BiorxivApiService', () => {
     it('returns undefined when preprint is not yet published', async () => {
       mockFetch.mockResolvedValue(makeResponse({ collection: [] }));
       const ctx = createMockContext();
-      const result = await service.getPublishedVersion('10.1101/2024.01.01.000001', 'biorxiv', ctx);
+      const result = await service.getPublishedVersion(
+        '10.1101/2024.01.01.000001',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(result).toBeUndefined();
     });
 
     it('returns undefined when collection record lacks preprint_doi', async () => {
       mockFetch.mockResolvedValue(makeResponse({ collection: [{ published_doi: '10.1038/xxx' }] }));
       const ctx = createMockContext();
-      const result = await service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const result = await service.getPublishedVersion(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(result).toBeUndefined();
     });
 
@@ -501,7 +629,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const result = await service.getPublishedVersion(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(result?.preprintTitle).toBe('Test Title');
       expect(result?.preprintAuthors).toBe('Smith J');
       expect(result?.preprintCategory).toBe('Neuroscience');
@@ -525,7 +658,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx);
+      const result = await service.getPublishedVersion(
+        '10.1101/2024.01.15.575123',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(result?.preprintTitle).toBe('CO2 fixation in E. coli');
       expect(result?.preprintAbstract).toBe('Carbon fixation is central to metabolism.');
     });
@@ -546,7 +684,12 @@ describe('BiorxivApiService', () => {
         }),
       );
       const ctx = createMockContext();
-      const result = await service.getPublishedVersion('10.1101/2020.04.14.040204', 'biorxiv', ctx);
+      const result = await service.getPublishedVersion(
+        '10.1101/2020.04.14.040204',
+        'biorxiv',
+        startCallDeadline(),
+        ctx,
+      );
       expect(result?.preprintTitle).toBe('TGFβ signaling after ΔF508 correction');
       expect(result?.preprintAbstract).toBe(
         'Relapse is reported in some, thought to be cured, patients.',
@@ -557,8 +700,13 @@ describe('BiorxivApiService', () => {
       mockFetch.mockResolvedValue(makeHtmlResponse());
       const ctx = createMockContext();
       await expect(
-        service.getPublishedVersion('10.1101/2024.01.15.575123', 'biorxiv', ctx),
-      ).rejects.toThrow();
+        service.getPublishedVersion(
+          '10.1101/2024.01.15.575123',
+          'biorxiv',
+          startCallDeadline(),
+          ctx,
+        ),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
     });
 
     // The DOI-keyed form shares the `/pubs` envelope type with the interval
@@ -575,6 +723,7 @@ describe('BiorxivApiService', () => {
         '10.1038/s41467-026-77129-4',
         '10.64898/2026.01.10.693661',
         'biorxiv',
+        startCallDeadline(),
         createMockContext(),
       );
       expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
@@ -594,6 +743,7 @@ describe('BiorxivApiService', () => {
       const result = await service.getPublishedVersion(
         '10.64898/2026.01.10.693661',
         'biorxiv',
+        startCallDeadline(),
         createMockContext(),
       );
       expect(result).toBeUndefined();
@@ -603,8 +753,86 @@ describe('BiorxivApiService', () => {
   // ── getPublishedListing ─────────────────────────────────────────────────────
 
   describe('getPublishedListing', () => {
-    const list = (server: 'biorxiv' | 'medrxiv', cursor: number) =>
-      service.getPublishedListing(server, '2026-09-01', '2026-09-07', cursor, createMockContext());
+    /** `limit` defaults to the whole 100-row upstream page. */
+    const list = (server: 'biorxiv' | 'medrxiv', cursor: number, limit = 100) =>
+      service.getPublishedListing(
+        server,
+        '2026-09-01',
+        '2026-09-07',
+        cursor,
+        limit,
+        startCallDeadline(),
+        createMockContext(),
+      );
+
+    /** A full 100-row upstream page, its preprint DOIs numbered from `from`. */
+    const fullPage = (from: number) =>
+      Array.from({ length: 100 }, (_, i) => ({
+        ...PUBS_ROW_64898,
+        preprint_doi: `10.64898/2026.01.01.${700000 + from + i}`,
+      }));
+
+    const pageResponse = (collection: object[], total = '449') =>
+      makeResponse({ messages: [{ status: 'ok', total }], collection });
+
+    it('serves the first `limit` rows of the upstream page and sends no size upstream', async () => {
+      const raw = fullPage(0);
+      mockFetch.mockResolvedValue(pageResponse(raw));
+      const result = await list('biorxiv', 0, 25);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/biorxiv/2026-09-01/2026-09-07/0/json',
+      );
+      expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+        raw.slice(0, 25).map((r) => r.preprint_doi),
+      );
+      expect(result.rowCount).toBe(25);
+      expect(result.pagination).toEqual({ cursor: 0, total: 449 });
+    });
+
+    it.each([
+      [1, 1],
+      [99, 99],
+      [100, 100],
+      [101, 100],
+      [1000, 100],
+    ])('limit %i serves %i rows of a 100-row page', async (limit, served) => {
+      const raw = fullPage(0);
+      mockFetch.mockResolvedValue(pageResponse(raw));
+      const result = await list('biorxiv', 0, limit);
+      expect(result.rowCount).toBe(served);
+      expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+        raw.slice(0, served).map((r) => r.preprint_doi),
+      );
+    });
+
+    it('serves a short last page whole when limit reaches past it', async () => {
+      mockFetch.mockResolvedValue(pageResponse(MEDRXIV_C100_ROWS, '103'));
+      const result = await list('medrxiv', 100, 25);
+      expect(result.rowCount).toBe(3);
+      expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+        MEDRXIV_C100_ROWS.map((r) => r.preprint_doi),
+      );
+    });
+
+    // The slice is of upstream rows: a dropped row inside it still occupies its
+    // offset, and the row just past it is never read, so nextCursor (cursor +
+    // rowCount) lands on the first row this page did not serve.
+    it('slices upstream rows before dropping one that names no preprint', async () => {
+      const raw = fullPage(0);
+      raw[10] = { ...raw[10], preprint_doi: '' } as (typeof raw)[number];
+      mockFetch.mockResolvedValue(pageResponse(raw));
+      const result = await list('biorxiv', 0, 25);
+      expect(result.rowCount).toBe(25);
+      expect(result.publications).toHaveLength(24);
+      expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+        raw
+          .slice(0, 25)
+          .filter((_, i) => i !== 10)
+          .map((r) => r.preprint_doi),
+      );
+      expect(result.publications.map((p) => p.preprintDoi)).not.toContain(raw[25]?.preprint_doi);
+    });
 
     it('requests the interval page and parses the string total (live page-0 envelope)', async () => {
       mockFetch.mockResolvedValue(
@@ -729,71 +957,251 @@ describe('BiorxivApiService', () => {
         code: JsonRpcErrorCode.ServiceUnavailable,
       });
     });
+  });
 
-    it.each([
-      ['20 s while the deadline leaves more', Number.POSITIVE_INFINITY, 20_000],
-      ['the time the deadline has left once it is under 20 s', 7_000, 7_000],
-    ])('bounds an attempt at %s, on the attempt signal', async (_label, remainingMs, expected) => {
-      const attempt = new AbortController();
-      retry.impl = (fn) => fn({ signal: attempt.signal, remainingMs });
-      mockFetch.mockResolvedValue(makeResponse({ messages: [NO_ARTICLES] }));
-      await list('biorxiv', 0);
-      const [, timeoutMs, , options] = mockFetch.mock.calls[0] as [
-        string,
-        number,
-        unknown,
-        { signal?: AbortSignal },
-      ];
-      expect(timeoutMs).toBe(expected);
-      // The attempt's own signal, which the deadline aborts — not the caller's.
-      expect(options.signal).toBe(attempt.signal);
-    });
+  // ── The call budget ─────────────────────────────────────────────────────────
+
+  describe('call budget', () => {
+    it.each(Object.entries(API_CALLS))(
+      '%s bounds an attempt at its own timeout while the budget leaves more, on the attempt signal',
+      async (name, call) => {
+        const attempt = new AbortController();
+        retry.impl = (fn) => fn({ signal: attempt.signal, remainingMs: Number.POSITIVE_INFINITY });
+        mockFetch.mockResolvedValue(makeResponse({ messages: [NO_ARTICLES] }));
+        const ctx = createMockContext();
+        await call(service, ctx);
+        const [, timeoutMs, , options] = mockFetch.mock.calls[0] as FetchCall;
+        expect(timeoutMs).toBe(ATTEMPT_TIMEOUT_MS[name as keyof typeof API_CALLS]);
+        // The attempt's own signal, which the deadline aborts — not the caller's.
+        expect(options.signal).toBe(attempt.signal);
+        expect(options.signal).not.toBe(ctx.signal);
+      },
+    );
+
+    it.each(Object.entries(API_CALLS))(
+      '%s bounds an attempt at what the budget has left once that is less than its own timeout',
+      async (_name, call) => {
+        const attempt = new AbortController();
+        retry.impl = (fn) => fn({ signal: attempt.signal, remainingMs: 7_000 });
+        mockFetch.mockResolvedValue(makeResponse({ messages: [NO_ARTICLES] }));
+        await call(service, createMockContext());
+        const [, timeoutMs] = mockFetch.mock.calls[0] as FetchCall;
+        expect(timeoutMs).toBe(7_000);
+      },
+    );
 
     describe('against an origin that never answers', () => {
+      let origin: ReturnType<typeof hungOrigin>;
+
       beforeEach(async () => {
         vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
         const { withRetry } = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
           '@cyanheads/mcp-ts-core/utils',
         );
         retry.impl = withRetry as RetryFn;
-        // Each attempt hangs until its own timeout or the attempt signal fires,
-        // as fetchWithTimeout does against an origin that accepts and stalls.
-        mockFetch.mockImplementation(
-          (_url: string, timeoutMs: number, _ctx: unknown, options: { signal: AbortSignal }) =>
-            new Promise((_resolve, reject) => {
-              const timer = setTimeout(
-                () => reject(new McpError(JsonRpcErrorCode.Timeout, 'attempt timed out')),
-                timeoutMs,
-              );
-              options.signal.addEventListener('abort', () => {
-                clearTimeout(timer);
-                reject(new McpError(JsonRpcErrorCode.Timeout, 'attempt aborted'));
-              });
-            }),
-        );
+        origin = hungOrigin();
+        mockFetch.mockImplementation(origin.fetch);
       });
 
       afterEach(() => {
         vi.useRealTimers();
       });
 
-      it('settles inside one 50 s budget, under a client 60 s request timeout', async () => {
-        const started = Date.now();
-        let settledAt: number | undefined;
-        const call = list('biorxiv', 0).catch((err: unknown) => {
-          settledAt = Date.now();
-          return err;
-        });
-        await vi.advanceTimersByTimeAsync(90_000);
-        const err = await call;
+      it.each(Object.entries(API_CALLS))(
+        '%s settles inside the 50 s call budget, under a client 60 s request timeout',
+        async (_name, call) => {
+          const deadline = startCallDeadline();
+          const ctx = createMockContext();
+          const { err, elapsedMs } = await settle(call(service, ctx, deadline));
 
-        expect(err).toBeInstanceOf(McpError);
-        expect((err as McpError).code).toBe(JsonRpcErrorCode.Timeout);
-        expect(settledAt).toBeDefined();
-        expect((settledAt as number) - started).toBeLessThanOrEqual(50_000);
-        // Four unbounded 20 s attempts plus backoff would run past a minute.
-        expect(mockFetch.mock.calls.length).toBeGreaterThan(1);
+          expect(err).toBeInstanceOf(McpError);
+          expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+          expect(err.data?.reason).toBe('retry_deadline_exceeded');
+          expect(elapsedMs).toBeLessThanOrEqual(CALL_BUDGET_MS);
+          // Four unbounded attempts plus backoff would run past a minute.
+          expect(mockFetch.mock.calls.length).toBeGreaterThan(1);
+          // Every attempt was capped at what the call had left when it started,
+          // and listened on the attempt signal the budget aborts.
+          for (const [i, [, timeoutMs, , options]] of (
+            mockFetch.mock.calls as FetchCall[]
+          ).entries()) {
+            expect(timeoutMs).toBeLessThanOrEqual(deadline - (origin.startedAt[i] as number));
+            expect(options.signal).not.toBe(ctx.signal);
+          }
+        },
+      );
+
+      it.each(Object.entries(API_CALLS))(
+        '%s spends only what is left of a budget an earlier request already drew on',
+        async (_name, call) => {
+          // The call is 40 s in: an earlier, chained request took the rest.
+          const deadline = (Date.now() + 10_000) as CallDeadline;
+          const { err, elapsedMs } = await settle(call(service, createMockContext(), deadline));
+          expect(err.data?.reason).toBe('retry_deadline_exceeded');
+          expect(elapsedMs).toBeLessThanOrEqual(10_000);
+        },
+      );
+
+      it.each(Object.entries(API_CALLS))(
+        '%s keeps a caller cancellation a cancellation, never relabelled as the deadline',
+        async (_name, call) => {
+          const caller = new AbortController();
+          setTimeout(() => caller.abort(), 10_000);
+          const ctx = createMockContext({ signal: caller.signal });
+          const { err, elapsedMs } = await settle(call(service, ctx, startCallDeadline()));
+          expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+          expect(err.data?.reason).toBeUndefined();
+          expect(elapsedMs).toBe(10_000);
+        },
+      );
+
+      it.each([
+        [
+          'getDetails',
+          (ctx: Ctx, signal: AbortSignal) =>
+            service.getDetails(
+              '10.1101/2024.01.15.575123',
+              'biorxiv',
+              startCallDeadline(),
+              ctx,
+              signal,
+            ),
+        ],
+        [
+          'getPublishedVersion',
+          (ctx: Ctx, signal: AbortSignal) =>
+            service.getPublishedVersion(
+              '10.1101/2024.01.15.575123',
+              'biorxiv',
+              startCallDeadline(),
+              ctx,
+              signal,
+            ),
+        ],
+      ])(
+        '%s stops when the leg signal it was handed aborts, with the caller still live',
+        async (_name, call) => {
+          const leg = new AbortController();
+          setTimeout(() => leg.abort(), 10_000);
+          const { err, elapsedMs } = await settle(call(createMockContext(), leg.signal));
+
+          expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+          expect(err.data?.reason).toBeUndefined();
+          expect(elapsedMs).toBe(10_000);
+          expect(mockFetch).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it.each(Object.entries(API_CALLS))(
+        '%s fails fast as rate_limited on a Retry-After longer than the budget leaves',
+        async (_name, call) => {
+          mockFetch.mockRejectedValue(httpError(429, '30'));
+          const deadline = (Date.now() + 10_000) as CallDeadline;
+          const { err, elapsedMs } = await settle(call(service, createMockContext(), deadline));
+          expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+          expect(err.data).toMatchObject({ reason: 'rate_limited', retryAfter: 30 });
+          expect(elapsedMs).toBe(0);
+          expect(mockFetch).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it.each(Object.entries(API_CALLS))(
+        '%s keeps a 429 the budget ran out after as rate_limited, never an expiry',
+        async (_name, call) => {
+          // 20 s left. Every attempt answers 429 with no Retry-After 9.6 s in,
+          // inside every call's per-attempt timeout, which still applies: the
+          // second lands at 19.6–19.8 s, with less left than the 0.75–1.25 s
+          // backoff before a third.
+          mockFetch.mockImplementation((...args: FetchCall) =>
+            Promise.race([
+              new Promise((_resolve, reject) => setTimeout(() => reject(httpError(429)), 9_600)),
+              origin.fetch(...args),
+            ]),
+          );
+          const deadline = (Date.now() + 20_000) as CallDeadline;
+          const { err, elapsedMs } = await settle(call(service, createMockContext(), deadline));
+          expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+          expect(err.data).toMatchObject({ reason: 'rate_limited', retryable: true });
+          expect(err.message).toContain('api.biorxiv.org is rate-limiting this host');
+          expect(mockFetch).toHaveBeenCalledTimes(2);
+          expect(elapsedMs).toBeLessThanOrEqual(20_000);
+        },
+      );
+
+      describe.each([
+        [
+          'no Retry-After',
+          undefined,
+          { reason: 'rate_limited', retryable: true },
+          'api.biorxiv.org is rate-limiting this host (HTTP 429).',
+        ],
+        [
+          'a Retry-After',
+          '2',
+          { reason: 'rate_limited', retryable: true, retryAfter: 2 },
+          'api.biorxiv.org is rate-limiting this host (HTTP 429) and asked for a 2-second wait before the next request.',
+        ],
+      ])('against slow 429s with %s', (_label, retryAfter, data, message) => {
+        it.each(Object.entries(API_CALLS))(
+          '%s stays rate_limited when the budget cuts a later attempt short',
+          async (_name, call) => {
+            // Every attempt answers 429 13.5 s in, inside every per-attempt timeout.
+            // The fourth starts 43.1–46.5 s in and is still waiting at 50 s.
+            mockFetch.mockImplementation(
+              slowOrigin(13_500, () => httpError(429, retryAfter)).fetch,
+            );
+            const { err, elapsedMs } = await settle(call(service, createMockContext()));
+            expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+            expect(err.data).toEqual({ ...data, recovery: expect.any(Object) });
+            expect(err.message).toBe(message);
+            expect(mockFetch).toHaveBeenCalledTimes(4);
+            expect(elapsedMs).toBe(CALL_BUDGET_MS);
+          },
+        );
       });
+
+      it.each(Object.entries(API_CALLS))(
+        '%s reports a budget already spent as the call running out of time, without a request',
+        async (_name, call) => {
+          const spent = Date.now() as CallDeadline;
+          const { err, elapsedMs } = await settle(call(service, createMockContext(), spent));
+          expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+          expect(err.data?.reason).toBe('retry_deadline_exceeded');
+          expect(err.message).toContain("the call's 50 s time budget had run out");
+          expect(err.message).not.toMatch(/\b0ms\b/);
+          expect(mockFetch).not.toHaveBeenCalled();
+          expect(elapsedMs).toBe(0);
+        },
+      );
+
+      it.each(Object.entries(API_CALLS))(
+        '%s makes the same attempts and returns the same result against a healthy origin',
+        async (name, call) => {
+          // One row every call parses into a non-empty result: a `/details`
+          // revision and the `/pubs` record the journal-DOI lookup matches.
+          const row = {
+            doi: '10.1101/2024.01.15.575123',
+            title: 'Healthy origin',
+            preprint_doi: '10.64898/2026.01.07.26343585',
+            preprint_title: 'Healthy origin',
+          };
+          const ok = () => makeResponse({ messages: [{ status: 'ok' }], collection: [row] });
+          mockFetch.mockReset().mockResolvedValue(ok());
+          const direct = await call(service, createMockContext());
+          expect(JSON.stringify(direct)).toContain('Healthy origin');
+
+          mockFetch.mockReset().mockRejectedValueOnce(httpError(503)).mockResolvedValue(ok());
+          const { value, elapsedMs } = await settle(call(service, createMockContext()));
+          expect(value).toEqual(direct);
+          expect(mockFetch).toHaveBeenCalledTimes(2);
+          // One 503, one 500 ms backoff (±25 % jitter), the full per-attempt timeout each time.
+          expect(elapsedMs).toBeLessThanOrEqual(625);
+          for (const [, timeoutMs] of mockFetch.mock.calls as FetchCall[]) {
+            expect(timeoutMs).toBe(ATTEMPT_TIMEOUT_MS[name as keyof typeof API_CALLS]);
+          }
+        },
+      );
     });
   });
 
@@ -888,6 +1296,7 @@ describe('BiorxivApiService', () => {
         '2026-09-01',
         0,
         { category },
+        startCallDeadline(),
         createMockContext(),
       );
     const calledUrl = () => (mockFetch.mock.calls[0] as string[])[0] ?? '';
@@ -954,7 +1363,15 @@ describe('BiorxivApiService', () => {
 
   describe('getListing funder filter', () => {
     const listing = (filters: { category?: string; funder?: string }) =>
-      service.getListing('biorxiv', '2026-08-01', '2026-08-31', 0, filters, createMockContext());
+      service.getListing(
+        'biorxiv',
+        '2026-08-01',
+        '2026-08-31',
+        0,
+        filters,
+        startCallDeadline(),
+        createMockContext(),
+      );
     const calledUrl = () => (mockFetch.mock.calls[0] as string[])[0] ?? '';
 
     /** Live NSF envelope for 2026-08: the funder echo names the real funder. */
@@ -1050,6 +1467,7 @@ describe('BiorxivApiService', () => {
         JOURNAL,
         PREPRINT,
         'medrxiv',
+        startCallDeadline(),
         createMockContext(),
       );
       expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
@@ -1082,6 +1500,7 @@ describe('BiorxivApiService', () => {
         '10.1093/genetics/iyag142',
         '10.64898/2026.01.07.697413',
         'biorxiv',
+        startCallDeadline(),
         createMockContext(),
       );
       expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
@@ -1101,6 +1520,7 @@ describe('BiorxivApiService', () => {
         '10.1093/genetics/iyag142',
         PREPRINT,
         'medrxiv',
+        startCallDeadline(),
         createMockContext(),
       );
       expect(result).toBeUndefined();
@@ -1116,6 +1536,7 @@ describe('BiorxivApiService', () => {
         JOURNAL,
         PREPRINT,
         'medrxiv',
+        startCallDeadline(),
         createMockContext(),
       );
       expect(result).toBeUndefined();

@@ -29,7 +29,7 @@
 
 ## Overview
 
-bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. Fetch preprints by DOI, browse by date interval or subject category, search by keyword and author, resolve journal-publication crosswalks or list them by journal publication date, and extract full text from the rendered article page, from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and author, browse a date interval (optionally by subject), fetch any preprint by DOI, and see which preprints went on to journal publication.
 
 ### Tools
 
@@ -47,23 +47,24 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 ### `biorxiv_get_preprint` <sub>tool</sub>
 
-- Takes up to 10 DOIs per call, bare or pasted (`https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or `.full` suffix), scoped to `biorxiv`, `medrxiv`, or `both` (default `both`)
-- Each preprint returns its full revision history in `revisions[]` — title, authors, abstract, category, license, `awards`, `jatsxmlUrl`, and `publishedJournalDoi` once accepted. Funder names are left out because `api.biorxiv.org` attributes them to unrelated organizations
+- Takes DOIs bare or pasted (`https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or `.full` suffix), scoped to `biorxiv`, `medrxiv`, or `both` (default `both`)
+- Accepts up to 200 entries and looks up the first 10 distinct DOIs; the rest come back in `unprocessed[]` to pass in another call. A repeated DOI is looked up once, and every list keeps input order
+- Each preprint returns its full revision history in `revisions[]` — title, authors, abstract, category, license, `awards`, `jatsxmlUrl`, and `publishedJournalDoi` once accepted. Funder names are omitted because the upstream API misattributes them
 - A DOI that fails lands in `failed[]` with a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag; `not_found` only when every attempted server answered
 
 ---
 
 ### `biorxiv_list_recent` <sub>tool</sub>
 
-- Takes a `start_date`/`end_date` interval, `server` (default `both`), and optional `category` (a value from `biorxiv_list_categories`) and bioRxiv-only `funder` (a ROR ID) filters; a filter the API ignored or cannot apply raises `invalid_category` or `invalid_funder` rather than returning an unfiltered or empty page
-- Pages of 30 advance with an integer `cursor`; pagination is per server (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`), a cursor past the last page is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
-- Abstracts are omitted by default (about three quarters of a page); `include_abstract: true` adds them
+- Takes a `start_date`/`end_date` interval, `server` (default `both`), and optional `category` (a value from `biorxiv_list_categories`) and bioRxiv-only `funder` (a ROR ID) filters; a filter that cannot be applied raises `invalid_category` or `invalid_funder`
+- Pages of 30 advance with an integer `cursor`, tracked per server (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); a cursor past the last page is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
+- Abstracts are omitted by default; `include_abstract: true` adds them
 
 ---
 
 ### `biorxiv_search_preprints` <sub>tool</sub>
 
-- Takes `query` and/or `author`, optional `date_from`/`date_to` and `server` (default `both`); up to 100 results per page (default 25), paged with `cursor_mark`
+- Takes `query` and/or `author`, optional `date_from`/`date_to` and `server` (default `both`); up to 100 results per page (default 25; a larger `limit` returns 100 with a notice), paged with `cursor_mark`
 - EuropePMC ranks the matches (it indexes new preprints within 1–2 days of posting) and the bioRxiv/medRxiv API enriches them with the same fields as `biorxiv_get_preprint`; a record left with EuropePMC metadata only carries `enriched: false` and an `enrichment_error` (`service_error`, `rate_limited`, `not_found`), with `partial_results` set
 - Abstracts are included by default; `include_abstract: false` drops them for a response about a third the size
 
@@ -71,26 +72,24 @@ bioRxiv and medRxiv preprint metadata and full text, searchable via EuropePMC. F
 
 ### `biorxiv_get_published_version` <sub>tool</sub>
 
-- Takes one preprint DOI and `server` (default `both` — the two servers share their DOI prefixes); `10.64898/` DOIs, which the `/pubs` crosswalk cannot key on, resolve through the preprint's own journal DOI
-- Returns journal DOI, journal name, published date, corresponding-author institution, and the `server` that answered; no server answering raises a retryable `upstream_unavailable` or `rate_limited`, never `doi_not_found`
+- Takes one preprint DOI and `server` (default `both`); `10.64898/` DOIs resolve through the preprint's own journal DOI
+- Returns journal DOI, journal name, published date, corresponding-author institution, and the `server` that answered; if no server answers it raises a retryable `upstream_unavailable` or `rate_limited`, never `doi_not_found`
 
 ---
 
 ### `biorxiv_list_published_versions` <sub>tool</sub>
 
-- Takes a `start_date`/`end_date` interval of journal publication dates and `server` (default `both`); each row is the record `biorxiv_get_published_version` returns, so a week's publications include preprints posted years earlier, and every `preprintDoi` (`10.1101/` or `10.64898/`) feeds the DOI tools
-- Pages of 100 rows per server advance with an integer `cursor`; pagination is per server, a cursor past one server's last row is marked `exhausted: true` with no `total`, and a server that did not answer is named in `failed[]`
-- Abstracts are omitted by default (about three quarters of a page); `include_abstract: true` adds them
+- Takes a `start_date`/`end_date` interval of journal publication dates and `server` (default `both`); each row matches the record `biorxiv_get_published_version` returns, and may be a preprint posted years earlier
+- Returns `limit` rows per server (default 25, up to the API's 100-row page) from an integer `cursor`, continued at each server's `nextCursor`; a cursor past the last row is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
+- Abstracts are omitted by default; `include_abstract: true` adds them
 
 ---
 
 ### `biorxiv_get_fulltext` <sub>tool</sub>
 
-- Takes a DOI, `server` (default `both`), and an optional `version` (or a `vN` suffix — the two must agree; a version the preprint lacks raises `version_not_found`); extracts Markdown from the rendered HTML article page, since there is no keyless JATS source, and names the answering `server`
-- Keeps inline citation, figure, and table labels as printed (`(1–16)`, `(Fig. 1a)`) and every reference entry's bibliographic text, with the DOI of an entry that has one as a `doi.org` link
-- The article page carries no table cells: each table keeps its caption in the text, and `omittedTables` names it with the URL that serves its cells, on every chunk and in the rendered text
-- Pages via `offset`/`limit` characters (default 20,000; a `limit` past the remaining text returns the rest), reporting `totalChars`, `remainingChars`, `hasMore`, and `wordCount`; the extracted article is cached per version, so paging costs one origin fetch
-- PDF-only preprints and blocked pages raise `fulltext_unavailable`, routing to `biorxiv_get_preprint`
+- Takes a DOI, `server` (default `both`), and an optional `version` (or a `vN` suffix; the two must agree, and a version the preprint lacks raises `version_not_found`); returns Markdown extracted from the rendered HTML article page, naming the answering `server`
+- Table cells are not on the page: each table keeps its caption, and `omittedTables` names it with the URL that serves its cells
+- Pages via `offset`/`limit` characters (default 20,000), reporting `totalChars`, `remainingChars`, `hasMore`, and `wordCount`; PDF-only preprints and blocked pages raise `fulltext_unavailable`, routing to `biorxiv_get_preprint`
 
 ---
 
@@ -105,20 +104,19 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 bioRxiv-specific:
 
-- `BiorxivApiService` wraps `api.biorxiv.org` — details, publications, and crosswalk endpoints with retry and exponential backoff; a 429 is classified as a retryable `rate_limited` error carrying the parsed `Retry-After` wait, with the upstream response body kept out of the payload
-- `EuropePmcService` wraps the EuropePMC search endpoint for relevance-ranked keyword and/or author results, classified the same way on a 429
-- `BiorxivFullTextService` fetches and extracts Markdown from the rendered HTML article pages on `www.biorxiv.org` / `www.medrxiv.org` — a distinct origin from the JSON API
-- Two-server fan-out via `Promise.allSettled` — both `biorxiv` and `medrxiv` queried in parallel when `server="both"`, with each result naming the server that answered and listings keeping per-server pagination
+- `BiorxivApiService` wraps `api.biorxiv.org` (details, publications, and crosswalk endpoints) and `EuropePmcService` wraps EuropePMC search, both with retry and exponential backoff
+- `BiorxivFullTextService` extracts Markdown from the article pages on `www.biorxiv.org` / `www.medrxiv.org`
+- Every upstream retry ladder runs on what is left of the tool call's one 50 s budget, so a hung origin ends before a client's 60 s request timeout — in a classified, retryable error, or, when the step that hung is optional, in a result that says what is missing
+- Queries `biorxiv` and `medrxiv` in parallel when `server="both"`, each result naming the server that answered; a lookup by DOI stops waiting once the server holding that DOI answers
 - Polite `User-Agent` header including a mailto address (`BIORXIV_MAILTO` env var) per Cold Spring Harbor Lab API guidelines
 - Pairs with **pubmed-mcp-server** (post-publication), **openalex-mcp-server** (citation analytics), and **crossref-mcp-server** (DOI metadata)
 
 Agent-friendly output:
 
-- Graceful partial failure — per-DOI and per-server failures land in `failed[]` with a typed `reason` and `retryable` flag instead of aborting the whole batch or listing call
-- Rate-limit transparency — a 429 from any upstream surfaces as `reason: "rate_limited"` carrying the origin's parsed `retryAfter` wait, distinguished from a generic `upstream_unavailable`
-- Discriminated enrichment outputs — `biorxiv_search_preprints` results carry `enriched` plus a typed `enrichment_error` (`service_error` / `rate_limited` / `not_found`) so callers branch on data, not string parsing
-- Paging and pagination state — `exhausted` cursors are flagged as an out-of-range artifact rather than an empty interval, and `biorxiv_get_fulltext` reports `totalChars` / `remainingChars` / `hasMore` for chunked reads
-- Clean titles and abstracts — Highwire export markup is resolved to plain text on both surfaces: symbol placeholders (`{beta}`, `{+/-}`, `[&ge;]`) become their characters, structured-abstract headings read `Results: …`, list items read `• …`, and figure and table blocks are dropped. The Markdown in `content[]` escapes upstream text so it renders as written
+- Graceful partial failure — per-DOI and per-server failures land in `failed[]` with a typed `reason` and `retryable` flag instead of aborting the call
+- Rate-limit transparency — a 429 surfaces as `reason: "rate_limited"` with the parsed `retryAfter` wait, distinct from `upstream_unavailable`
+- Typed enrichment status — `biorxiv_search_preprints` results carry `enriched` plus a typed `enrichment_error` (`service_error` / `rate_limited` / `not_found`)
+- Clean titles and abstracts — export markup and symbol placeholders (`{beta}`, `[&ge;]`) are resolved to plain text
 
 ## Getting started
 
@@ -235,7 +233,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `BIORXIV_MAILTO` | Email address included in the `User-Agent` header for polite API access per Cold Spring Harbor Lab guidelines. Optional, but recommended. | — |
+| `BIORXIV_MAILTO` | Email address for the `User-Agent` header; optional but recommended. | — |
 | `BIORXIV_API_BASE_URL` | Override the bioRxiv API base URL. | `https://api.biorxiv.org` |
 | `EUROPEPMC_API_BASE_URL` | Override the EuropePMC base URL. | `https://www.ebi.ac.uk/europepmc/webservices/rest` |
 | `BIORXIV_WEB_BASE_URL` | Override the bioRxiv website base URL (full-text HTML source for `biorxiv_get_fulltext`). | `https://www.biorxiv.org` |

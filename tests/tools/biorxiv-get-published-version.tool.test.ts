@@ -4,10 +4,18 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
 import type { PublishedVersion } from '@/services/biorxiv/types.js';
+import { CALL_BUDGET_MS } from '@/services/shared.js';
+import {
+  answerAfter,
+  budgetStep,
+  neverAnswers,
+  routeLegs,
+  settle,
+} from '../helpers/call-budget.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import {
   declaredRateLimitRecovery,
@@ -20,11 +28,13 @@ const mockGetPublishedVersion = vi.fn();
 // The /details fallback runs whenever the crosswalk answers empty; the default
 // here is a preprint no server holds, so those tests still end in doi_not_found.
 const mockGetDetails = vi.fn();
+const mockGetPublishedVersionByJournalDoi = vi.fn();
 
 vi.mock('@/services/biorxiv/biorxiv-service.js', () => ({
   getBiorxivApiService: () => ({
     getPublishedVersion: mockGetPublishedVersion,
     getDetails: mockGetDetails,
+    getPublishedVersionByJournalDoi: mockGetPublishedVersionByJournalDoi,
   }),
 }));
 
@@ -73,7 +83,9 @@ describe('biorxivGetPublishedVersionTool', () => {
     expect(mockGetPublishedVersion).toHaveBeenCalledWith(
       '10.1101/2024.06.01.123456',
       'medrxiv',
+      expect.any(Number),
       expect.anything(),
+      expect.any(AbortSignal),
     );
   });
 
@@ -102,12 +114,16 @@ describe('biorxivGetPublishedVersionTool', () => {
     expect(mockGetPublishedVersion).toHaveBeenCalledWith(
       '10.1101/2024.11.21.24317726',
       'biorxiv',
+      expect.any(Number),
       expect.anything(),
+      expect.any(AbortSignal),
     );
     expect(mockGetPublishedVersion).toHaveBeenCalledWith(
       '10.1101/2024.11.21.24317726',
       'medrxiv',
+      expect.any(Number),
       expect.anything(),
+      expect.any(AbortSignal),
     );
   });
 
@@ -419,6 +435,269 @@ describe('biorxivGetPublishedVersionTool', () => {
       const { text } = await call();
       expect(text).toContain(`**Preprint DOI:** ${IDENTIFIERS.doi}\n`);
       expect(text).toContain(`**Published DOI:** ${IDENTIFIERS.publishedDoi}\n`);
+    });
+  });
+
+  // ── Cancellation ────────────────────────────────────────────────────────────
+
+  describe('cancellation', () => {
+    const DOI = '10.1101/2024.01.15.575123';
+    const HELD = [{ doi: DOI, version: '1', publishedJournalDoi: PUBLISHED.publishedDoi }];
+    let controller: AbortController;
+    let cancelled: Error;
+
+    /** Aborts the caller's signal, then rejects the way an aborted request does. */
+    const abortLeg = () => {
+      controller.abort(cancelled);
+      return Promise.reject(new Error('aborted'));
+    };
+    const call = () =>
+      rejection(
+        biorxivGetPublishedVersionTool.handler(
+          biorxivGetPublishedVersionTool.input.parse({ doi: DOI }),
+          createMockContext({
+            errors: biorxivGetPublishedVersionTool.errors,
+            signal: controller.signal,
+          }),
+        ),
+      );
+
+    beforeEach(() => {
+      controller = new AbortController();
+      cancelled = new Error('cancelled by caller');
+      mockGetPublishedVersionByJournalDoi.mockReset();
+    });
+
+    it('rethrows a cancellation rather than returning the crosswalk leg that finished first', async () => {
+      mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+        server === 'biorxiv' ? Promise.resolve(PUBLISHED) : abortLeg(),
+      );
+      expect(await call()).toBe(cancelled);
+    });
+
+    it('rethrows a cancellation from the preprint lookup rather than moving on with the leg that answered', async () => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+      mockGetDetails.mockImplementation((_doi: string, server: string) =>
+        server === 'biorxiv' ? Promise.resolve(HELD) : abortLeg(),
+      );
+      expect(await call()).toBe(cancelled);
+      expect(mockGetPublishedVersionByJournalDoi).not.toHaveBeenCalled();
+    });
+
+    it('rethrows a cancellation from the crosswalk by journal DOI rather than degrading to a notice', async () => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+      mockGetDetails.mockImplementation((_doi: string, server: string) =>
+        Promise.resolve(server === 'biorxiv' ? HELD : []),
+      );
+      mockGetPublishedVersionByJournalDoi.mockImplementation(abortLeg);
+      expect(await call()).toBe(cancelled);
+    });
+
+    it('settles a cancelled crosswalk by journal DOI as RequestCancelled', async () => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+      mockGetDetails.mockImplementation((_doi: string, server: string) =>
+        Promise.resolve(server === 'biorxiv' ? HELD : []),
+      );
+      mockGetPublishedVersionByJournalDoi.mockImplementation(abortLeg);
+      const result = await runToolContract(biorxivGetPublishedVersionTool, { doi: DOI } as never, {
+        context: { errors: biorxivGetPublishedVersionTool.errors, signal: controller.signal },
+      });
+
+      // The runner settles any throw after the abort as RequestCancelled, so the
+      // message is what shows the caller's reason was rethrown.
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({
+        error: { code: JsonRpcErrorCode.RequestCancelled, message: 'cancelled by caller' },
+      });
+      expect(result.content).toEqual([{ type: 'text', text: 'Error: cancelled by caller' }]);
+    });
+
+    it('still degrades a crosswalk by journal DOI that failed while the signal was live to a notice', async () => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+      mockGetDetails.mockImplementation((_doi: string, server: string) =>
+        Promise.resolve(server === 'biorxiv' ? HELD : []),
+      );
+      mockGetPublishedVersionByJournalDoi.mockRejectedValue(new Error('fetch failed'));
+      const ctx = createMockContext({
+        errors: biorxivGetPublishedVersionTool.errors,
+        signal: controller.signal,
+      });
+      const result = await biorxivGetPublishedVersionTool.handler(
+        biorxivGetPublishedVersionTool.input.parse({ doi: DOI }),
+        ctx,
+      );
+
+      expect(controller.signal.aborted).toBe(false);
+      expect(result).toMatchObject({ server: 'biorxiv', publishedDoi: PUBLISHED.publishedDoi });
+      expect(result.publishedJournal).toBeUndefined();
+      expect(getEnrichment(ctx).notice).toContain('failed (fetch failed)');
+    });
+  });
+
+  // ── One budget across the chain ─────────────────────────────────────────────
+
+  describe('call budget', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('hands the crosswalk, the preprint lookup, and the crosswalk by journal DOI one 50 s budget', async () => {
+      const doi = '10.64898/2026.01.07.26343585';
+      const remaining: number[] = [];
+      mockGetPublishedVersion.mockImplementation(budgetStep(remaining, 20_000, undefined));
+      mockGetDetails.mockImplementation(
+        budgetStep(remaining, 15_000, [{ doi, publishedJournalDoi: PUBLISHED.publishedDoi }]),
+      );
+      mockGetPublishedVersionByJournalDoi.mockImplementation(
+        budgetStep(remaining, 0, { ...PUBLISHED, preprintDoi: doi }),
+      );
+      const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+      const input = biorxivGetPublishedVersionTool.input.parse({ doi, server: 'medrxiv' });
+      const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
+
+      expect(result.publishedJournal).toBe('Nature');
+      // Each step gets what the steps before it left, never a fresh budget.
+      expect(remaining).toEqual([CALL_BUDGET_MS, 30_000, 15_000]);
+    });
+  });
+
+  // ── Lookups across both servers ─────────────────────────────────────────────
+
+  describe('lookups across both servers', () => {
+    const DOI = '10.1101/2024.01.15.575123';
+    const HELD = [{ doi: DOI, version: '1', publishedJournalDoi: PUBLISHED.publishedDoi }];
+
+    /** The leg signal each per-server lookup was handed, by server. */
+    let crosswalkSignals: Record<string, AbortSignal | undefined>;
+    let detailsSignals: Record<string, AbortSignal | undefined>;
+    /** When each crosswalk-by-journal-DOI request went out, in ms after the call started. */
+    let journalLookupAt: number[];
+
+    const handle = (signal?: AbortSignal) =>
+      settle(
+        runToolContract(biorxivGetPublishedVersionTool, { doi: DOI } as never, {
+          context: { errors: biorxivGetPublishedVersionTool.errors, ...(signal && { signal }) },
+        }),
+      );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+      crosswalkSignals = {};
+      detailsSignals = {};
+      journalLookupAt = [];
+      const startedAt = Date.now();
+      mockGetPublishedVersionByJournalDoi.mockReset();
+      mockGetPublishedVersionByJournalDoi.mockImplementation(() => {
+        journalLookupAt.push(Date.now() - startedAt);
+        return Promise.resolve({ ...PUBLISHED, preprintDoi: DOI });
+      });
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it.each([
+      ['biorxiv', 'medrxiv'],
+      ['medrxiv', 'biorxiv'],
+    ])(
+      'returns the crosswalk record the moment %s, the server holding it, answers',
+      async (holder, other) => {
+        routeLegs(
+          mockGetPublishedVersion,
+          {
+            [holder]: () => answerAfter(1_000, PUBLISHED),
+            [other]: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+          },
+          crosswalkSignals,
+        );
+        const { value, elapsedMs } = await handle();
+        const result = value as Awaited<ReturnType<typeof runToolContract>>;
+
+        expect(elapsedMs).toBe(1_000);
+        expect(result.isError).toBeFalsy();
+        expect(result.structuredContent).toMatchObject({
+          server: holder,
+          publishedJournal: 'Nature',
+        });
+        expect((result.content[0] as { text: string }).text).toContain(
+          `**Resolved on server:** ${holder}`,
+        );
+        // The lookup still running on the other server is cut short, never the caller.
+        expect(crosswalkSignals[other]?.aborted).toBe(true);
+        expect(crosswalkSignals[holder]?.aborted).toBe(false);
+        expect(mockGetDetails).not.toHaveBeenCalled();
+      },
+    );
+
+    it('moves on to the crosswalk by journal DOI the moment the server holding the preprint answers', async () => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: () => answerAfter(1_000, HELD),
+          medrxiv: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+        },
+        detailsSignals,
+      );
+      const { value, elapsedMs } = await handle();
+      const result = value as Awaited<ReturnType<typeof runToolContract>>;
+
+      expect(journalLookupAt).toEqual([1_000]);
+      expect(elapsedMs).toBe(1_000);
+      expect(result.structuredContent).toMatchObject({
+        server: 'biorxiv',
+        publishedJournal: 'Nature',
+      });
+      expect(mockGetPublishedVersionByJournalDoi).toHaveBeenCalledWith(
+        PUBLISHED.publishedDoi,
+        DOI,
+        'biorxiv',
+        expect.any(Number),
+        expect.anything(),
+      );
+      expect(detailsSignals.medrxiv?.aborted).toBe(true);
+    });
+
+    it('waits for the crosswalk exactly as long as before when the holding server answers last', async () => {
+      routeLegs(
+        mockGetPublishedVersion,
+        {
+          biorxiv: () => answerAfter(1_000, undefined),
+          medrxiv: () => answerAfter(3_000, PUBLISHED),
+        },
+        crosswalkSignals,
+      );
+      const { value, elapsedMs } = await handle();
+      const result = value as Awaited<ReturnType<typeof runToolContract>>;
+
+      expect(elapsedMs).toBe(3_000);
+      expect(result.structuredContent).toMatchObject({ server: 'medrxiv' });
+      // Every lookup had answered, so none was cut short.
+      expect(crosswalkSignals.biorxiv?.aborted).toBe(false);
+      expect(crosswalkSignals.medrxiv?.aborted).toBe(false);
+      expect(mockGetDetails).not.toHaveBeenCalled();
+    });
+
+    it('still settles a caller cancellation during the crosswalk as RequestCancelled', async () => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('cancelled by caller')), 5_000);
+      routeLegs(
+        mockGetPublishedVersion,
+        { biorxiv: (signal) => neverAnswers(signal), medrxiv: (signal) => neverAnswers(signal) },
+        crosswalkSignals,
+      );
+      const { value, elapsedMs } = await handle(controller.signal);
+      const result = value as Awaited<ReturnType<typeof runToolContract>>;
+
+      expect(elapsedMs).toBe(5_000);
+      expect(result.isError).toBe(true);
+      // The caller's reason, never the two aborted lookups reported as a failed crosswalk.
+      expect(result.structuredContent).toEqual({
+        error: { code: JsonRpcErrorCode.RequestCancelled, message: 'cancelled by caller' },
+      });
+      expect(result.content).toEqual([{ type: 'text', text: 'Error: cancelled by caller' }]);
+      expect(mockGetDetails).not.toHaveBeenCalled();
     });
   });
 });

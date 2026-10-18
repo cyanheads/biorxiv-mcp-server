@@ -4,12 +4,20 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
 import type { EuropePmcResult, EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
+import { CALL_BUDGET_MS } from '@/services/shared.js';
+import {
+  answerAfter,
+  budgetStep,
+  neverAnswers,
+  routeLegs,
+  settle,
+} from '../helpers/call-budget.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import {
   declaredRateLimitRecovery,
@@ -95,6 +103,7 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.isError).toBeFalsy();
     expect(mockEpmcSearch).toHaveBeenCalledWith(
       expect.objectContaining({ dateFrom: '2024-01-01', dateTo: '2024-01-31' }),
+      expect.any(Number),
       expect.anything(),
     );
   });
@@ -174,6 +183,7 @@ describe('biorxivSearchPreprintsTool', () => {
     await biorxivSearchPreprintsTool.handler(input, ctx);
     expect(mockEpmcSearch).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'CRISPR', author: 'Doudna J' }),
+      expect.any(Number),
       expect.anything(),
     );
   });
@@ -185,6 +195,7 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints).toHaveLength(1);
     expect(mockEpmcSearch).toHaveBeenCalledWith(
       expect.objectContaining({ author: 'Doudna J' }),
+      expect.any(Number),
       expect.anything(),
     );
     const enrichment = getEnrichment(ctx);
@@ -350,8 +361,245 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(() => biorxivSearchPreprintsTool.input.parse({ query: 'test', limit: 0 })).toThrow();
   });
 
-  it('rejects limit above 100 at schema parse time', () => {
-    expect(() => biorxivSearchPreprintsTool.input.parse({ query: 'test', limit: 101 })).toThrow();
+  it('rejects limit above the 1000 ceiling at schema parse time', () => {
+    expect(() => biorxivSearchPreprintsTool.input.parse({ query: 'test', limit: 1001 })).toThrow();
+    expect(biorxivSearchPreprintsTool.input.parse({ query: 'test', limit: 1000 }).limit).toBe(1000);
+  });
+
+  // ── limit above the per-call cap ────────────────────────────────────────────
+
+  describe('limit above 100', () => {
+    const NEXT = 'AoIIP+4XBX0oNTc1MTIz';
+    /** `n` ranked EuropePMC hits, each enriched from bioRxiv unless `details` says otherwise. */
+    const hits = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...EPMC_RESULT,
+        doi: `10.1101/2024.01.15.${600000 + i}`,
+      }));
+
+    async function call(args: Record<string, unknown>) {
+      const result = await runToolContract(
+        biorxivSearchPreprintsTool,
+        { query: 'crispr', server: 'biorxiv', ...args } as never,
+        { context: { errors: biorxivSearchPreprintsTool.errors } },
+      );
+      const structured = result.structuredContent as {
+        preprints: Record<string, unknown>[];
+        queryEcho: { limit: number };
+        nextCursorMark?: string;
+        notice?: string;
+        truncated?: boolean;
+        shown?: number;
+        cap?: number;
+      };
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      return { result, structured, text };
+    }
+
+    beforeEach(() => {
+      mockEpmcSearch.mockReset();
+      mockGetDetails.mockReset();
+      mockGetDetails.mockImplementation((doi: string) => Promise.resolve([{ ...REVISION, doi }]));
+    });
+
+    it.each([101, 1000])(
+      'limit %i requests 100 from EuropePMC, enriches 100, and discloses the cap on both surfaces',
+      async (limit) => {
+        mockEpmcSearch.mockResolvedValue(epmcSearchResult(5000, hits(100), NEXT));
+        const { result, structured, text } = await call({ limit });
+
+        expect(result.isError).toBeFalsy();
+        expect(mockEpmcSearch).toHaveBeenCalledWith(
+          expect.objectContaining({ limit: 100 }),
+          expect.any(Number),
+          expect.anything(),
+        );
+        expect(mockGetDetails).toHaveBeenCalledTimes(100);
+        expect(structured.preprints.map((p) => p.doi)).toEqual(hits(100).map((h) => h.doi));
+        const notice = `A limit of ${limit} is above the 100-result cap per call, so this page holds up to 100 results — pass nextCursorMark as cursor_mark to continue the ranked list.`;
+        expect(structured).toMatchObject({
+          truncated: true,
+          shown: 100,
+          cap: 100,
+          notice,
+          nextCursorMark: NEXT,
+          totalCount: 5000,
+        });
+        // The echo is what was sent to EuropePMC; the notice carries the request.
+        expect(structured.queryEcho.limit).toBe(100);
+        expect(text).toContain(notice);
+        expect(text).toContain('**100 results**');
+        // Whole lines: "limit=1000" and "**cap:** 1000" still contain "limit=100" and "**cap:** 100".
+        expect(text).toContain('\nQuery: crispr · server=biorxiv · limit=100\n');
+        expect(text).toContain('**truncated:** true\n**shown:** 100\n**cap:** 100\n');
+      },
+    );
+
+    it.each([100, 25])(
+      'limit %i leaves the output unchanged: no cap notice or truncation',
+      async (limit) => {
+        mockEpmcSearch.mockResolvedValue(epmcSearchResult(5000, hits(limit), NEXT));
+        const { structured, text } = await call({ limit });
+        expect(mockEpmcSearch).toHaveBeenCalledWith(
+          expect.objectContaining({ limit }),
+          expect.any(Number),
+          expect.anything(),
+        );
+        expect(structured.preprints).toHaveLength(limit);
+        expect(structured.queryEcho.limit).toBe(limit);
+        expect(structured.nextCursorMark).toBe(NEXT);
+        for (const key of ['notice', 'truncated', 'shown', 'cap']) {
+          expect(structured).not.toHaveProperty(key);
+        }
+        expect(text).not.toContain('cap per call');
+      },
+    );
+
+    it('names the cap without claiming truncation when the clamped page came back short', async () => {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(40, hits(40)));
+      const { structured } = await call({ limit: 250 });
+      expect(structured.preprints).toHaveLength(40);
+      expect(structured.notice).toBe(
+        'A limit of 250 is above the 100-result cap per call, so this page holds up to 100 results.',
+      );
+      expect(structured).not.toHaveProperty('truncated');
+      expect(structured).not.toHaveProperty('nextCursorMark');
+    });
+
+    it('bounds the abstract lookup at 100 DOIs and composes its failure after the cap sentence', async () => {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(5000, hits(100), NEXT));
+      mockGetDetails.mockResolvedValue([]);
+      mockGetAbstracts.mockRejectedValue(new Error('Fetch failed for EuropePMC. Status: 503'));
+      const { structured } = await call({ limit: 1000 });
+      expect(mockGetAbstracts).toHaveBeenCalledTimes(1);
+      expect(mockGetAbstracts.mock.calls[0]?.[0]).toEqual(hits(100).map((h) => h.doi));
+      expect(structured.notice).toBe(
+        'A limit of 1000 is above the 100-result cap per call, so this page holds up to 100 results — pass nextCursorMark as cursor_mark to continue the ranked list. Abstracts could not be retrieved for the 100 results shown with EuropePMC metadata only — the EuropePMC abstract lookup failed, so retry the search to include them.',
+      );
+      expect(structured).toMatchObject({ truncated: true, shown: 100, cap: 100 });
+    });
+
+    it('keeps the empty-result notice on a clamped search that matched nothing', async () => {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(0, []));
+      const { structured } = await call({ limit: 500 });
+      expect(structured.notice).toBe(
+        'No preprints matched "crispr". Try broader search terms or a wider date range.',
+      );
+      expect(structured.queryEcho.limit).toBe(100);
+      expect(structured).not.toHaveProperty('truncated');
+    });
+
+    it.each([0, 1001])(
+      'rejects limit %i as -32602 naming the field, before any upstream call',
+      async (limit) => {
+        const { result } = await call({ limit });
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.message).toContain('limit');
+        expect(mockEpmcSearch).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  // ── Cancellation ────────────────────────────────────────────────────────────
+
+  describe('a cancelled call', () => {
+    const SECOND: EuropePmcResult = { ...EPMC_RESULT, doi: '10.1101/2024.02.01.000002' };
+
+    function run(controller: AbortController) {
+      return {
+        direct: () =>
+          rejection(
+            biorxivSearchPreprintsTool.handler(
+              biorxivSearchPreprintsTool.input.parse({ query: 'crispr', server: 'biorxiv' }),
+              createMockContext({
+                errors: biorxivSearchPreprintsTool.errors,
+                signal: controller.signal,
+              }),
+            ),
+          ),
+        contract: () =>
+          runToolContract(
+            biorxivSearchPreprintsTool,
+            { query: 'crispr', server: 'biorxiv' } as never,
+            {
+              context: { errors: biorxivSearchPreprintsTool.errors, signal: controller.signal },
+            },
+          ),
+      };
+    }
+
+    beforeEach(() => {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(2, [EPMC_RESULT, SECOND]));
+    });
+
+    /** The first DOI enriches; the second's lookup is where the caller's abort lands. */
+    function abortOnSecondLookup(controller: AbortController, reason: Error) {
+      mockGetDetails.mockImplementation((doi: string) => {
+        if (doi === EPMC_RESULT.doi) return Promise.resolve([REVISION]);
+        controller.abort(reason);
+        return Promise.reject(new Error('aborted'));
+      });
+    }
+
+    it('rethrows a cancellation rather than degrading the enrichment leg it reached', async () => {
+      const cancelled = new Error('cancelled by caller');
+      const controller = new AbortController();
+      abortOnSecondLookup(controller, cancelled);
+      expect(await run(controller).direct()).toBe(cancelled);
+
+      const again = new AbortController();
+      abortOnSecondLookup(again, cancelled);
+      const result = await run(again).contract();
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(-32011);
+    });
+
+    it('rethrows a cancellation from the abstract lookup rather than reporting it in the notice', async () => {
+      const cancelled = new Error('cancelled by caller');
+      mockGetDetails.mockResolvedValue([]);
+      const abortingLookup = (controller: AbortController) => () => {
+        controller.abort(cancelled);
+        return Promise.reject(new Error('aborted'));
+      };
+
+      const controller = new AbortController();
+      mockGetAbstracts.mockImplementation(abortingLookup(controller));
+      expect(await run(controller).direct()).toBe(cancelled);
+
+      const again = new AbortController();
+      mockGetAbstracts.mockImplementation(abortingLookup(again));
+      const result = await run(again).contract();
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+    });
+
+    // The call deadline stops a leg through withRetry's own signal, never ctx.signal.
+    it('still degrades a leg that fails, deadline included, while the signal is live', async () => {
+      const deadline = new McpError(JsonRpcErrorCode.Timeout, 'timed out on the caller signal', {
+        errorSource: 'FetchSignalTimeout',
+      });
+      mockGetDetails.mockImplementation((doi: string) =>
+        doi === EPMC_RESULT.doi ? Promise.resolve([REVISION]) : Promise.reject(deadline),
+      );
+      mockGetAbstracts.mockRejectedValue(new Error('Fetch failed for EuropePMC. Status: 503'));
+      const result = await run(new AbortController()).contract();
+      const structured = result.structuredContent as {
+        preprints: Record<string, unknown>[];
+        partial_results: boolean;
+        notice?: string;
+      };
+      expect(result.isError).toBeFalsy();
+      expect(structured.partial_results).toBe(true);
+      expect(structured.preprints.map((p) => p.enrichment_error)).toEqual([
+        undefined,
+        'service_error',
+      ]);
+      expect(structured.notice).toMatch(/^Abstracts could not be retrieved for the 1 result/);
+    });
   });
 
   // ── Error handling ──────────────────────────────────────────────────────────
@@ -572,6 +820,75 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints[0]?.enrichment_error).toBe('rate_limited');
   });
 
+  describe('two-server enrichment of a DOI with neither preprint prefix', () => {
+    const DOI = '10.5678/some.other.preprint';
+    const HELD: PreprintRevision = { ...REVISION, doi: DOI, server: 'medrxiv' };
+    /** The leg signal each getDetails call was handed, by server. */
+    let legSignals: Record<string, AbortSignal | undefined>;
+
+    const search = (ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors })) =>
+      settle(
+        Promise.resolve(
+          biorxivSearchPreprintsTool.handler(
+            biorxivSearchPreprintsTool.input.parse({ query: 'test', server: 'both' }),
+            ctx,
+          ),
+        ),
+      );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+      mockEpmcSearch.mockResolvedValue(
+        epmcSearchResult(1, [{ doi: DOI, title: 'Some other preprint' }]),
+      );
+      mockGetDetails.mockReset();
+      legSignals = {};
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('enriches from the server holding the DOI the moment it answers, cutting the stalled lookup short', async () => {
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+          medrxiv: () => answerAfter(1_000, [HELD]),
+        },
+        legSignals,
+      );
+      const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+      const { value, elapsedMs } = await search(ctx);
+      const result = value as Awaited<ReturnType<typeof biorxivSearchPreprintsTool.handler>>;
+
+      expect(elapsedMs).toBe(1_000);
+      expect(result.partial_results).toBe(false);
+      expect(result.preprints).toEqual([
+        expect.objectContaining({ doi: DOI, server: 'medrxiv', enriched: true, revisionCount: 1 }),
+      ]);
+      expect(legSignals.biorxiv?.aborted).toBe(true);
+      expect(legSignals.medrxiv?.aborted).toBe(false);
+      expect(ctx.signal.aborted).toBe(false);
+    });
+
+    it('still waits for both answers when neither server holds the DOI', async () => {
+      routeLegs(
+        mockGetDetails,
+        { biorxiv: () => answerAfter(1_000, []), medrxiv: () => answerAfter(3_000, []) },
+        legSignals,
+      );
+      const { value, elapsedMs } = await search();
+      const result = value as Awaited<ReturnType<typeof biorxivSearchPreprintsTool.handler>>;
+
+      expect(elapsedMs).toBe(3_000);
+      expect(result.preprints).toEqual([
+        expect.objectContaining({ doi: DOI, enriched: false, enrichment_error: 'not_found' }),
+      ]);
+      // Both lookups had answered, so neither was cut short.
+      expect(legSignals.biorxiv?.aborted).toBe(false);
+      expect(legSignals.medrxiv?.aborted).toBe(false);
+    });
+  });
+
   it('still reports not_found when every attempted server answered with nothing', async () => {
     mockGetDetails.mockResolvedValue([]);
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
@@ -690,6 +1007,7 @@ describe('biorxivSearchPreprintsTool', () => {
     await biorxivSearchPreprintsTool.handler(input, ctx);
     expect(mockEpmcSearch).toHaveBeenCalledWith(
       expect.objectContaining({ cursorMark: 'AoJpage2' }),
+      expect.any(Number),
       expect.anything(),
     );
   });
@@ -872,7 +1190,11 @@ describe('biorxivSearchPreprintsTool', () => {
       expect(text).toContain('**Abstract:** Fallback abstract text.');
       // Only the fallback DOI is looked up; the enriched one already has its abstract.
       expect(mockGetAbstracts).toHaveBeenCalledTimes(1);
-      expect(mockGetAbstracts).toHaveBeenCalledWith([FALLBACK_DOI], expect.anything());
+      expect(mockGetAbstracts).toHaveBeenCalledWith(
+        [FALLBACK_DOI],
+        expect.any(Number),
+        expect.anything(),
+      );
     });
 
     it('false drops abstract from enriched and fallback results on both surfaces, and every other field stays', async () => {
@@ -1078,6 +1400,45 @@ describe('biorxivSearchPreprintsTool', () => {
       expect(text).toContain(`**DOI:** ${IDENTIFIERS.doi}\n`);
       // The formatter's own emphasis markup still renders.
       expect(text).toContain('\n*DOI not indexed on target server — EuropePMC metadata shown.*');
+    });
+  });
+
+  // ── One budget across the chain ─────────────────────────────────────────────
+
+  describe('call budget', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('hands the search, both enrichment lookups, and the abstract lookup one 50 s budget', async () => {
+      const remaining: number[] = [];
+      mockEpmcSearch.mockImplementation(
+        budgetStep(remaining, 20_000, epmcSearchResult(1, [EPMC_RESULT])),
+      );
+      // A 10.1101/ DOI under server="both": bioRxiv first, then medRxiv when it comes back empty.
+      mockGetDetails.mockClear();
+      mockGetDetails
+        .mockImplementationOnce(budgetStep(remaining, 10_000, []))
+        .mockImplementationOnce(budgetStep(remaining, 5_000, []));
+      mockGetAbstracts.mockImplementation(
+        budgetStep(remaining, 0, new Map([[EPMC_RESULT.doi, 'Fallback abstract text.']])),
+      );
+      const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
+      const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR', server: 'both' });
+      const result = await biorxivSearchPreprintsTool.handler(input, ctx);
+
+      expect(mockGetDetails.mock.calls.map((call) => call[1])).toEqual(['biorxiv', 'medrxiv']);
+      // Each step gets what the steps before it left, never a fresh budget.
+      expect(remaining).toEqual([CALL_BUDGET_MS, 30_000, 20_000, 15_000]);
+      expect(result.preprints[0]).toMatchObject({
+        enriched: false,
+        abstract: 'Fallback abstract text.',
+      });
+      expect(biorxivSearchPreprintsTool.format?.(result)[0]).toMatchObject({
+        text: expect.stringContaining('**Abstract:** Fallback abstract text.'),
+      });
     });
   });
 });

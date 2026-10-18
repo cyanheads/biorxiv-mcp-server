@@ -6,12 +6,21 @@
  * @module tests/tools/biorxiv-get-fulltext.tool.test
  */
 
-import { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import type { FullTextFetchResult } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
+import { CALL_BUDGET_MS, type CallDeadline, retryWithinBudget } from '@/services/shared.js';
+import {
+  answerAfter,
+  budgetStep,
+  hungOrigin,
+  neverAnswers,
+  routeLegs,
+  settle,
+} from '../helpers/call-budget.js';
 import { ESCAPED, UPSTREAM } from '../helpers/markdown-fixtures.js';
 import {
   declaredRateLimitRecovery,
@@ -75,7 +84,13 @@ describe('biorxivGetFulltextTool', () => {
     // One unbroken run of characters is one whitespace-delimited word.
     expect(result.wordCount).toBe(1);
     // fetchFullText receives the resolved version
-    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', DOI, '2', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'biorxiv',
+      DOI,
+      '2',
+      expect.any(Number),
+      expect.anything(),
+    );
   });
 
   it('defaults server to both, offset to 0, limit to 20000', () => {
@@ -93,10 +108,28 @@ describe('biorxivGetFulltextTool', () => {
     const result = await biorxivGetFulltextTool.handler(input, ctx);
 
     expect(mockGetDetails).toHaveBeenCalledTimes(2);
-    expect(mockGetDetails).toHaveBeenCalledWith(DOI, 'biorxiv', expect.anything());
-    expect(mockGetDetails).toHaveBeenCalledWith(DOI, 'medrxiv', expect.anything());
+    expect(mockGetDetails).toHaveBeenCalledWith(
+      DOI,
+      'biorxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
+    expect(mockGetDetails).toHaveBeenCalledWith(
+      DOI,
+      'medrxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(result.server).toBe('biorxiv');
-    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', DOI, '2', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'biorxiv',
+      DOI,
+      '2',
+      expect.any(Number),
+      expect.anything(),
+    );
   });
 
   it('fetches from medRxiv when only medRxiv resolves the DOI', async () => {
@@ -109,7 +142,13 @@ describe('biorxivGetFulltextTool', () => {
 
     expect(result.server).toBe('medrxiv');
     expect(result.version).toBe('3');
-    expect(mockFetchFullText).toHaveBeenCalledWith('medrxiv', DOI, '3', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'medrxiv',
+      DOI,
+      '3',
+      expect.any(Number),
+      expect.anything(),
+    );
   });
 
   it('resolves against one server only when the caller scopes the request', async () => {
@@ -118,7 +157,13 @@ describe('biorxivGetFulltextTool', () => {
     const result = await biorxivGetFulltextTool.handler(input, ctx);
 
     expect(mockGetDetails).toHaveBeenCalledTimes(1);
-    expect(mockGetDetails).toHaveBeenCalledWith(DOI, 'medrxiv', expect.anything());
+    expect(mockGetDetails).toHaveBeenCalledWith(
+      DOI,
+      'medrxiv',
+      expect.any(Number),
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
     expect(result.server).toBe('medrxiv');
   });
 
@@ -133,7 +178,118 @@ describe('biorxivGetFulltextTool', () => {
     const result = await biorxivGetFulltextTool.handler(input, ctx);
 
     expect(result.server).toBe('medrxiv');
-    expect(mockFetchFullText).toHaveBeenCalledWith('medrxiv', DOI, '1', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'medrxiv',
+      DOI,
+      '1',
+      expect.any(Number),
+      expect.anything(),
+    );
+  });
+
+  describe('cancellation', () => {
+    let controller: AbortController;
+    let cancelled: Error;
+    const ctx = () =>
+      createMockContext({ errors: biorxivGetFulltextTool.errors, signal: controller.signal });
+
+    beforeEach(() => {
+      controller = new AbortController();
+      cancelled = new Error('cancelled by caller');
+    });
+
+    it('rethrows a cancellation rather than resolving from the leg that finished first', async () => {
+      mockGetDetails.mockImplementation((_doi: string, server: string) => {
+        if (server === 'biorxiv') return Promise.resolve([{ doi: DOI, version: '1' }]);
+        controller.abort(cancelled);
+        return Promise.reject(new Error('aborted'));
+      });
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+      expect(await rejection(biorxivGetFulltextTool.handler(input, ctx()))).toBe(cancelled);
+      expect(mockFetchFullText).not.toHaveBeenCalled();
+    });
+
+    it('rethrows a cancellation rather than returning an article that settled after it', async () => {
+      // A cached article answers whether or not the caller is still there.
+      mockFetchFullText.mockImplementation(() => {
+        controller.abort(cancelled);
+        return Promise.resolve(articleResult('A'.repeat(100)));
+      });
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+      expect(await rejection(biorxivGetFulltextTool.handler(input, ctx()))).toBe(cancelled);
+    });
+
+    it('settles a call cancelled during the article fetch as RequestCancelled', async () => {
+      mockFetchFullText.mockImplementation(() => {
+        controller.abort(cancelled);
+        return Promise.resolve(articleResult('A'.repeat(100)));
+      });
+      const result = await runToolContract(biorxivGetFulltextTool, { doi: DOI } as never, {
+        context: { errors: biorxivGetFulltextTool.errors, signal: controller.signal },
+      });
+
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as { error: { code: number } };
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    });
+
+    describe.each([
+      [
+        'the RequestCancelled an aborted request throws',
+        () =>
+          new McpError(JsonRpcErrorCode.RequestCancelled, 'aborted', {
+            errorSource: 'FetchAborted',
+          }),
+      ],
+      [
+        // withRetry rethrows an attempt's own error once the caller's signal has aborted.
+        'a 503 that arrived as the caller cancelled',
+        () =>
+          new McpError(
+            JsonRpcErrorCode.ServiceUnavailable,
+            `Fetch failed for ${SOURCE_URL}. Status: 503`,
+            { status: 503 },
+          ),
+      ],
+    ])('an article fetch that rejects with %s after the caller cancelled', (_label, thrown) => {
+      beforeEach(() => {
+        mockFetchFullText.mockImplementation(() => {
+          controller.abort(cancelled);
+          return Promise.reject(thrown());
+        });
+      });
+
+      it('rethrows the cancellation rather than an upstream_unavailable wrapping it', async () => {
+        const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+        expect(await rejection(biorxivGetFulltextTool.handler(input, ctx()))).toBe(cancelled);
+      });
+
+      it("settles as RequestCancelled with the caller's reason, never a claim that the article page did not answer", async () => {
+        const result = await runToolContract(biorxivGetFulltextTool, { doi: DOI } as never, {
+          context: { errors: biorxivGetFulltextTool.errors, signal: controller.signal },
+        });
+
+        expect(result.isError).toBe(true);
+        const { error } = result.structuredContent as { error: { code: number; message: string } };
+        expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+        expect(error.message).toBe('cancelled by caller');
+        const text = (result.content as { text: string }[])[0]?.text ?? '';
+        expect(text).toContain('cancelled by caller');
+        expect(text).not.toContain('did not answer');
+      });
+    });
+
+    it('still serves the article from the answering server when the other leg fails while the signal is live', async () => {
+      mockGetDetails.mockImplementation((_doi: string, server: string) =>
+        server === 'biorxiv'
+          ? Promise.resolve([{ doi: DOI, version: '1' }])
+          : Promise.reject(new Error('aborted')),
+      );
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+      const result = await biorxivGetFulltextTool.handler(input, ctx());
+
+      expect(result).toMatchObject({ server: 'biorxiv', version: '1', totalChars: 100 });
+    });
   });
 
   it('falls back to version "1" when the latest revision lacks a version field', async () => {
@@ -142,7 +298,13 @@ describe('biorxivGetFulltextTool', () => {
     const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
     const result = await biorxivGetFulltextTool.handler(input, ctx);
     expect(result.version).toBe('1');
-    expect(mockFetchFullText).toHaveBeenCalledWith('biorxiv', DOI, '1', expect.anything());
+    expect(mockFetchFullText).toHaveBeenCalledWith(
+      'biorxiv',
+      DOI,
+      '1',
+      expect.any(Number),
+      expect.anything(),
+    );
   });
 
   // ── Chunking ─────────────────────────────────────────────────────────────────
@@ -357,7 +519,554 @@ describe('biorxivGetFulltextTool', () => {
     const result = await runToolContract(biorxivGetFulltextTool, { doi: DOI } as never, {
       context: { errors: biorxivGetFulltextTool.errors },
     });
-    expect(envelopeHint(result)).toContain('Retry');
+    // The resolution message names servers on api.biorxiv.org, never a page origin.
+    expect(envelopeHint(result)).toBe(
+      'Retry the request after a short delay — the preprint may well exist; api.biorxiv.org did not answer the version lookup.',
+    );
+  });
+
+  describe('an article fetch that fails for a reason other than the page not answering', () => {
+    it.each([
+      [
+        'an origin 400',
+        new McpError(
+          JsonRpcErrorCode.InvalidParams,
+          `Fetch failed for ${SOURCE_URL}. Status: 400`,
+          { status: 400, retryable: false },
+        ),
+      ],
+      [
+        'an extractor rejection',
+        new McpError(JsonRpcErrorCode.ValidationError, 'HTML extraction failed.', {
+          reason: 'html_extract_failed',
+        }),
+      ],
+      ['a programmer error', new TypeError('Cannot read properties of undefined')],
+    ])('keeps %s as it was thrown, never a retryable "did not answer"', async (_label, thrown) => {
+      mockFetchFullText.mockRejectedValue(thrown);
+      const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+      expect(await rejection(biorxivGetFulltextTool.handler(input, ctx))).toBe(thrown);
+    });
+
+    it('still reports a 503 from the article page as retryable upstream_unavailable', async () => {
+      const upstream = new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        `Fetch failed for ${SOURCE_URL}. Status: 503 (failed after 4 attempts)`,
+        { status: 503 },
+      );
+      mockFetchFullText.mockRejectedValue(upstream);
+      const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+      const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'upstream_unavailable', retryable: true, server: 'biorxiv' },
+      });
+      expect(err.cause).toBe(upstream);
+    });
+  });
+
+  // ── One budget across the chain ─────────────────────────────────────────────
+
+  describe('call budget', () => {
+    /** What fetchFullText throws when the article page outlasts the call's budget. */
+    const pageExpiry = () =>
+      new McpError(
+        JsonRpcErrorCode.Timeout,
+        'BiorxivFullTextService.fetchFullText exceeded its 30000ms retry deadline after 2 attempts.',
+        { reason: 'retry_deadline_exceeded', deadlineMs: 30_000, retryAttempts: 2 },
+      );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('hands the article page what version resolution left of one 50 s budget', async () => {
+      const remaining: number[] = [];
+      mockGetDetails.mockImplementation(
+        budgetStep(remaining, 20_000, [{ doi: DOI, version: '2', server: 'biorxiv' }]),
+      );
+      mockFetchFullText.mockImplementation(
+        budgetStep(remaining, 0, articleResult('A'.repeat(100))),
+      );
+      const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI, server: 'biorxiv' });
+      const result = await biorxivGetFulltextTool.handler(input, ctx);
+
+      expect(result.totalChars).toBe(100);
+      expect(remaining).toEqual([CALL_BUDGET_MS, 30_000]);
+    });
+
+    it('fails an article page that outlasts the budget as retryable upstream_unavailable, never a bare Timeout', async () => {
+      const upstream = pageExpiry();
+      mockFetchFullText.mockRejectedValue(upstream);
+      const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
+      const input = biorxivGetFulltextTool.input.parse({ doi: DOI });
+      const err = await rejection(biorxivGetFulltextTool.handler(input, ctx));
+
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'upstream_unavailable',
+          retryable: true,
+          doi: DOI,
+          server: 'biorxiv',
+          version: '2',
+        },
+      });
+      expect(err.message).toContain('exceeded its 30000ms retry deadline');
+      expect(err.cause).toBe(upstream);
+      // Resolution answered, so the metadata fallback still works.
+      expect(recoveryHint(err)).toContain('www.biorxiv.org');
+      expect(recoveryHint(err)).toContain('biorxiv_get_preprint');
+    });
+
+    it('carries the article-page failure on both client surfaces', async () => {
+      mockFetchFullText.mockRejectedValue(pageExpiry());
+      const result = await runToolContract(biorxivGetFulltextTool, { doi: DOI } as never, {
+        context: { errors: biorxivGetFulltextTool.errors },
+      });
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as {
+        error: { code: number; data: { reason?: string; retryable?: boolean } };
+      };
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ reason: 'upstream_unavailable', retryable: true });
+      const text = (result.content as { text: string }[])[0]?.text ?? '';
+      expect(text).toContain('exceeded its 30000ms retry deadline');
+      expect(text).toContain('biorxiv_get_preprint');
+      expect(text).toContain('(reason upstream_unavailable · retryable)');
+    });
+  });
+
+  // ── Version resolution across both servers ─────────────────────────────────
+
+  describe('version resolution across both servers', () => {
+    const REVISIONS = [
+      { doi: DOI, version: '1' },
+      { doi: DOI, version: '2' },
+    ];
+    /** Whether the other server's lookup goes unanswered, as the message names it. */
+    const OTHER_UNANSWERED = ' (medrxiv did not answer)';
+    /** The page cut off by the budget after biorxiv answered 49.5 s in. */
+    const pageCutMessage = (other = OTHER_UNANSWERED) =>
+      `Version lookup for ${DOI} used 49.5 s of the call's 50 s time budget before biorxiv resolved the DOI${other}, so the biorxiv article page got only the remaining 500 ms and had not answered when the budget ran out.`;
+    /** The page never requested after biorxiv answered as the budget ran out. */
+    const neverRequestedMessage = (other = OTHER_UNANSWERED) =>
+      `Version lookup for ${DOI} used the call's whole 50 s time budget before biorxiv resolved the DOI${other}, so the biorxiv article page was never requested.`;
+    const BUDGET_HINT =
+      'Call biorxiv_get_fulltext again with server="biorxiv" — the preprint is on biorxiv, so the retry spends the call\'s whole time budget there: the version lookup, then the article page.';
+
+    /** The leg signal each getDetails call was handed, by server. */
+    let legSignals: Record<string, AbortSignal | undefined>;
+    /** When each article-page request went out, in ms after the call started. */
+    let pageRequestedAt: number[];
+    /** When each request of a {@link servicePage} went out, in ms after the call started. */
+    let pageAttemptsAt: number[];
+
+    /**
+     * The article page as BiorxivFullTextService fetches it: from the cache when
+     * `cached` is set, else on the real retry ladder over what is left of the
+     * call's deadline. Each request is still waiting when the budget cuts it off,
+     * unless `answerMs` passes first: then it answers the article, or rejects
+     * with `fails()`.
+     */
+    const servicePage = (page: { cached?: boolean; answerMs?: number; fails?: () => unknown }) => {
+      const origin = hungOrigin();
+      const startedAt = Date.now();
+      mockFetchFullText.mockImplementation(
+        (_server: string, _doi: string, _version: string, deadline: CallDeadline, ctx: Context) => {
+          if (page.cached) return Promise.resolve(articleResult('A'.repeat(100)));
+          return retryWithinBudget(
+            ({ signal, remainingMs }) => {
+              pageAttemptsAt.push(Date.now() - startedAt);
+              const request = origin.fetch(SOURCE_URL, Math.min(30_000, remainingMs), ctx, {
+                signal,
+              });
+              if (page.answerMs === undefined) return request;
+              const answer = new Promise((resolve, reject) =>
+                setTimeout(
+                  () =>
+                    page.fails ? reject(page.fails()) : resolve(articleResult('A'.repeat(100))),
+                  page.answerMs,
+                ),
+              );
+              return Promise.race([answer, request]);
+            },
+            {
+              operation: 'BiorxivFullTextService.fetchFullText',
+              context: ctx,
+              baseDelayMs: 500,
+              signal: ctx.signal,
+              deadline,
+            },
+          );
+        },
+      );
+    };
+
+    const call = (input: Record<string, unknown> = { doi: DOI }) =>
+      settle(
+        Promise.resolve(
+          biorxivGetFulltextTool.handler(
+            biorxivGetFulltextTool.input.parse(input),
+            createMockContext({ errors: biorxivGetFulltextTool.errors }),
+          ),
+        ),
+      );
+    const contractCall = (signal?: AbortSignal) =>
+      settle(
+        runToolContract(biorxivGetFulltextTool, { doi: DOI } as never, {
+          context: { errors: biorxivGetFulltextTool.errors, ...(signal && { signal }) },
+        }),
+      );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+      legSignals = {};
+      pageRequestedAt = [];
+      pageAttemptsAt = [];
+      const startedAt = Date.now();
+      mockFetchFullText.mockImplementation(() => {
+        pageRequestedAt.push(Date.now() - startedAt);
+        return Promise.resolve(articleResult('A'.repeat(100)));
+      });
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it.each([
+      ['biorxiv', 'medrxiv'],
+      ['medrxiv', 'biorxiv'],
+    ])(
+      'requests the article page the moment %s, the server holding the DOI, answers',
+      async (holder, other) => {
+        routeLegs(
+          mockGetDetails,
+          {
+            [holder]: () => answerAfter(1_000, REVISIONS),
+            [other]: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+          },
+          legSignals,
+        );
+        const { value, elapsedMs } = await call();
+
+        expect(pageRequestedAt).toEqual([1_000]);
+        expect(elapsedMs).toBe(1_000);
+        expect(value).toMatchObject({ server: holder, version: '2', totalChars: 100 });
+        expect(mockFetchFullText).toHaveBeenCalledWith(
+          holder,
+          DOI,
+          '2',
+          expect.any(Number),
+          expect.anything(),
+        );
+      },
+    );
+
+    it('aborts the lookup still running on the other server, and only that one', async () => {
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: () => answerAfter(1_000, REVISIONS),
+          medrxiv: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+        },
+        legSignals,
+      );
+      await call();
+
+      expect(legSignals.medrxiv?.aborted).toBe(true);
+      expect(legSignals.biorxiv?.aborted).toBe(false);
+    });
+
+    it('waits for the server holding the DOI exactly as long as before when it answers last', async () => {
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: () => answerAfter(3_000, REVISIONS),
+          medrxiv: () => answerAfter(1_000, []),
+        },
+        legSignals,
+      );
+      const { value, elapsedMs } = await call();
+
+      expect(pageRequestedAt).toEqual([3_000]);
+      expect(elapsedMs).toBe(3_000);
+      expect(value).toMatchObject({ server: 'biorxiv', version: '2' });
+      // Every lookup had answered, so none was cut short.
+      expect(legSignals.medrxiv?.aborted).not.toBe(true);
+    });
+
+    it('reads a metadata 429 only from a lookup that had answered when resolution ended', async () => {
+      routeLegs(
+        mockGetDetails,
+        {
+          biorxiv: () => answerAfter(1_000, REVISIONS),
+          // The 429 this lookup would have reported a second after resolution ended.
+          medrxiv: () =>
+            new Promise((_resolve, reject) => setTimeout(() => reject(rateLimitError(45)), 2_000)),
+        },
+        legSignals,
+      );
+      mockFetchFullText.mockImplementation(() =>
+        answerAfter(1_500, {
+          kind: 'unavailable',
+          reason: 'rate_limited',
+          detail: 'The full-text origin is rate-limiting this host (HTTP 429).',
+          retryAfter: 20,
+          sourceUrl: SOURCE_URL,
+        } satisfies FullTextFetchResult),
+      );
+      const { err, elapsedMs } = await call();
+
+      expect(elapsedMs).toBe(2_500);
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'rate_limited', retryAfter: 20 },
+      });
+      expect(recoveryHint(err)).toContain(
+        'api.biorxiv.org answered this call, so biorxiv_get_preprint still serves',
+      );
+    });
+
+    describe('when version resolution leaves the article page little or none of the budget', () => {
+      /** The other server's lookup, and how the message names it. */
+      const OTHER_SERVER: [string, (signal: AbortSignal) => Promise<unknown>, string][] = [
+        ['never answered', (signal) => neverAnswers(signal, CALL_BUDGET_MS), OTHER_UNANSWERED],
+        [
+          'failed',
+          () =>
+            new Promise((_resolve, reject) =>
+              setTimeout(() => reject(new Error('api.biorxiv.org unreachable')), 1_000),
+            ),
+          OTHER_UNANSWERED,
+        ],
+        ['answered that it does not hold the DOI', () => answerAfter(1_000, []), ''],
+      ];
+      const PAGE_HINT =
+        'Retry after a short delay — the www.biorxiv.org article page did not answer. api.biorxiv.org resolved this preprint, so biorxiv_get_preprint still serves its title, abstract, and metadata meanwhile.';
+      const UPSTREAM_UNAVAILABLE = {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'upstream_unavailable',
+          retryable: true,
+          doi: DOI,
+          server: 'biorxiv',
+          version: '2',
+        },
+      };
+      /** bioRxiv holds the DOI and answers `answerMs` in; medRxiv runs `medrxiv`. */
+      const holderAnswersAt = (
+        answerMs: number,
+        medrxiv: (signal: AbortSignal) => Promise<unknown> = (signal) =>
+          neverAnswers(signal, CALL_BUDGET_MS),
+      ) =>
+        routeLegs(
+          mockGetDetails,
+          { biorxiv: () => answerAfter(answerMs, REVISIONS), medrxiv },
+          legSignals,
+        );
+
+      it('requests the article page with whatever budget is left, and serves it when it answers in time', async () => {
+        holderAnswersAt(CALL_BUDGET_MS - 1_000);
+        servicePage({ answerMs: 800 });
+        const { value, elapsedMs } = await call();
+
+        expect(pageAttemptsAt).toEqual([CALL_BUDGET_MS - 1_000]);
+        expect(elapsedMs).toBe(CALL_BUDGET_MS - 200);
+        expect(value).toMatchObject({ server: 'biorxiv', version: '2', totalChars: 100 });
+      });
+
+      it.each(OTHER_SERVER)(
+        'names the slow lookup when the budget cuts the page off and the other server %s, and sends the retry to the holding server',
+        async (_how, medrxiv, other) => {
+          holderAnswersAt(CALL_BUDGET_MS - 500, medrxiv);
+          servicePage({ answerMs: 800 });
+          const { err, elapsedMs } = await call();
+
+          expect(pageAttemptsAt).toEqual([CALL_BUDGET_MS - 500]);
+          expect(elapsedMs).toBe(CALL_BUDGET_MS);
+          expect(err).toMatchObject(UPSTREAM_UNAVAILABLE);
+          expect(err.message).toBe(pageCutMessage(other));
+          expect(recoveryHint(err)).toBe(BUDGET_HINT);
+          expect(err.cause).toMatchObject({
+            code: JsonRpcErrorCode.Timeout,
+            message:
+              'BiorxivFullTextService.fetchFullText exceeded its 500ms retry deadline after 1 attempt.',
+            data: { reason: 'retry_deadline_exceeded', retryAttempts: 1 },
+          });
+        },
+      );
+
+      it.each(OTHER_SERVER)(
+        'names the slow lookup when no budget is left and nothing is cached and the other server %s, without requesting the page',
+        async (_how, medrxiv, other) => {
+          holderAnswersAt(CALL_BUDGET_MS, medrxiv);
+          servicePage({ answerMs: 800 });
+          const { err, elapsedMs } = await call();
+
+          expect(mockFetchFullText).toHaveBeenCalledTimes(1);
+          expect(pageAttemptsAt).toEqual([]);
+          expect(elapsedMs).toBe(CALL_BUDGET_MS);
+          expect(err).toMatchObject(UPSTREAM_UNAVAILABLE);
+          expect(err.message).toBe(neverRequestedMessage(other));
+          expect(recoveryHint(err)).toBe(BUDGET_HINT);
+        },
+      );
+
+      it('serves a cached article even with no budget left', async () => {
+        holderAnswersAt(CALL_BUDGET_MS);
+        servicePage({ cached: true });
+        const { value, elapsedMs } = await call();
+
+        expect(pageAttemptsAt).toEqual([]);
+        expect(elapsedMs).toBe(CALL_BUDGET_MS);
+        expect(value).toMatchObject({ server: 'biorxiv', version: '2', totalChars: 100 });
+      });
+
+      it.each([
+        ['cut off by the budget', 500, pageCutMessage()],
+        ['never requested', 0, neverRequestedMessage()],
+      ])(
+        'carries the slow lookup on both client surfaces when the page was %s',
+        async (_how, leftMs, message) => {
+          holderAnswersAt(CALL_BUDGET_MS - leftMs);
+          servicePage({ answerMs: 800 });
+          const result = (await contractCall()).value as Awaited<
+            ReturnType<typeof runToolContract>
+          >;
+
+          expect(result.isError).toBe(true);
+          const { error } = result.structuredContent as {
+            error: { code: number; message: string; data: Record<string, unknown> };
+          };
+          expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+          expect(error.message).toBe(message);
+          expect(error.data).toMatchObject({
+            reason: 'upstream_unavailable',
+            retryable: true,
+            doi: DOI,
+            server: 'biorxiv',
+            version: '2',
+          });
+          expect(envelopeHint(result)).toBe(BUDGET_HINT);
+          const text = (result.content as { text: string }[])[0]?.text ?? '';
+          expect(text).toContain(message);
+          expect(text).toContain(BUDGET_HINT);
+          expect(text).toContain('(reason upstream_unavailable · retryable)');
+          expect(text).not.toContain('did not answer —');
+        },
+      );
+
+      it.each([
+        ['cut off by the budget', 500, pageCutMessage('')],
+        ['never requested', 0, neverRequestedMessage('')],
+      ])(
+        'words the failure for a caller who scoped resolution to one server, the page %s',
+        async (_how, leftMs, message) => {
+          routeLegs(
+            mockGetDetails,
+            { biorxiv: () => answerAfter(CALL_BUDGET_MS - leftMs, REVISIONS) },
+            legSignals,
+          );
+          servicePage({ answerMs: 800 });
+          const { err } = await call({ doi: DOI, server: 'biorxiv' });
+
+          expect(mockGetDetails).toHaveBeenCalledTimes(1);
+          expect(err).toMatchObject(UPSTREAM_UNAVAILABLE);
+          expect(err.message).toBe(message);
+          expect(recoveryHint(err)).toBe(BUDGET_HINT);
+        },
+      );
+
+      it.each([
+        [
+          'exactly half of it, the page as long as the lookup',
+          CALL_BUDGET_MS / 2,
+          `The biorxiv article page for ${DOI} v2 did not answer — BiorxivFullTextService.fetchFullText exceeded its 25000ms retry deadline after 1 attempt.`,
+          PAGE_HINT,
+        ],
+        [
+          'one millisecond past half of it',
+          CALL_BUDGET_MS / 2 + 1,
+          `Version lookup for ${DOI} used 25.0 s of the call's 50 s time budget before biorxiv resolved the DOI${OTHER_UNANSWERED}, so the biorxiv article page got only the remaining 25.0 s and had not answered when the budget ran out.`,
+          BUDGET_HINT,
+        ],
+      ])(
+        'blames the lookup for a page that never answered only when the lookup used most of the budget — %s',
+        async (_how, holderMs, message, hint) => {
+          holderAnswersAt(holderMs);
+          servicePage({});
+          const { err, elapsedMs } = await call();
+
+          expect(pageAttemptsAt).toEqual([holderMs]);
+          expect(elapsedMs).toBe(CALL_BUDGET_MS);
+          expect(err).toMatchObject(UPSTREAM_UNAVAILABLE);
+          expect(err.message).toBe(message);
+          expect(recoveryHint(err)).toBe(hint);
+        },
+      );
+
+      it('keeps a page that failed on its own inside a short remainder a failure of the page', async () => {
+        holderAnswersAt(CALL_BUDGET_MS - 500);
+        const outage = new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          `Fetch failed for ${SOURCE_URL}. Status: 503`,
+          { status: 503 },
+        );
+        // A 503 400 ms in leaves 100 ms, less than the 375–625 ms backoff before a retry.
+        servicePage({ answerMs: 400, fails: () => outage });
+        const { err } = await call();
+
+        expect(pageAttemptsAt).toEqual([CALL_BUDGET_MS - 500]);
+        expect(err).toMatchObject(UPSTREAM_UNAVAILABLE);
+        expect(err.message).toBe(
+          `The biorxiv article page for ${DOI} v2 did not answer — BiorxivFullTextService.fetchFullText exceeded its 500ms retry deadline after 1 attempt.`,
+        );
+        expect(recoveryHint(err)).toBe(PAGE_HINT);
+        expect((err.cause as McpError).cause).toBe(outage);
+      });
+
+      it('still requests the article page with 1 ms of the budget left', async () => {
+        routeLegs(
+          mockGetDetails,
+          {
+            biorxiv: () => answerAfter(CALL_BUDGET_MS - 1, REVISIONS),
+            medrxiv: (signal) => neverAnswers(signal, CALL_BUDGET_MS),
+          },
+          legSignals,
+        );
+        const { value } = await call();
+
+        expect(pageRequestedAt).toEqual([CALL_BUDGET_MS - 1]);
+        expect(value).toMatchObject({ server: 'biorxiv', version: '2', totalChars: 100 });
+      });
+    });
+
+    it('still settles a caller cancellation during resolution as RequestCancelled, never a failed lookup', async () => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('cancelled by caller')), 5_000);
+      routeLegs(
+        mockGetDetails,
+        { biorxiv: (signal) => neverAnswers(signal), medrxiv: (signal) => neverAnswers(signal) },
+        legSignals,
+      );
+      const { value, elapsedMs } = await contractCall(controller.signal);
+      const result = value as Awaited<ReturnType<typeof runToolContract>>;
+
+      expect(elapsedMs).toBe(5_000);
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as { error: { code: number; message: string } };
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      // Both lookups rejected only because the caller left: neither failed.
+      expect(error.message).toBe('cancelled by caller');
+      const text = (result.content as { text: string }[])[0]?.text ?? '';
+      expect(text).not.toContain('Version lookup');
+      expect(mockFetchFullText).not.toHaveBeenCalled();
+    });
   });
 
   it('declares a rate_limited recovery that holds when the origin named no wait', () => {

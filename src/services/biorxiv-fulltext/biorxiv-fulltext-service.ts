@@ -29,11 +29,16 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, htmlExtractor, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, htmlExtractor } from '@cyanheads/mcp-ts-core/utils';
 import { parseHTML } from 'linkedom';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
-import { parseRetryAfterSeconds, SERVER_VERSION } from '@/services/shared.js';
+import {
+  type CallDeadline,
+  parseRetryAfterSeconds,
+  retryWithinBudget,
+  SERVER_VERSION,
+} from '@/services/shared.js';
 
 /**
  * bioRxiv/medRxiv render their article pages on the Highwire platform, whose
@@ -280,8 +285,9 @@ export class BiorxivFullTextService {
    * Resolves to `{ kind: 'article', markdown, ... }` on success, or
    * `{ kind: 'unavailable', reason }` when the page is blocked (Cloudflare 403 /
    * challenge), rate-limited (429), missing, or yields no extractable text
-   * (PDF-only preprints). Transient failures (5xx, timeout, network) bubble as
-   * `ServiceUnavailable` after retry so the framework classifies them as retryable.
+   * (PDF-only preprints). Transient failures (5xx, timeout, network) bubble
+   * unchanged after retry — `ServiceUnavailable`, or a `Timeout` once `deadline`
+   * runs out — for the caller to classify.
    *
    * A successful extraction is served from the tenant-scoped `ctx.state` cache on
    * subsequent calls for the same server/DOI/version, so offset paging does not
@@ -291,6 +297,7 @@ export class BiorxivFullTextService {
     server: BiorxivServer,
     doi: string,
     version: string,
+    deadline: CallDeadline,
     ctx: Context,
   ): Promise<FullTextFetchResult> {
     const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
@@ -310,10 +317,10 @@ export class BiorxivFullTextService {
 
     let html: string;
     try {
-      html = await withRetry(
-        async () => {
-          const response = await fetchWithTimeout(sourceUrl, 30_000, ctx, {
-            signal: ctx.signal,
+      html = await retryWithinBudget(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(sourceUrl, Math.min(30_000, remainingMs), ctx, {
+            signal,
             headers: { 'User-Agent': this.userAgent, Accept: 'text/html' },
             expectedStatuses: EXPECTED_STATUSES,
           });
@@ -324,13 +331,15 @@ export class BiorxivFullTextService {
           context: ctx,
           baseDelayMs: 500,
           signal: ctx.signal,
+          deadline,
         },
       );
     } catch (err) {
       // fetchWithTimeout throws on non-2xx with data.status set. Deterministic
       // access failures (403 block, 404 missing) and origin rate limiting (429)
-      // become an `unavailable` result; transient codes (5xx / timeout / network)
-      // bubble unchanged as ServiceUnavailable.
+      // become an `unavailable` result; transient failures (5xx / timeout /
+      // network / deadline expiry) bubble unchanged. A 429 the budget ran out
+      // after arrives in place of the expiry, and is still the origin's answer.
       const errData =
         err instanceof McpError
           ? (err.data as { retryAfter?: unknown; status?: unknown } | undefined)

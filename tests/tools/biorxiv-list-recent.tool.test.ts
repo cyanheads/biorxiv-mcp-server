@@ -3,7 +3,7 @@
  * @module tests/tools/biorxiv-list-recent.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListRecentTool } from '@/mcp-server/tools/definitions/biorxiv-list-recent.tool.js';
@@ -127,6 +127,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-31',
       0,
       {},
+      expect.any(Number),
       expect.anything(),
     );
   });
@@ -543,6 +544,168 @@ describe('biorxivListRecentTool', () => {
     });
   });
 
+  it('names the server and the wait on a single-server 429, as the two-server failure does', async () => {
+    const upstream = rateLimitError(30);
+    mockGetListing.mockRejectedValue(upstream);
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'biorxiv',
+    });
+    const err = await rejection(biorxivListRecentTool.handler(input, ctx));
+
+    expect(err.data).toMatchObject({ servers: ['biorxiv'] });
+    expect(err.message).toBe(`bioRxiv did not answer — ${upstream.message}`);
+    expect(err.cause).toBe(upstream);
+    expect(recoveryHint(err)).toBe(
+      'Wait 30 seconds before retrying — api.biorxiv.org is rate-limiting this host, and every preprint metadata tool queries the same origin.',
+    );
+  });
+
+  it('fails a single-server listing that outlasts the call budget as retryable upstream_unavailable, never a bare Timeout', async () => {
+    const expiry = new McpError(
+      JsonRpcErrorCode.Timeout,
+      'BiorxivApiService.getListing exceeded its 50000ms retry deadline after 3 attempts.',
+      { reason: 'retry_deadline_exceeded', deadlineMs: 50_000, retryAttempts: 3 },
+    );
+    mockGetListing.mockRejectedValue(expiry);
+    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
+    const input = biorxivListRecentTool.input.parse({
+      start_date: '2024-01-01',
+      end_date: '2024-01-31',
+      server: 'medrxiv',
+    });
+    const err = await rejection(biorxivListRecentTool.handler(input, ctx));
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable', retryable: true, servers: ['medrxiv'] },
+    });
+    expect(err.message).toBe(`medRxiv did not answer — ${expiry.message}`);
+    expect(err.cause).toBe(expiry);
+  });
+
+  it('carries a failed leg of a "both" request collapsed onto one server on both client surfaces', async () => {
+    // Neuroscience exists only in the bioRxiv taxonomy, so only bioRxiv is queried.
+    mockIsValidCategory.mockImplementation((_cat: string, server: string) => server !== 'medrxiv');
+    mockGetListing.mockRejectedValue(new Error('fetch failed'));
+    const result = await runToolContract(
+      biorxivListRecentTool,
+      {
+        start_date: '2024-01-15',
+        end_date: '2024-01-15',
+        server: 'both',
+        category: 'Neuroscience',
+      } as never,
+      { context: { errors: biorxivListRecentTool.errors } },
+    );
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as {
+      error: { code: number; message: string; data: Record<string, unknown> };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({
+      reason: 'upstream_unavailable',
+      retryable: true,
+      servers: ['biorxiv'],
+    });
+    expect(error.message).toBe('bioRxiv did not answer — fetch failed');
+    expect(envelopeHint(result)).toBe(
+      'Retry the request after a short delay — the interval may well hold preprints; api.biorxiv.org did not answer.',
+    );
+    const text = (result.content as { text: string }[])[0]?.text ?? '';
+    expect(text).toContain('bioRxiv did not answer — fetch failed');
+    expect(text).toContain('Retry the request after a short delay');
+    expect(text).toContain('upstream_unavailable');
+  });
+
+  it('keeps a caller cancellation of a single-server listing a cancellation, never a degraded page', async () => {
+    const controller = new AbortController();
+    mockGetListing.mockImplementation(() => {
+      controller.abort(new Error('cancelled by caller'));
+      return Promise.reject(new Error('aborted'));
+    });
+    const result = await runToolContract(
+      biorxivListRecentTool,
+      { start_date: '2024-01-01', end_date: '2024-01-31', server: 'biorxiv' } as never,
+      { context: { errors: biorxivListRecentTool.errors, signal: controller.signal } },
+    );
+
+    // The runner settles any throw after the abort as RequestCancelled, so the
+    // message is what shows the caller's reason was rethrown, not a server outage.
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: { code: JsonRpcErrorCode.RequestCancelled, message: 'cancelled by caller' },
+    });
+    expect(result.content).toEqual([{ type: 'text', text: 'Error: cancelled by caller' }]);
+    expect(mockGetListing).toHaveBeenCalledTimes(1);
+  });
+
+  describe('cancellation under server="both"', () => {
+    const WEEK = { start_date: '2024-01-01', end_date: '2024-01-07', server: 'both' };
+
+    /** bioRxiv answers; the medRxiv leg runs `medrxiv`. */
+    const legs = (medrxiv: () => Promise<never>) =>
+      mockGetListing.mockImplementation((server: string) =>
+        server === 'biorxiv' ? Promise.resolve(LISTING_RESULT) : medrxiv(),
+      );
+
+    it('rethrows a cancellation rather than returning the leg that finished first', async () => {
+      const controller = new AbortController();
+      const cancelled = new Error('cancelled by caller');
+      legs(() => {
+        controller.abort(cancelled);
+        return Promise.reject(new Error('aborted'));
+      });
+      const ctx = createMockContext({
+        errors: biorxivListRecentTool.errors,
+        signal: controller.signal,
+      });
+      const err = await rejection(
+        biorxivListRecentTool.handler(biorxivListRecentTool.input.parse(WEEK), ctx),
+      );
+      expect(err).toBe(cancelled);
+    });
+
+    it('settles the cancelled call as RequestCancelled, never a partial success', async () => {
+      const controller = new AbortController();
+      legs(() => {
+        controller.abort(new Error('cancelled by caller'));
+        return Promise.reject(new Error('aborted'));
+      });
+      const result = await runToolContract(biorxivListRecentTool, WEEK as never, {
+        context: { errors: biorxivListRecentTool.errors, signal: controller.signal },
+      });
+
+      // The runner settles any throw after the abort as RequestCancelled, so the
+      // message is what shows the caller's reason was rethrown, not a server outage.
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({
+        error: { code: JsonRpcErrorCode.RequestCancelled, message: 'cancelled by caller' },
+      });
+      expect(result.content).toEqual([{ type: 'text', text: 'Error: cancelled by caller' }]);
+    });
+
+    it('still returns the answering page with the other leg in failed[] while the signal is live', async () => {
+      const controller = new AbortController();
+      legs(() => Promise.reject(new Error('fetch failed')));
+      const ctx = createMockContext({
+        errors: biorxivListRecentTool.errors,
+        signal: controller.signal,
+      });
+      const result = await biorxivListRecentTool.handler(
+        biorxivListRecentTool.input.parse(WEEK),
+        ctx,
+      );
+
+      expect(controller.signal.aborted).toBe(false);
+      expect(result.preprints).toEqual([PREPRINT]);
+      expect(result.failed).toEqual([{ server: 'medrxiv', error: 'fetch failed' }]);
+    });
+  });
+
   // ── Category routing for server="both" ──────────────────────────────────────
 
   it('queries only the matching server for a server-exclusive category when server="both"', async () => {
@@ -565,6 +728,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       0,
       { category: 'Neuroscience' },
+      expect.any(Number),
       expect.anything(),
     );
     expect(result.pagination.biorxiv).toBeDefined();
@@ -593,6 +757,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       0,
       { category: 'Pathology' },
+      expect.any(Number),
       expect.anything(),
     );
     expect(mockGetListing).toHaveBeenCalledWith(
@@ -601,6 +766,7 @@ describe('biorxivListRecentTool', () => {
       '2024-01-15',
       0,
       { category: 'Pathology' },
+      expect.any(Number),
       expect.anything(),
     );
     expect(result.pagination.biorxiv).toBeDefined();

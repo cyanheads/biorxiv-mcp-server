@@ -5,7 +5,9 @@
  * (journal name, published date, full abstract, corresponding author details).
  * bioRxiv and medRxiv share their DOI prefixes, so the DOI alone does not
  * identify the server: the default server="both" resolves against both in
- * parallel and the output names the server that answered.
+ * parallel and the output names the server that answered. A preprint and its
+ * crosswalk record live on one server, so each two-server step ends the moment
+ * that server answers, and the other server's lookup is cut short.
  *
  * `/pubs` keyed by preprint DOI never parses a `10.64898/` DOI, so when it
  * answers empty everywhere the preprint's `/details` record supplies the journal
@@ -25,7 +27,15 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
-import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/services/shared.js';
+import {
+  describeWait,
+  escapeMarkdown,
+  findRateLimit,
+  firstHit,
+  type LegOutcome,
+  normalizeDoi,
+  startCallDeadline,
+} from '@/services/shared.js';
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
@@ -72,7 +82,12 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     preprintTitle: z.string().optional().describe('Title of the preprint.'),
     preprintAuthors: z.string().optional().describe('Preprint author list.'),
     preprintCategory: z.string().optional().describe('Subject category.'),
-    preprintDate: z.string().optional().describe('Date the preprint was first posted.'),
+    preprintDate: z
+      .string()
+      .optional()
+      .describe(
+        "Preprint posting date (YYYY-MM-DD) from the crosswalk record, or from the preprint's first revision when the crosswalk has none — the first posting for most preprints. medRxiv records some 10.64898/ preprints twice with different posting dates; this is the first record listed.",
+      ),
     preprintAbstract: z.string().optional().describe('Preprint abstract.'),
     preprintAuthorCorresponding: z.string().optional().describe('Corresponding author name.'),
     preprintAuthorCorrespondingInstitution: z
@@ -137,6 +152,8 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     }
 
     const service = getBiorxivApiService();
+    // One budget for all three lookups below, which run one after another.
+    const deadline = startCallDeadline();
     const servers: BiorxivServer[] =
       input.server === 'both' ? ['biorxiv', 'medrxiv'] : [input.server];
 
@@ -149,10 +166,10 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
      */
     const lookupFailure = (
       lookup: string,
-      settled: PromiseSettledResult<unknown>[],
+      outcomes: LegOutcome<unknown>[],
     ): McpError | undefined => {
-      const rejections = settled.flatMap((r, i) =>
-        r.status === 'rejected' ? [{ server: servers[i] as BiorxivServer, error: r.reason }] : [],
+      const rejections = outcomes.flatMap((r, i) =>
+        r?.status === 'rejected' ? [{ server: servers[i] as BiorxivServer, error: r.reason }] : [],
       );
       if (rejections.length === 0) return;
       const detail = rejections.map((f) => `${f.server}: ${errorMessage(f.error)}`).join('; ');
@@ -183,27 +200,41 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     };
 
     // 1. The crosswalk keyed by preprint DOI — resolves 10.1101/ DOIs directly.
-    const crosswalk = await Promise.allSettled(
-      servers.map((server) => service.getPublishedVersion(doi, server, ctx)),
+    // The record lives on the server holding the preprint, so the step ends the
+    // moment that server answers with it.
+    const crosswalk = await firstHit(
+      servers.map(
+        (server) => (signal: AbortSignal) =>
+          service.getPublishedVersion(doi, server, deadline, ctx, signal),
+      ),
+      (record) => record !== undefined,
+      ctx.signal,
     );
-    for (const [i, result] of crosswalk.entries()) {
-      if (result.status === 'fulfilled' && result.value) {
-        return { ...result.value, server: servers[i] as BiorxivServer };
-      }
+    // A cancelled call is not answered from the leg that finished first, nor
+    // reported as a failed lookup — after this step and each one below.
+    ctx.signal.throwIfAborted();
+    const record = crosswalk.hit;
+    if (record?.value) {
+      return { ...record.value, server: servers[record.leg] as BiorxivServer };
     }
-    const crosswalkFailure = lookupFailure('Crosswalk lookup', crosswalk);
+    const crosswalkFailure = lookupFailure('Crosswalk lookup', crosswalk.outcomes);
     if (crosswalkFailure) throw crosswalkFailure;
 
     // 2. The crosswalk answered empty everywhere, which is also its answer for
     // every 10.64898/ DOI — the path form never parses one. The preprint's own
-    // /details record names its journal DOI whichever prefix it carries.
-    const details = await Promise.allSettled(
-      servers.map((server) => service.getDetails(doi, server, ctx)),
+    // /details record names its journal DOI whichever prefix it carries; it too
+    // lives on one server, so the step ends the moment that server answers.
+    const details = await firstHit(
+      servers.map(
+        (server) => (signal: AbortSignal) => service.getDetails(doi, server, deadline, ctx, signal),
+      ),
+      (revisions) => revisions.length > 0,
+      ctx.signal,
     );
-    const heldAt = details.findIndex((r) => r.status === 'fulfilled' && r.value.length > 0);
-    const held = details[heldAt];
-    if (held?.status !== 'fulfilled') {
-      const detailsFailure = lookupFailure('Preprint lookup', details);
+    ctx.signal.throwIfAborted();
+    const held = details.hit;
+    if (!held) {
+      const detailsFailure = lookupFailure('Preprint lookup', details.outcomes);
       if (detailsFailure) throw detailsFailure;
       // No preprint at all: the contract hint's "no journal version yet — check
       // again later" would send the caller to wait on a DOI that does not exist.
@@ -215,7 +246,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
         },
       });
     }
-    const server = servers[heldAt] as BiorxivServer;
+    const server = servers[held.leg] as BiorxivServer;
     const revisions = held.value;
     const publishedDoi = revisions.findLast((r) => r.publishedJournalDoi)?.publishedJournalDoi;
     if (!publishedDoi) {
@@ -229,8 +260,9 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     // 3. The crosswalk keyed the other way, by that journal DOI — the full
     // record, journal name and date included, whenever the API can parse the key.
     const [byJournal] = await Promise.allSettled([
-      service.getPublishedVersionByJournalDoi(publishedDoi, doi, server, ctx),
+      service.getPublishedVersionByJournalDoi(publishedDoi, doi, server, deadline, ctx),
     ]);
+    ctx.signal.throwIfAborted();
     if (byJournal?.status === 'fulfilled' && byJournal.value) {
       return { ...byJournal.value, server };
     }

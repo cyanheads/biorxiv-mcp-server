@@ -3,12 +3,15 @@
  * HTML error detection, DOI and ROR ID input normalization, calendar-date and
  * upstream-text normalization, the Markdown escaper every `format()` applies
  * to upstream text, `Retry-After` parsing and rate-limit rejection lookup
- * shared by every fetch path, and the server version string used in User-Agent
- * headers across all services.
+ * shared by every fetch path, the per-tool-call time budget every upstream
+ * request draws on (with the retry ladder that runs inside it and keeps an
+ * origin's 429 as its answer when the budget runs out), the per-server DOI fan-out that settles on the server holding the DOI, and the
+ * server version string used in User-Agent headers across all services.
  * @module services/shared
  */
 
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { type RetryAttempt, type RetryOptions, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import packageJson from '../../package.json' with { type: 'json' };
 import {
   BRACE_PLACEHOLDERS,
@@ -443,6 +446,145 @@ export function findRateLimit(errors: readonly unknown[]): { retryAfter?: number
 export function describeWait(seconds: number | undefined): string {
   if (seconds === undefined) return 'a minute or two';
   return seconds === 1 ? '1 second' : `${seconds} seconds`;
+}
+
+/**
+ * Wall-clock budget for one tool call: every upstream request the call makes,
+ * with each request's attempts, backoffs, and honored `Retry-After` waits. Kept
+ * under the 60-second request timeout MCP SDK clients default to, so a hung
+ * origin surfaces as this server's classified error — or as the degraded result
+ * a tool already returns for an optional step — before the client gives up.
+ */
+export const CALL_BUDGET_MS = 50_000;
+
+/**
+ * The instant, in epoch milliseconds, one tool call's {@link CALL_BUDGET_MS}
+ * runs out. A handler starts it once with {@link startCallDeadline} and passes
+ * the same value to every service call, so requests chained one after another
+ * share one budget instead of each starting its own.
+ */
+export type CallDeadline = number & { readonly __brand: 'CallDeadline' };
+
+/** Starts a tool call's budget. Call once per tool call, before its first upstream request. */
+export function startCallDeadline(): CallDeadline {
+  return (Date.now() + CALL_BUDGET_MS) as CallDeadline;
+}
+
+/**
+ * What is left of a call's budget, in milliseconds — 0 once it has run out.
+ * Every retry ladder's `deadlineMs` is drawn from it ({@link ladderBudgetMs}).
+ */
+export function remainingBudgetMs(deadline: CallDeadline): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+/**
+ * `withRetry`'s `deadlineMs` for a ladder about to start: what is left of the
+ * call's budget. A budget already spent fails here, before any request, as the
+ * call running out of time — a ladder started with nothing left would report
+ * exceeding a "0ms retry deadline", which tells a caller nothing.
+ */
+export function ladderBudgetMs(deadline: CallDeadline, operation: string): number {
+  const remaining = remainingBudgetMs(deadline);
+  if (remaining > 0) return remaining;
+  throw timeout(
+    `${operation} was not attempted — the call's ${CALL_BUDGET_MS / 1000} s time budget had run out.`,
+    { reason: 'retry_deadline_exceeded', retryAttempts: 0 },
+  );
+}
+
+/** Whether `err` is an origin's HTTP 429 as `fetchWithTimeout` raises it. */
+function isHttp429(err: unknown): err is McpError {
+  return err instanceof McpError && (err.data as { status?: unknown } | undefined)?.status === 429;
+}
+
+/**
+ * Runs one retry ladder on what is left of a call's budget: `withRetry` with
+ * {@link ladderBudgetMs} as its `deadlineMs`, so a spent budget fails before
+ * any request. The ladder remembers the last HTTP 429 an attempt received.
+ * When the budget then runs out — in the backoff after it, or by cutting a
+ * later attempt short — `withRetry` rejects with a `Timeout`
+ * (`reason: 'retry_deadline_exceeded'`) whose `cause` is only the last
+ * attempt; the ladder rejects with the 429 instead, `Retry-After` and all,
+ * since it is still the origin's answer and the one the services classify.
+ * Every other failure is rejected as `withRetry` threw it.
+ */
+export async function retryWithinBudget<T>(
+  attempt: (attempt: RetryAttempt) => Promise<T>,
+  options: Omit<RetryOptions, 'deadlineMs' | 'operation'> & {
+    deadline: CallDeadline;
+    operation: string;
+  },
+): Promise<T> {
+  const { deadline, ...retryOptions } = options;
+  let lastRateLimit: McpError | undefined;
+  try {
+    return await withRetry(
+      async (a) => {
+        try {
+          return await attempt(a);
+        } catch (err) {
+          if (isHttp429(err)) lastRateLimit = err;
+          throw err;
+        }
+      },
+      { ...retryOptions, deadlineMs: ladderBudgetMs(deadline, options.operation) },
+    );
+  } catch (err) {
+    const expired =
+      err instanceof McpError &&
+      (err.data as { reason?: unknown } | undefined)?.reason === 'retry_deadline_exceeded';
+    throw expired && lastRateLimit ? lastRateLimit : err;
+  }
+}
+
+/**
+ * One leg of a per-server fan-out as it stood when {@link firstHit} settled:
+ * its settled result, or `undefined` for a leg still running then — aborted,
+ * and never read as a failure.
+ */
+export type LegOutcome<T> = PromiseSettledResult<T> | undefined;
+
+/**
+ * Runs one DOI lookup per server and settles on the first leg whose answer
+ * `isHit` accepts, or once every leg has settled. A DOI lives on one server, so
+ * once a leg holds it no other leg's answer can change the result: the legs
+ * still running are aborted rather than awaited, so a stalled server that does
+ * not hold the DOI never spends the call's budget. Each leg runs on its own
+ * signal combined with `callerSignal`, so a caller cancellation still stops
+ * every leg; check the caller's signal afterwards, as after any fan-out.
+ *
+ * Returns the hit, if any, and each leg's outcome at that moment, in leg order.
+ * Without a hit every leg had settled, so no outcome is `undefined`.
+ */
+export async function firstHit<T>(
+  legs: readonly ((signal: AbortSignal) => Promise<T>)[],
+  isHit: (value: T) => boolean,
+  callerSignal: AbortSignal,
+): Promise<{ hit: { leg: number; value: T } | undefined; outcomes: LegOutcome<T>[] }> {
+  const runs = legs.map((start) => ({ start, controller: new AbortController() }));
+  const outcomes: LegOutcome<T>[] = runs.map(() => undefined);
+  const { promise, resolve } = Promise.withResolvers<{ leg: number; value: T } | undefined>();
+  let running = runs.length;
+  for (const [leg, { start, controller }] of runs.entries()) {
+    start(AbortSignal.any([callerSignal, controller.signal])).then(
+      (value) => {
+        outcomes[leg] = { status: 'fulfilled', value };
+        if (isHit(value)) resolve({ leg, value });
+        if (--running === 0) resolve(undefined);
+      },
+      (reason: unknown) => {
+        outcomes[leg] = { status: 'rejected', reason };
+        if (--running === 0) resolve(undefined);
+      },
+    );
+  }
+  const hit = await promise;
+  const settled = [...outcomes];
+  for (const [leg, { controller }] of runs.entries()) {
+    if (!settled[leg]) controller.abort();
+  }
+  return { hit, outcomes: settled };
 }
 
 /**

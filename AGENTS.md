@@ -5,7 +5,7 @@
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
-**Zod:** ^4.6.6
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -197,7 +197,9 @@ src/
   services/
     shared.ts                           # Shared utilities (detectHtmlError, normalizeDoi, normalizeRorId,
                                         #   normalizeUpstreamText, escapeMarkdown, isValidCalendarDate,
-                                        #   parseRetryAfterSeconds, findRateLimit, describeWait, SERVER_VERSION)
+                                        #   parseRetryAfterSeconds, findRateLimit, describeWait,
+                                        #   startCallDeadline, remainingBudgetMs, ladderBudgetMs,
+                                        #   retryWithinBudget, firstHit, CALL_BUDGET_MS, SERVER_VERSION)
     upstream-text-tables.ts             # Closed tables normalizeUpstreamText reads: Highwire placeholders, section headings
     biorxiv/
       biorxiv-service.ts                # BiorxivApiService — details, publications, pubs endpoints
@@ -236,8 +238,8 @@ src/
 - **DOI format:** `10.1101/YYYY.MM.DD.NNNNNN` or `10.64898/…`. Run every DOI input through `normalizeDoi()` (`src/services/shared.ts`), which strips doi.org/article URLs, `doi:`, and `vN`/`.full` suffixes and returns `undefined` for anything still malformed — the bioRxiv API returns empty collections for malformed DOIs without an error code. `/pubs` keyed by preprint DOI never parses a `10.64898/` DOI; see `getPublishedVersionByJournalDoi()`.
 - **Category spelling:** the listing API filters only on lowercase with `/` and `_` read as a space (`hiv aids`), and answers anything else with its unfiltered listing, echoing `messages[0].category: "all"`. `BiorxivApiService` owns the spelling and flags `categoryIgnored`; never present a flagged page as filtered.
 - **Funder data:** upstream funder `name`s and ROR `id`s on records are misattributed — expose only `awards` (verbatim, never split), never a funder name or ID. The listing's `funder` filter takes a bare ROR ID (`normalizeRorId()` strips the URL form and checks the checksum), is bioRxiv-only, and `"funder value not found"` (flagged `funderNotFound`) is an error, never an empty page.
-- **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"`, including for DOI-resolution tools — both servers issue `10.1101/` DOIs, so the DOI never identifies the server and a single-server default silently misses records held by the other. Fan out via `Promise.allSettled` when `"both"` and name the answering server in the output.
-- **Pagination:** integer `cursor` offset. Page size is fixed by the API — 30 on `biorxiv_list_recent` (0, 30, 60, …), 100 on `biorxiv_list_published_versions` (0, 100, 200, …) — do not expose a `limit` parameter.
+- **Server parameter:** `"biorxiv" | "medrxiv" | "both"`. Default to `"both"`, including for DOI-resolution tools — both servers issue `10.1101/` DOIs, so the DOI never identifies the server and a single-server default silently misses records held by the other. Fan out via `Promise.allSettled` when `"both"` and name the answering server in the output — except a lookup for one DOI that one server's answer settles (each DOI in `biorxiv_get_preprint`, `biorxiv_get_fulltext` resolution, `biorxiv_get_published_version`'s crosswalk and `/details` steps, `biorxiv_search_preprints` enrichment of a DOI with neither preprint prefix): it runs through `firstHit()`, which ends the moment the server holding the DOI answers and aborts the other leg, so a stalled server that does not hold it never spends the call's budget.
+- **Pagination:** integer `cursor` row offset. The API fixes its page (30 rows on `/details` listings, 100 on `/pubs`) and takes no size parameter, so no `limit` is ever sent upstream. `biorxiv_list_published_versions` slices its page locally with `limit` (default 25) and continues at `nextCursor`; `biorxiv_list_recent` takes none.
 - **Two-server pagination:** when `server="both"`, surface per-server state: `{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`. A merged cursor is ambiguous. A server whose cursor overshot is flagged `exhausted`: the posting-date listing reports `total: 0` there, and the publication-date listing reports no total at all, so its exhausted entry carries none.
 - **EuropePMC enrichment:** `biorxiv_search_preprints` uses EuropePMC for relevance then enriches matching DOIs via the details endpoint. Enrichment routes based on `input.server` — when explicit ("biorxiv" or "medrxiv"), always use that server. `10.1101/` prefix is used as a hint only within `server="both"` to prefer bioRxiv first, but is not a reliable discriminator (both servers share this prefix). The ranked search stays `resulttype=lite`, which never carries an abstract; records that fall back to EuropePMC metadata get theirs from one DOI-keyed `resultType=core` query (`getAbstracts`), made only when abstracts are requested and something fell back. A failed lookup is a notice, never a failed search.
 - **`format()` must be content-complete:** Claude Desktop reads `content[]` from `format()`, not `structuredContent`. Revision list, crosswalk data, pagination state, and every abstract a record carries must all appear in the rendered markdown, not just counts. `include_abstract` (default `false` on `biorxiv_list_recent` and `biorxiv_list_published_versions`, `true` on `biorxiv_search_preprints`) removes the abstract from both surfaces together and no other field.
@@ -396,7 +398,8 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] bioRxiv API wrapping: tests include at least one sparse payload case with omitted upstream fields
 - [ ] `BIORXIV_MAILTO` included in outbound User-Agent header when set (optional env var)
 - [ ] DOI input normalized and validated with `normalizeDoi()` before calling API
-- [ ] Two-server fan-out uses `Promise.allSettled`; partial failures reported per-DOI in `failed[]`
+- [ ] Two-server fan-out uses `Promise.allSettled`, or `firstHit()` for a single-DOI lookup one server's answer settles; partial failures reported per-DOI in `failed[]`. A caller cancellation is rethrown, never reported as a failed leg: `ctx.signal.throwIfAborted()` after every fan-out, and before a degraded or cached result is returned
+- [ ] Every upstream ladder takes the call's remaining deadline: the handler calls `startCallDeadline()` once and passes it to every service call; the service runs each ladder through `retryWithinBudget(attempt, { deadline, operation, … })` — `withRetry` on what is left of the budget, keeping an origin's last 429 as the ladder's answer when the budget runs out — and passes the attempt `signal` to `fetchWithTimeout` and `Math.min(perAttemptMs, remainingMs)` as its timeout. A required step's expiry fails with the tool's declared retryable reason, never a bare `Timeout`
 - [ ] `biorxiv_list_recent` and `biorxiv_list_published_versions` with `server="both"` surface per-server pagination state, not a merged cursor
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`

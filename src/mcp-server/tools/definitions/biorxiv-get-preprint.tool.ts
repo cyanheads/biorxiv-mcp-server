@@ -3,9 +3,15 @@
  * all revision history, and published-journal DOI for one or more preprints
  * by DOI. Each input is reduced to its bare DOI first (normalizeDoi strips
  * resolver and article URLs, `doi:`, and version / `.full` suffixes), and each
- * DOI call returns all revisions in a single response. When
- * server="both", each DOI fans out across bioRxiv and medRxiv in parallel;
- * per-DOI failures are reported in failed[] rather than aborting the batch.
+ * DOI call returns all revisions in a single response. Every entry is
+ * classified before any request: an unparseable one goes to failed[], a repeat
+ * of a DOI already seen is dropped, and only the first 10 distinct DOIs are
+ * looked up — the rest are returned in unprocessed[], never fetched, so a call
+ * stays one parallel round under the call's single deadline. When
+ * server="both", each DOI fans out across bioRxiv and medRxiv in parallel and
+ * settles the moment the server holding it answers, cutting the other lookup
+ * short; per-DOI failures are reported in failed[] rather than aborting the batch.
+ * All three lists follow input order, whichever lookup answers first.
  * A DOI is only reported as not found when every attempted server answered
  * with an empty collection — if a server never answered, the DOI is reported
  * as upstream-unavailable and retryable, on both the per-DOI and batch surfaces.
@@ -19,7 +25,14 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
-import { describeWait, escapeMarkdown, findRateLimit, normalizeDoi } from '@/services/shared.js';
+import {
+  describeWait,
+  escapeMarkdown,
+  findRateLimit,
+  firstHit,
+  normalizeDoi,
+  startCallDeadline,
+} from '@/services/shared.js';
 
 // Upstream free text is escaped as it is interpolated so it renders literally;
 // DOIs and URLs stay raw because agents copy them back into calls.
@@ -87,10 +100,23 @@ const RevisionSchema = z.object({
   server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
 });
 
+/** Distinct DOIs one call looks up; the rest are returned in `unprocessed`. */
+const MAX_LOOKUPS = 10;
+
+/** Entries a batch-level error message names before counting the rest. */
+const MAX_ECHOED = 10;
+
+/** The first MAX_ECHOED entries, then a count of the rest — a 200-entry batch stays one short line. */
+function echoEntries(entries: readonly string[]): string {
+  const rest = entries.length - MAX_ECHOED;
+  const named = entries.slice(0, MAX_ECHOED).join(', ');
+  return rest > 0 ? `${named}, and ${rest} more` : named;
+}
+
 export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
   title: 'Get Preprint by DOI',
   description:
-    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable, rate_limited) and a retryable flag; a rate_limited entry also carries the wait in seconds the origin asked for. DOIs must match the pattern 10.NNNN/…; a doi.org or article URL, a doi: label, and a trailing vN / .full suffix are stripped first, and results report the bare DOI.',
+    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. Each call looks up the first 10 distinct DOIs and returns the rest, never looked up, in unprocessed[] — pass that list as dois in another call to continue; a repeated DOI is looked up once and an unparseable entry is reported in failed[], so neither counts toward the 10. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable, rate_limited) and a retryable flag; a rate_limited entry also carries the wait in seconds the origin asked for. preprints[], failed[], and unprocessed[] follow input order. DOIs must match the pattern 10.NNNN/…; a doi.org or article URL, a doi: label, and a trailing vN / .full suffix are stripped first, and results report the bare DOI.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -103,8 +129,10 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
           ),
       )
       .min(1)
-      .max(10)
-      .describe('One or more preprint DOIs to look up (max 10).'),
+      .max(200)
+      .describe(
+        'Preprint DOIs to look up, up to 200 entries. The first 10 distinct DOIs are looked up; the rest are returned in unprocessed.',
+      ),
     server: z
       .enum(['biorxiv', 'medrxiv', 'both'])
       .default('both')
@@ -158,20 +186,42 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
           .describe('A DOI that failed to resolve.'),
       )
       .describe('DOIs that could not be resolved, with per-DOI error details.'),
+    unprocessed: z
+      .array(z.string().describe('A bare DOI that was not looked up.'))
+      .describe(
+        'Valid, distinct DOIs past the first 10, in input order — not looked up, so neither found nor failed. Pass this list as dois in another call to continue. Empty when every DOI was looked up.',
+      ),
   }),
+
+  // Disclosure of the per-call lookup cap, set only when DOIs were left in
+  // unprocessed — optional so a call that looked up everything carries none.
+  enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when DOIs past the first 10 were left in unprocessed.'),
+    shown: z.number().optional().describe('Distinct DOIs looked up in this call.'),
+    cap: z.number().optional().describe('The most distinct DOIs one call looks up.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'How to look up the DOIs left in unprocessed, and how many failed[] entries are retryable alongside them.',
+      ),
+  },
 
   errors: [
     {
       reason: 'doi_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'ALL requested DOIs resolve to empty collections on all requested servers, with every server answering.',
+      when: 'Every DOI looked up resolves to empty collections on all requested servers, with every server answering, and no DOI was left in unprocessed.',
       recovery:
         'Verify the DOI exists on bioRxiv or medRxiv. Supported prefixes: 10.1101/ and 10.64898/.',
     },
     {
       reason: 'invalid_doi_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Every input DOI fails to match the 10.NNNN/ pattern, even after URL, doi:, and suffix stripping.',
+      when: 'Every input entry fails to match the 10.NNNN/ pattern, even after URL, doi:, and suffix stripping.',
       recovery:
         'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
     },
@@ -179,7 +229,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       reason: 'upstream_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       retryable: true,
-      when: 'No DOI resolved and at least one lookup failed against api.biorxiv.org, so absence could not be established for any requested DOI.',
+      when: 'No DOI resolved, none was left in unprocessed, and at least one lookup failed against api.biorxiv.org, so absence could not be established for any requested DOI.',
       recovery:
         'Retry the request after a short delay — the DOIs may well exist; api.biorxiv.org did not answer.',
     },
@@ -187,7 +237,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
-      when: 'No DOI resolved and at least one lookup was rejected with HTTP 429 by api.biorxiv.org.',
+      when: 'No DOI resolved, none was left in unprocessed, and at least one lookup was rejected with HTTP 429 by api.biorxiv.org.',
       recovery:
         'Wait the retryAfter seconds when present, otherwise a minute or two, before retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.',
     },
@@ -200,6 +250,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
     });
 
     const service = getBiorxivApiService();
+    const deadline = startCallDeadline();
 
     type PreprintResult = { doi: string; revisions: PreprintRevision[] };
     type FailureReason =
@@ -215,84 +266,109 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       retryAfter?: number;
     };
 
-    const preprints: PreprintResult[] = [];
-    const failed: FailedResult[] = [];
     // Raw rejection values across every DOI, kept so the batch-level throw can
     // classify the failure the same way the per-DOI entries were classified.
     const rejectionErrors: unknown[] = [];
     const servers: BiorxivServer[] =
       input.server === 'both' ? ['biorxiv', 'medrxiv'] : [input.server];
 
-    // For each DOI, fan out across servers in parallel
-    await Promise.all(
-      input.dois.map(async (raw) => {
-        // Route format-invalid DOIs to failed[] rather than aborting the batch,
-        // under the text the caller sent — there is no bare DOI to report.
-        const doi = normalizeDoi(raw)?.doi;
-        if (!doi) {
-          failed.push({
-            doi: raw,
-            error: `Invalid DOI format — must match 10.NNNN/… (e.g. 10.1101/… or 10.64898/…).`,
-            reason: 'invalid_doi_format',
-            retryable: false,
-          });
-          return;
-        }
+    // One DOI across the requested servers, in parallel, settled into its entry.
+    // A DOI lives on one server, so the lookup ends the moment that server returns
+    // its revisions and the other leg is cut short — a stalled server that does
+    // not hold the DOI never holds up a DOI the other server found.
+    const lookUp = async (doi: string): Promise<PreprintResult | FailedResult> => {
+      const { hit, outcomes } = await firstHit(
+        servers.map(
+          (server) => (signal: AbortSignal) =>
+            service.getDetails(doi, server, deadline, ctx, signal),
+        ),
+        (revisions) => revisions.length > 0,
+        ctx.signal,
+      );
+      if (hit) return { doi, revisions: hit.value };
 
-        const settled = await Promise.allSettled(
-          servers.map((server) => service.getDetails(doi, server, ctx)),
-        );
-        const revisions = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
-        if (revisions.length > 0) {
-          preprints.push({ doi, revisions });
-          return;
-        }
-
-        // No revisions. "Not found" is a claim about what the servers reported, so it
-        // requires every attempted server to have answered — a server that failed
-        // leaves absence unestablished and the DOI retryable.
-        const rejections = settled.flatMap((r, i) =>
-          r.status === 'rejected'
-            ? [{ server: servers[i] as BiorxivServer, error: r.reason as unknown }]
-            : [],
-        );
-        if (rejections.length > 0) {
-          const errors = rejections.map((f) => f.error);
-          rejectionErrors.push(...errors);
-          // A 429 is an upstream failure that named a wait. Splitting it out is
-          // what lets the caller act on the wait instead of guessing one.
-          const rateLimit = findRateLimit(errors);
-          const detail = rejections
-            .map(
-              (f) => `${f.server}: ${f.error instanceof Error ? f.error.message : String(f.error)}`,
-            )
-            .join('; ');
-          failed.push({
-            doi,
-            error: `Lookup failed — ${detail}`,
-            reason: rateLimit ? 'rate_limited' : 'upstream_unavailable',
-            retryable: true,
-            ...(rateLimit?.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
-          });
-          return;
-        }
-
-        failed.push({
+      // No server held the DOI, so every lookup had answered or failed. "Not
+      // found" is a claim about what the servers reported, so it requires every
+      // attempted server to have answered — a server that failed leaves absence
+      // unestablished and the DOI retryable.
+      const rejections = outcomes.flatMap((r, i) =>
+        r?.status === 'rejected'
+          ? [{ server: servers[i] as BiorxivServer, error: r.reason as unknown }]
+          : [],
+      );
+      if (rejections.length > 0) {
+        const errors = rejections.map((f) => f.error);
+        rejectionErrors.push(...errors);
+        // A 429 is an upstream failure that named a wait. Splitting it out is
+        // what lets the caller act on the wait instead of guessing one.
+        const rateLimit = findRateLimit(errors);
+        const detail = rejections
+          .map(
+            (f) => `${f.server}: ${f.error instanceof Error ? f.error.message : String(f.error)}`,
+          )
+          .join('; ');
+        return {
           doi,
-          error:
-            input.server === 'both'
-              ? 'Not found on bioRxiv or medRxiv.'
-              : `Not found on ${input.server}.`,
-          reason: 'not_found',
+          error: `Lookup failed — ${detail}`,
+          reason: rateLimit ? 'rate_limited' : 'upstream_unavailable',
+          retryable: true,
+          ...(rateLimit?.retryAfter !== undefined && { retryAfter: rateLimit.retryAfter }),
+        };
+      }
+
+      return {
+        doi,
+        error:
+          input.server === 'both'
+            ? 'Not found on bioRxiv or medRxiv.'
+            : `Not found on ${input.server}.`,
+        reason: 'not_found',
+        retryable: false,
+      };
+    };
+
+    // Every entry is classified before any request. An unparseable entry fails in
+    // its place, under the text the caller sent — there is no bare DOI to report;
+    // a repeat of a DOI already seen takes no place; and only the first
+    // MAX_LOOKUPS distinct DOIs are looked up. The rest are returned, never
+    // fetched here, so the call stays one parallel round under one deadline.
+    const entries: (FailedResult | Promise<PreprintResult | FailedResult>)[] = [];
+    const seen = new Set<string>();
+    const unprocessed: string[] = [];
+    for (const raw of input.dois) {
+      const doi = normalizeDoi(raw)?.doi;
+      if (!doi) {
+        entries.push({
+          doi: raw,
+          error: `Invalid DOI format — must match 10.NNNN/… (e.g. 10.1101/… or 10.64898/…).`,
+          reason: 'invalid_doi_format',
           retryable: false,
         });
-      }),
-    );
+      } else if (!seen.has(doi)) {
+        seen.add(doi);
+        if (seen.size > MAX_LOOKUPS) unprocessed.push(doi);
+        else entries.push(lookUp(doi));
+      }
+    }
 
-    // All DOIs failed — pick the appropriate declared error
-    if (preprints.length === 0 && failed.length === input.dois.length) {
+    // Awaited in input order, so neither list follows the order lookups answer in.
+    const settledEntries = await Promise.all(entries);
+    // A cancelled call is not a partial result, whatever the lookups that finished
+    // first or the DOIs left in unprocessed.
+    ctx.signal.throwIfAborted();
+
+    const preprints: PreprintResult[] = [];
+    const failed: FailedResult[] = [];
+    for (const entry of settledEntries) {
+      if ('revisions' in entry) preprints.push(entry);
+      else failed.push(entry);
+    }
+
+    // A batch-level error speaks for every requested DOI, so it applies only when
+    // nothing resolved and no DOI was left unlooked-up.
+    if (preprints.length === 0 && unprocessed.length === 0) {
       if (failed.every((f) => f.reason === 'invalid_doi_format')) {
-        throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${input.dois.join(', ')}`);
+        throw ctx.fail('invalid_doi_format', `Invalid DOI format: ${echoEntries(input.dois)}`);
       }
       // A rate limit outranks a generic upstream failure here: both say "retry",
       // but only one says when, and retrying sooner than the origin asked would
@@ -321,13 +397,32 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
           `No DOI could be resolved — ${unavailable.map((f) => `${f.doi}: ${f.error}`).join('; ')}`,
         );
       }
+      // The error replaces failed[], so an invalid entry beside the absent DOIs
+      // is named apart from them rather than reported as not found.
+      const dois = (reason: FailureReason) =>
+        failed.flatMap((f) => (f.reason === reason ? [f.doi] : []));
+      const invalid = dois('invalid_doi_format');
       throw ctx.fail(
         'doi_not_found',
-        `None of the requested DOIs were found: ${input.dois.join(', ')}`,
+        `None of the requested DOIs were found: ${dois('not_found').join(', ')}${invalid.length > 0 ? `. Invalid DOI format: ${echoEntries(invalid)}` : ''}`,
       );
     }
 
-    return { preprints, failed };
+    if (unprocessed.length > 0) {
+      // The remainder recipe alone never retries a lookup that failed transiently.
+      const retryable = failed.filter((f) => f.retryable).length;
+      const retry =
+        retryable === 0
+          ? ''
+          : ` ${retryable} failed[] ${retryable === 1 ? 'entry is retryable — include its DOI' : 'entries are retryable — include their DOIs'} in a later call, after any retryAfter wait.`;
+      ctx.enrich.truncated({
+        shown: MAX_LOOKUPS,
+        cap: MAX_LOOKUPS,
+        guidance: `Looked up the first ${MAX_LOOKUPS} distinct DOIs; ${unprocessed.length} more ${unprocessed.length === 1 ? 'is' : 'are'} in unprocessed — pass unprocessed as dois in another call to continue.${retry}`,
+      });
+    }
+
+    return { preprints, failed, unprocessed };
   },
 
   format: (result) => {
@@ -347,6 +442,11 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
         const wait = f.retryAfter === undefined ? '' : `, retry after: ${f.retryAfter}s`;
         lines.push(`- **${f.doi}**: ${f.error} (${f.reason}, retryable: ${f.retryable}${wait})`);
       }
+    }
+
+    if (result.unprocessed.length > 0) {
+      lines.push(`\n## Unprocessed DOIs (${result.unprocessed.length})`);
+      for (const doi of result.unprocessed) lines.push(`- ${doi}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') || 'No results.' }];

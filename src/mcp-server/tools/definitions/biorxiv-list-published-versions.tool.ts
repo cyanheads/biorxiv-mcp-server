@@ -9,11 +9,14 @@
  * Fans out to bioRxiv and medRxiv when server="both", with one input cursor
  * and per-server pagination state: the servers hold different row counts, so
  * one cursor can be inside one server's rows and past the end of the other's.
- * Pages hold 100 rows per server (API-fixed). Upstream answers an empty
- * interval and a cursor at or past the last row identically — "no articles
- * found", no total — so dates are validated before any call, a zero-row page
- * at cursor 0 reports total 0, and one at a later cursor is flagged exhausted
- * with no total rather than claiming the interval is empty.
+ * The API serves 100 rows a page and takes no size parameter, so each server
+ * returns the first `limit` rows (default 25) of its page, sliced in the
+ * service before rows are normalized, and nextCursor advances by the upstream
+ * rows served; a limit above 100 serves the whole page and says so. Upstream
+ * answers an empty interval and a cursor at or past the last row identically —
+ * "no articles found", no total — so dates are validated before any call, a
+ * zero-row page at cursor 0 reports total 0, and one at a later cursor is
+ * flagged exhausted with no total rather than claiming the interval is empty.
  *
  * A server that did not answer is named in failed[] and the notice; when no
  * server answered the call raises a retryable error instead of an empty page.
@@ -35,10 +38,14 @@ import {
   escapeMarkdown,
   findRateLimit,
   isValidCalendarDate,
+  startCallDeadline,
 } from '@/services/shared.js';
 
 const SERVERS = ['biorxiv', 'medrxiv'] as const;
 const SERVER_LABEL = { biorxiv: 'bioRxiv', medrxiv: 'medRxiv' } as const;
+
+/** Rows api.biorxiv.org serves per `/pubs` interval page — the most one call can return per server. */
+const UPSTREAM_PAGE_ROWS = 100;
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
@@ -86,7 +93,9 @@ const paginationEntry = (label: string) =>
       nextCursor: z
         .number()
         .optional()
-        .describe('Cursor for the next page, when rows remain past this one.'),
+        .describe(
+          `Cursor for the next page, when rows remain on ${label} past this one: this page's cursor plus the rows it served. Pass it as cursor to continue, at any limit.`,
+        ),
       exhausted: z
         .boolean()
         .optional()
@@ -100,7 +109,7 @@ const paginationEntry = (label: string) =>
 export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_versions', {
   title: 'List Published Journal Versions',
   description:
-    'List preprints that appeared as journal articles within a journal publication-date interval, each with its journal DOI, journal name, publication date, and preprint metadata — the same record biorxiv_get_published_version returns for one DOI. The dates filter on journal publication, not preprint posting, so most rows were posted months or years earlier; use biorxiv_list_recent for preprints posted in an interval. Returns up to 100 publications per server per page (fixed by the API); pass `cursor` as an integer offset (0, 100, 200, …) to step through additional pages. When server="both" (default), per-server pagination state is returned separately, since one cursor can be past the end of one server and inside the other — to continue a single server, pass its `nextCursor` with `server` set to that server. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`. Every attempted server failing raises a retryable upstream_unavailable (or rate_limited) error rather than an empty page. Abstracts are omitted by default to keep the page small — pass include_abstract: true for the whole page. Every preprintDoi, 10.1101/ and 10.64898/ alike, is accepted by biorxiv_get_preprint and the other DOI tools.',
+    'List preprints that appeared as journal articles within a journal publication-date interval, each with its journal DOI, journal name, publication date, and preprint metadata — the same record biorxiv_get_published_version returns for one DOI. The dates filter on journal publication, not preprint posting, so most rows were posted months or years earlier; use biorxiv_list_recent for preprints posted in an interval. Returns `limit` publications per server (default 25, up to 100 — the page api.biorxiv.org serves; a larger limit returns 100 and says so). Continue at the `nextCursor` a page returns rather than stepping `cursor` by a fixed amount; `limit: 100` walks an interval in the fewest calls. When server="both" (default), per-server pagination state is returned separately, since one cursor can be past the end of one server and inside the other — to continue a single server, pass its `nextCursor` with `server` set to that server. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`. Every attempted server failing raises a retryable upstream_unavailable (or rate_limited) error rather than an empty page. Abstracts are omitted by default to keep the page small — pass include_abstract: true for the whole page. Every preprintDoi, 10.1101/ and 10.64898/ alike, is accepted by biorxiv_get_preprint and the other DOI tools.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   // biorxiv_search_preprints spells its date bounds date_from / date_to.
@@ -127,7 +136,16 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
       .min(0)
       .default(0)
       .describe(
-        'Integer row offset (0, 100, 200, …), applied to each queried server. Defaults to 0 (first page).',
+        'Integer row offset, applied to each queried server. Defaults to 0 (first page). To continue, pass the nextCursor the previous page returned for that server — it advances by the rows actually served.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .default(25)
+      .describe(
+        'Rows to return per queried server, starting at cursor. Defaults to 25. Up to 100, the page api.biorxiv.org serves: a larger value returns 100 rows per server and says so in the notice. limit: 100 walks an interval in the fewest calls.',
       ),
     include_abstract: z
       .boolean()
@@ -158,7 +176,7 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
               .string()
               .optional()
               .describe(
-                'Date the preprint was first posted (YYYY-MM-DD). Not derivable from the DOI.',
+                'Preprint posting date (YYYY-MM-DD) as this row records it — the first posting for most preprints. medRxiv lists some 10.64898/ preprints on two rows that differ in this date, and sometimes in title or authors; both rows are returned. Not derivable from the DOI.',
               ),
             preprintTitle: z.string().optional().describe('Title of the preprint.'),
             preprintAuthors: z.string().optional().describe('Preprint author list.'),
@@ -208,7 +226,23 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
       .string()
       .optional()
       .describe(
-        'Guidance on how to read this result set: which servers did not answer, which cursors are past the end, and — when nothing came back — the interval and how to broaden it. All applicable qualifications are composed into one string.',
+        'Guidance on how to read this result set: which servers did not answer, a limit above the 100-row page, which cursors are past the end, which servers have rows past this page, and — when nothing came back — the interval and how to broaden it. All applicable qualifications are composed into one string.',
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        "True when at least one server has rows past this page — continue at that server's nextCursor. Absent when every server queried is on its last page.",
+      ),
+    shown: z
+      .number()
+      .optional()
+      .describe('Publications on this page, across every server queried. Set with truncated.'),
+    cap: z
+      .number()
+      .optional()
+      .describe(
+        'Most publications this page can hold: rows per server (limit, or 100 when limit asked for more) times the servers queried. Set with truncated.',
       ),
   },
 
@@ -244,6 +278,7 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
       end_date: input.end_date,
       server: input.server,
       cursor: input.cursor,
+      limit: input.limit,
     });
 
     // Upstream answers a malformed or inverted interval with HTTP 200 and an
@@ -260,10 +295,20 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
     }
 
     const service = getBiorxivApiService();
+    const deadline = startCallDeadline();
     const servers: readonly BiorxivServer[] = input.server === 'both' ? SERVERS : [input.server];
+    const limit = Math.min(input.limit, UPSTREAM_PAGE_ROWS);
     const settled = await Promise.allSettled(
       servers.map((server) =>
-        service.getPublishedListing(server, input.start_date, input.end_date, input.cursor, ctx),
+        service.getPublishedListing(
+          server,
+          input.start_date,
+          input.end_date,
+          input.cursor,
+          limit,
+          deadline,
+          ctx,
+        ),
       ),
     );
     // A cancelled call is not a partial result, whichever leg the abort reached first.
@@ -348,6 +393,11 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
         `${labels} did not answer, so this result set is partial — it holds no ${labels} publications. See failed[] for the error and retry to include them.`,
       );
     }
+    if (input.limit > UPSTREAM_PAGE_ROWS) {
+      notices.push(
+        `A limit of ${input.limit} is above the ${UPSTREAM_PAGE_ROWS}-row page api.biorxiv.org serves, so this page holds up to ${UPSTREAM_PAGE_ROWS} rows per server.`,
+      );
+    }
 
     const exhausted = SERVERS.filter((s) => pagination[s]?.exhausted);
     if (upstreamRows === 0) {
@@ -361,7 +411,29 @@ export const biorxivListPublishedVersionsTool = tool('biorxiv_list_published_ver
         `Cursor ${input.cursor} is at or past the last row on ${serverLabels(exhausted)} — that entry is marked exhausted and carries no total. Lower the cursor to page that server.`,
       );
     }
-    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+
+    const continuing = SERVERS.filter((s) => pagination[s]?.nextCursor !== undefined);
+    if (continuing.length > 0) {
+      const where = continuing
+        .map((s) => `${SERVER_LABEL[s]} (next cursor ${pagination[s]?.nextCursor})`)
+        .join(' and ');
+      // Kept at "both", a server already on its last page is re-requested on every
+      // later page. A failed server is the exception: retrying "both" includes it.
+      const [only] = continuing;
+      const how =
+        servers.length > 1 && failed.length === 0 && continuing.length === 1
+          ? `pass that nextCursor as cursor with server set to "${only}" to continue it`
+          : "pass a server's nextCursor as cursor to continue it";
+      notices.push(`More rows remain past this page on ${where} — ${how}.`);
+      // truncated() writes the notice too, so it carries the composed string.
+      ctx.enrich.truncated({
+        shown: publications.length,
+        cap: limit * servers.length,
+        guidance: notices.join(' '),
+      });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
+    }
 
     if (!input.include_abstract) {
       publications = publications.map(({ preprintAbstract: _abstract, ...rest }) => rest);

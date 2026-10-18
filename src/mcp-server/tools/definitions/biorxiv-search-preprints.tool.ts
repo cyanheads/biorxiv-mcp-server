@@ -3,8 +3,11 @@
  * using EuropePMC for relevance ranking, then enriching matching DOIs with
  * full bioRxiv/medRxiv metadata from the details endpoint. When server is
  * explicit ("biorxiv" or "medrxiv"), enrichment routes to that server directly.
- * When server="both", the 10.1101/ prefix is used as a routing hint but is not
- * treated as definitive — both bioRxiv and medRxiv share this prefix.
+ * When server="both", the 10.1101/ and 10.64898/ prefixes are used as a routing
+ * hint but are not treated as definitive — bioRxiv and medRxiv share them: such
+ * a DOI is looked up on bioRxiv, then on medRxiv when bioRxiv answers empty. A
+ * DOI with neither prefix is looked up on both in parallel, settling on the
+ * server that holds it.
  *
  * Enrichment carries every latest-revision field biorxiv_get_preprint exposes,
  * so the same DOI does not describe less through search than through lookup.
@@ -29,6 +32,12 @@
  * metadata, their abstracts come from one DOI-keyed `core` lookup; a fully
  * enriched page never makes it. That lookup degrades like enrichment does — a
  * failure leaves those records without an abstract and says so in the notice.
+ * A cancelled call is neither: once the caller's signal fires, the
+ * cancellation is rethrown instead of a degraded record or notice.
+ *
+ * One call reads at most 100 ranked results, which also bounds the enrichment
+ * fan-out and the abstract lookup. A `limit` above 100 serves 100, with a
+ * notice and the truncation fields; `nextCursorMark` continues the list.
  * @module mcp-server/tools/definitions/biorxiv-search-preprints.tool
  */
 
@@ -42,10 +51,15 @@ import {
   describeWait,
   escapeMarkdown,
   findRateLimit,
+  firstHit,
   isValidCalendarDate,
+  startCallDeadline,
 } from '@/services/shared.js';
 
 const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
+
+/** Ranked results one call reads — the bound on its enrichment fan-out and abstract lookup. */
+const RESULTS_PER_CALL = 100;
 
 /** A blank from a form client is "unset", never a value to validate. */
 const blankAsUnset = <T extends z.ZodType>(schema: T) =>
@@ -162,9 +176,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         .number()
         .int()
         .min(1)
-        .max(100)
+        .max(1000)
         .default(25)
-        .describe('Maximum results to return (1–100). Defaults to 25.'),
+        .describe(
+          'Maximum results to return. Defaults to 25. Up to 100 per call: a larger value returns the first 100 and says so, and nextCursorMark continues the ranked list.',
+        ),
       include_abstract: z
         .boolean()
         .default(true)
@@ -271,7 +287,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         date_from: z.string().optional().describe('date_from filter applied, if any.'),
         date_to: z.string().optional().describe('date_to filter applied, if any.'),
         cursor_mark: z.string().optional().describe('cursor_mark page token applied, if any.'),
-        limit: z.number().describe('Maximum results requested.'),
+        limit: z
+          .number()
+          .describe(
+            'Maximum results requested from EuropePMC: the limit input, capped at 100 per call.',
+          ),
       })
       .describe(
         'Echo of the parameters used to produce this result set — lets callers verify what was sent.',
@@ -280,8 +300,19 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .string()
       .optional()
       .describe(
-        'Present when zero results are returned: on a cursor_mark page past the last match, says the list is exhausted; otherwise echoes the query and suggests how to broaden it. Also present when abstracts for results shown with EuropePMC metadata only could not be retrieved, which leaves those results without one.',
+        'Present when zero results are returned: on a cursor_mark page past the last match, says the list is exhausted; otherwise echoes the query and suggests how to broaden it. Also present when limit was above the 100-result cap per call, and when abstracts for results shown with EuropePMC metadata only could not be retrieved, which leaves those results without one.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when limit asked for more than the 100 results one call returns and this page holds all 100 — continue with nextCursorMark.',
+      ),
+    shown: z.number().optional().describe('Results on this page. Set with truncated.'),
+    cap: z
+      .number()
+      .optional()
+      .describe('Results one call returns at most (100). Set with truncated.'),
   },
 
   // content[] trailer rendering for structured enrichment fields. Scalar/notice kinds
@@ -378,6 +409,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
     const epmc = getEuropePmcService();
     const biorxiv = getBiorxivApiService();
+    // One budget for the search, enrichment, and abstract lookup, which run one after another.
+    const deadline = startCallDeadline();
+    const limit = Math.min(input.limit, RESULTS_PER_CALL);
 
     // Step 1: EuropePMC relevance search
     let epmcSearchResult: EuropePmcSearchResult;
@@ -388,10 +422,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           author: input.author,
           dateFrom: input.date_from,
           dateTo: input.date_to,
-          limit: input.limit,
+          limit,
           server: input.server,
           cursorMark: input.cursor_mark,
         },
+        deadline,
         ctx,
       );
     } catch (err) {
@@ -440,7 +475,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       ...(input.date_from && { date_from: input.date_from }),
       ...(input.date_to && { date_to: input.date_to }),
       ...(cursor && { cursor_mark: cursor }),
-      limit: input.limit,
+      limit,
     };
 
     if (epmcResults.length === 0) {
@@ -483,28 +518,32 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
         try {
           if (input.server === 'biorxiv') {
-            revisions = await biorxiv.getDetails(doi, 'biorxiv', ctx);
+            revisions = await biorxiv.getDetails(doi, 'biorxiv', deadline, ctx);
           } else if (input.server === 'medrxiv') {
             // DOI prefix is not a reliable discriminator — both servers share 10.1101/.
-            revisions = await biorxiv.getDetails(doi, 'medrxiv', ctx);
+            revisions = await biorxiv.getDetails(doi, 'medrxiv', deadline, ctx);
           } else {
             // server='both': use DOI prefix as a hint to avoid a redundant call,
             // but fall back to trying both when the prefix is ambiguous.
             if (isBiorxivDoi) {
-              revisions = await biorxiv.getDetails(doi, 'biorxiv', ctx);
+              revisions = await biorxiv.getDetails(doi, 'biorxiv', deadline, ctx);
               // If bioRxiv returned nothing, this DOI may actually live on medRxiv.
               if (revisions.length === 0) {
-                revisions = await biorxiv.getDetails(doi, 'medrxiv', ctx);
+                revisions = await biorxiv.getDetails(doi, 'medrxiv', deadline, ctx);
               }
             } else {
-              const [bxR, mxR] = await Promise.allSettled([
-                biorxiv.getDetails(doi, 'biorxiv', ctx),
-                biorxiv.getDetails(doi, 'medrxiv', ctx),
-              ]);
-              if (bxR.status === 'fulfilled') revisions.push(...bxR.value);
-              else rejections.push(bxR.reason);
-              if (mxR.status === 'fulfilled') revisions.push(...mxR.value);
-              else rejections.push(mxR.reason);
+              // Both in parallel, settling on the server that holds the DOI; only
+              // the lookups that had answered by then are read for a failure.
+              const { hit, outcomes } = await firstHit(
+                (['biorxiv', 'medrxiv'] as const).map(
+                  (server) => (signal: AbortSignal) =>
+                    biorxiv.getDetails(doi, server, deadline, ctx, signal),
+                ),
+                (found) => found.length > 0,
+                ctx.signal,
+              );
+              if (hit) revisions = hit.value;
+              for (const r of outcomes) if (r?.status === 'rejected') rejections.push(r.reason);
             }
           }
         } catch (err) {
@@ -556,10 +595,17 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         };
       }),
     );
+    // A cancelled call is not a degraded result, whichever lookup the abort reached.
+    ctx.signal.throwIfAborted();
 
     // ctx.enrich.notice is last-wins, so every qualification is collected here
     // and flushed as one string.
     const notices: string[] = [];
+    if (input.limit > RESULTS_PER_CALL) {
+      notices.push(
+        `A limit of ${input.limit} is above the ${RESULTS_PER_CALL}-result cap per call, so this page holds up to ${RESULTS_PER_CALL} results${nextCursorMark ? ' — pass nextCursorMark as cursor_mark to continue the ranked list' : ''}.`,
+      );
+    }
 
     // Step 3: abstracts for fallback records. The lite search carried none, so
     // they come from one core lookup keyed by those DOIs. A failure degrades
@@ -570,6 +616,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       try {
         const abstracts = await epmc.getAbstracts(
           fallback.map((p) => p.doi),
+          deadline,
           ctx,
         );
         for (const p of fallback) {
@@ -577,6 +624,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           if (abstract) p.abstract = abstract;
         }
       } catch (err) {
+        ctx.signal.throwIfAborted();
         ctx.log.warning('EuropePMC abstract lookup failed', { error: String(err) });
         const rateLimit = findRateLimit([err]);
         const n = fallback.length;
@@ -591,7 +639,16 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
     ctx.enrich.total(hitCount);
     ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
-    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    if (input.limit > RESULTS_PER_CALL && enriched.length >= RESULTS_PER_CALL) {
+      // truncated() writes the notice too, so it carries the composed string.
+      ctx.enrich.truncated({
+        shown: enriched.length,
+        cap: RESULTS_PER_CALL,
+        guidance: notices.join(' '),
+      });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
+    }
 
     return {
       preprints: enriched,

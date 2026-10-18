@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListPublishedVersionsTool as listTool } from '@/mcp-server/tools/definitions/biorxiv-list-published-versions.tool.js';
 import type { PublishedListingResult, PublishedVersion } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { PUBLISHED_64898, PUBS_ROW_64898 } from '../helpers/pubs-fixtures.js';
+import { NO_ARTICLES, PUBLISHED_64898, PUBS_ROW_64898 } from '../helpers/pubs-fixtures.js';
 import {
   declaredRateLimitRecovery,
   RATE_LIMIT_RECOVERY_OPENING,
@@ -101,9 +101,15 @@ describe('biorxivListPublishedVersionsTool', () => {
 
   // ── Input ───────────────────────────────────────────────────────────────────
 
-  it('defaults server to "both", cursor to 0, and include_abstract to false', () => {
+  it('defaults server to "both", cursor to 0, limit to 25, and include_abstract to false', () => {
     const input = listTool.input.parse(WEEK);
-    expect(input).toEqual({ ...WEEK, server: 'both', cursor: 0, include_abstract: false });
+    expect(input).toEqual({
+      ...WEEK,
+      server: 'both',
+      cursor: 0,
+      limit: 25,
+      include_abstract: false,
+    });
   });
 
   it('accepts date_from / date_to, the date-bound spelling biorxiv_search_preprints uses', async () => {
@@ -118,6 +124,8 @@ describe('biorxivListPublishedVersionsTool', () => {
       '2026-09-01',
       '2026-09-07',
       0,
+      25,
+      expect.any(Number),
       expect.anything(),
     );
   });
@@ -224,13 +232,13 @@ describe('biorxivListPublishedVersionsTool', () => {
 
   it('offers the next cursor until the last page, which says so', async () => {
     mockGetPublishedListing.mockResolvedValueOnce(page(rows(100), 0, 449));
-    const first = await call({ server: 'biorxiv' });
+    const first = await call({ server: 'biorxiv', limit: 100 });
     expect(first.structured.pagination.biorxiv).toEqual({ cursor: 0, total: 449, nextCursor: 100 });
     expect(first.text).toContain('**bioRxiv:** page offset 0, total 449 — next cursor: 100');
 
     // Live: cursor 400 holds the last 49 of 449 rows.
     mockGetPublishedListing.mockResolvedValueOnce(page(rows(49, 400), 400, 449));
-    const last = await call({ server: 'biorxiv', cursor: 400 });
+    const last = await call({ server: 'biorxiv', cursor: 400, limit: 100 });
     expect(last.structured.pagination.biorxiv).toEqual({ cursor: 400, total: 449 });
     expect(last.text).toContain('**bioRxiv:** page offset 400, total 449 (last page)');
   });
@@ -238,7 +246,7 @@ describe('biorxivListPublishedVersionsTool', () => {
   it('continues from an arbitrary offset by the rows actually returned', async () => {
     // Live: cursor 5 returns rows 5..104; the next unread row is 105.
     mockGetPublishedListing.mockResolvedValue(page(rows(100, 5), 5, 449));
-    const { structured } = await call({ server: 'biorxiv', cursor: 5 });
+    const { structured } = await call({ server: 'biorxiv', cursor: 5, limit: 100 });
     expect(structured.pagination.biorxiv?.nextCursor).toBe(105);
   });
 
@@ -249,14 +257,32 @@ describe('biorxivListPublishedVersionsTool', () => {
         medrxiv: page([MEDRXIV_PUB, ...rows(2, 900)], 100, 103),
       }),
     );
-    const { structured, text } = await call({ cursor: 100 });
+    const { structured, text } = await call({ cursor: 100, limit: 100 });
     expect(structured.pagination).toEqual({
       biorxiv: { cursor: 100, total: 449, nextCursor: 200 },
       medrxiv: { cursor: 100, total: 103 },
     });
     expect(structured.publications.filter((p) => p.server === 'medrxiv')).toHaveLength(3);
-    expect(structured.notice).toBeUndefined();
+    // The only qualification is the one server with rows left past this page,
+    // and continuing it alone keeps the finished server out of the next call.
+    expect(structured.notice).toBe(
+      'More rows remain past this page on bioRxiv (next cursor 200) — pass that nextCursor as cursor with server set to "biorxiv" to continue it.',
+    );
     expect(text).toContain('**medRxiv:** page offset 100, total 103 (last page)');
+  });
+
+  it('names medRxiv as the server to pass when it is the one server still continuing', async () => {
+    mockGetPublishedListing.mockImplementation(
+      perServer({
+        biorxiv: page(rows(3, 100), 100, 103),
+        medrxiv: page(rows(25, 500), 100, 449),
+      }),
+    );
+    const { structured, text } = await call({ cursor: 100 });
+    const notice =
+      'More rows remain past this page on medRxiv (next cursor 125) — pass that nextCursor as cursor with server set to "medrxiv" to continue it.';
+    expect(structured).toMatchObject({ truncated: true, shown: 28, cap: 50, notice });
+    expect(text).toContain(`> ${notice}`);
   });
 
   // The real service runs here, so its normalization (which drops a row naming
@@ -297,10 +323,31 @@ describe('biorxivListPublishedVersionsTool', () => {
       raw[42] = { ...noPreprint, preprint_doi: '' };
       upstream(100, raw, '449');
 
-      const { structured, text } = await call({ server: 'biorxiv', cursor: 100 });
+      const { structured, text } = await call({ server: 'biorxiv', cursor: 100, limit: 100 });
       expect(structured.publications).toHaveLength(99);
       expect(structured.pagination.biorxiv).toEqual({ cursor: 100, total: 449, nextCursor: 200 });
       expect(text).toContain('**bioRxiv:** page offset 100, total 449 — next cursor: 200');
+    });
+
+    it('advances a 25-row slice past every row it served, the dropped one included', async () => {
+      const raw = Array.from({ length: 100 }, (_, i) => ({
+        ...PUBS_ROW_64898,
+        preprint_doi: `10.64898/2026.01.01.${700100 + i}`,
+      }));
+      const { preprint_doi: _dropped, ...noPreprint } = PUBS_ROW_64898;
+      raw[10] = { ...noPreprint, preprint_doi: '' };
+      upstream(100, raw, '449');
+
+      const { structured, text } = await call({ server: 'biorxiv', cursor: 100, limit: 25 });
+      expect(structured.publications.map((p) => p.preprintDoi)).toEqual(
+        raw
+          .slice(0, 25)
+          .filter((_, i) => i !== 10)
+          .map((r) => r.preprint_doi),
+      );
+      expect(structured.pagination.biorxiv).toEqual({ cursor: 100, total: 449, nextCursor: 125 });
+      expect(structured).toMatchObject({ truncated: true, shown: 24, cap: 25 });
+      expect(text).toContain('**bioRxiv:** page offset 100, total 449 — next cursor: 125');
     });
 
     it('reads a page whose only row was dropped as answered, not as past the end', async () => {
@@ -352,6 +399,322 @@ describe('biorxivListPublishedVersionsTool', () => {
       'No journal publications found for publication dates 2026-09-01–2026-09-07 on bioRxiv. Try widening the date range, or use biorxiv_list_recent to list preprints by posting date instead.',
     );
     expect(text).toContain('**bioRxiv:** page offset 0, total 0 (last page)');
+  });
+
+  // ── limit ───────────────────────────────────────────────────────────────────
+
+  /**
+   * The real service runs against a fake `/pubs` interval shaped like the week
+   * 2026-09-01..07 (bioRxiv 449 rows, medRxiv 103; 2026-10-01..07 holds none).
+   * Like the live API it serves the 100 rows from any cursor offset, takes no
+   * page-size parameter, and answers a cursor at or past the end with "no
+   * articles found" and no total.
+   */
+  describe('limit', () => {
+    const http = createFetchMock();
+    const PUBS = /^\/pubs\/(biorxiv|medrxiv)\/(\d{4}-\d{2}-\d{2})\/\d{4}-\d{2}-\d{2}\/(\d+)\/json$/;
+    const ROWS = { biorxiv: 449, medrxiv: 103 } as const;
+    type Server = keyof typeof ROWS;
+
+    /** Row `i` of a server's interval, in upstream order. */
+    const doi = (server: Server, i: number) =>
+      `10.64898/2026.0${server === 'biorxiv' ? 1 : 2}.01.${800000 + i}`;
+    const dois = (server: Server, from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => doi(server, from + i));
+    const served = (structured: { publications: Record<string, unknown>[] }, server: Server) =>
+      structured.publications.filter((p) => p.server === server).map((p) => p.preprintDoi);
+    const requested = () => http.calls.map((c) => new URL(c.request.url).pathname).sort();
+
+    beforeEach(async () => {
+      http.reset();
+      http.route({
+        match: (request) => PUBS.test(new URL(request.url).pathname),
+        respond: (request) => {
+          const [, server, start, at] = PUBS.exec(new URL(request.url).pathname) as string[];
+          const total = start === '2026-09-01' ? ROWS[server as Server] : 0;
+          const cursor = Number(at);
+          if (cursor >= total) return Response.json({ messages: [NO_ARTICLES], collection: [] });
+          const collection = dois(server as Server, cursor, Math.min(cursor + 100, total)).map(
+            (preprint_doi) => ({ ...PUBS_ROW_64898, preprint_doi }),
+          );
+          return Response.json({
+            messages: [{ status: 'ok', cursor, count: collection.length, total: String(total) }],
+            collection,
+          });
+        },
+      });
+      http.install();
+      const { BiorxivApiService } = await vi.importActual<
+        typeof import('@/services/biorxiv/biorxiv-service.js')
+      >('@/services/biorxiv/biorxiv-service.js');
+      const real = new BiorxivApiService({} as AppConfig, {} as StorageService);
+      mockGetPublishedListing.mockImplementation(real.getPublishedListing.bind(real));
+    });
+
+    afterEach(() => http.restore());
+
+    it('serves 25 rows per server by default in one upstream request each, continuing at 25', async () => {
+      const { structured, text } = await call({});
+      expect(requested()).toEqual([
+        '/pubs/biorxiv/2026-09-01/2026-09-07/0/json',
+        '/pubs/medrxiv/2026-09-01/2026-09-07/0/json',
+      ]);
+      expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', 0, 25));
+      expect(served(structured, 'medrxiv')).toEqual(dois('medrxiv', 0, 25));
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 0, total: 449, nextCursor: 25 },
+        medrxiv: { cursor: 0, total: 103, nextCursor: 25 },
+      });
+      // Both servers continue at one cursor, so either nextCursor continues both.
+      const notice =
+        "More rows remain past this page on bioRxiv (next cursor 25) and medRxiv (next cursor 25) — pass a server's nextCursor as cursor to continue it.";
+      // cap is the most the page can hold: 25 rows per server × 2 servers.
+      expect(structured).toMatchObject({ truncated: true, shown: 50, cap: 50, notice });
+      expect(text).toContain('**bioRxiv:** page offset 0, total 449 — next cursor: 25');
+      expect(text).toContain('**medRxiv:** page offset 0, total 103 — next cursor: 25');
+      expect(text).toContain('## Journal publications (50 shown)');
+      expect(text).toContain(notice);
+      expect(text).toContain('**truncated:** true\n**shown:** 50\n**cap:** 50\n');
+    });
+
+    it('caps one server at limit rows, and keeps the general continuation wording', async () => {
+      const { structured, text } = await call({ server: 'medrxiv' });
+      const notice =
+        "More rows remain past this page on medRxiv (next cursor 25) — pass a server's nextCursor as cursor to continue it.";
+      expect(structured).toMatchObject({ truncated: true, shown: 25, cap: 25, notice });
+      expect(text).toContain('**truncated:** true\n**shown:** 25\n**cap:** 25\n');
+    });
+
+    it('under "both" past medRxiv\'s last row, names bioRxiv as the server to pass, on both surfaces', async () => {
+      const { structured, text } = await call({ cursor: 125 });
+      expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', 125, 150));
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 125, total: 449, nextCursor: 150 },
+        medrxiv: { cursor: 125, exhausted: true },
+      });
+      const notice =
+        'Cursor 125 is at or past the last row on medRxiv — that entry is marked exhausted and carries no total. Lower the cursor to page that server. More rows remain past this page on bioRxiv (next cursor 150) — pass that nextCursor as cursor with server set to "biorxiv" to continue it.';
+      expect(structured).toMatchObject({ truncated: true, shown: 25, cap: 50, notice });
+      expect(text).toContain(`> ${notice}`);
+      expect(text).toContain('**truncated:** true\n**shown:** 25\n**cap:** 50\n');
+    });
+
+    it('a "both" walk that follows the notice requests medRxiv only for its own 5 pages', async () => {
+      const seen: Record<Server, unknown[]> = { biorxiv: [], medrxiv: [] };
+      let args: { server: 'both' | Server; cursor: number } = { server: 'both', cursor: 0 };
+      let calls = 0;
+      while (calls < 40) {
+        calls += 1;
+        const { structured } = await call({ ...args, limit: 25 });
+        seen.biorxiv.push(...served(structured, 'biorxiv'));
+        seen.medrxiv.push(...served(structured, 'medrxiv'));
+        const named = /with server set to "(biorxiv|medrxiv)"/.exec(structured.notice ?? '');
+        const server = (named?.[1] as Server | undefined) ?? args.server;
+        const next =
+          server === 'both'
+            ? (structured.pagination.biorxiv?.nextCursor ??
+              structured.pagination.medrxiv?.nextCursor)
+            : structured.pagination[server]?.nextCursor;
+        if (next === undefined) break;
+        args = { server, cursor: next as number };
+      }
+      const requestsTo = (server: Server) =>
+        http.calls.filter((c) => new URL(c.request.url).pathname.startsWith(`/pubs/${server}/`))
+          .length;
+
+      expect(calls).toBe(18);
+      expect(requestsTo('biorxiv')).toBe(18);
+      expect(requestsTo('medrxiv')).toBe(5);
+      expect(seen.biorxiv).toEqual(dois('biorxiv', 0, 449));
+      expect(seen.medrxiv).toEqual(dois('medrxiv', 0, 103));
+    });
+
+    it('limit 100 returns the rows and pagination of the whole 100-row page', async () => {
+      const { structured } = await call({ limit: 100 });
+      expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', 0, 100));
+      expect(served(structured, 'medrxiv')).toEqual(dois('medrxiv', 0, 100));
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 0, total: 449, nextCursor: 100 },
+        medrxiv: { cursor: 0, total: 103, nextCursor: 100 },
+      });
+    });
+
+    it.each([101, 250, 1000])(
+      'limit %i serves the 100-row page per server and names it in the notice',
+      async (limit) => {
+        const { result, structured, text } = await call({ limit });
+        expect(result.isError).toBeFalsy();
+        expect(requested()).toHaveLength(2);
+        expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', 0, 100));
+        expect(served(structured, 'medrxiv')).toEqual(dois('medrxiv', 0, 100));
+        expect(structured.pagination).toEqual({
+          biorxiv: { cursor: 0, total: 449, nextCursor: 100 },
+          medrxiv: { cursor: 0, total: 103, nextCursor: 100 },
+        });
+        const notice = `A limit of ${limit} is above the 100-row page api.biorxiv.org serves, so this page holds up to 100 rows per server. More rows remain past this page on bioRxiv (next cursor 100) and medRxiv (next cursor 100) — pass a server's nextCursor as cursor to continue it.`;
+        // The clamped page size, never the requested limit, times 2 servers.
+        expect(structured).toMatchObject({ truncated: true, shown: 200, cap: 200, notice });
+        expect(text).toContain(notice);
+        // Whole lines: "**cap:** 2000", a cap computed from limit 1000, still contains "**cap:** 200".
+        expect(text).toContain('**truncated:** true\n**shown:** 200\n**cap:** 200\n');
+      },
+    );
+
+    it('limit 100 names no 100-row page, since nothing was capped', async () => {
+      const { structured } = await call({ limit: 100 });
+      expect(structured.notice).not.toMatch(/100-row page/);
+      expect(structured).toMatchObject({ shown: 200, cap: 200 });
+    });
+
+    it.each([0, 1001, -25, 2.5])(
+      'rejects limit %j at the schema as -32602 naming the field, before any upstream call',
+      async (limit) => {
+        const { result } = await call({ limit });
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.message).toContain('limit');
+        expect(http.calls).toHaveLength(0);
+      },
+    );
+
+    it('limit 1, the floor, serves one row per server and continues at cursor 1, on both surfaces', async () => {
+      const { result, structured, text } = await call({ limit: 1 });
+      expect(result.isError).toBeFalsy();
+      expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', 0, 1));
+      expect(served(structured, 'medrxiv')).toEqual(dois('medrxiv', 0, 1));
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 0, total: 449, nextCursor: 1 },
+        medrxiv: { cursor: 0, total: 103, nextCursor: 1 },
+      });
+      expect(structured).toMatchObject({ truncated: true, shown: 2, cap: 2 });
+      expect(text).toContain('**bioRxiv:** page offset 0, total 449 — next cursor: 1\n');
+      expect(text).toContain('**medRxiv:** page offset 0, total 103 — next cursor: 1\n');
+      expect(text).toContain('**truncated:** true\n**shown:** 2\n**cap:** 2\n');
+    });
+
+    it('walks bioRxiv at limit 25 in 18 calls, every row once, the last at cursor 425', async () => {
+      const cursors: number[] = [];
+      const seen: unknown[] = [];
+      let cursor: number | undefined = 0;
+      let last: Awaited<ReturnType<typeof call>> | undefined;
+      while (cursor !== undefined && cursors.length < 30) {
+        cursors.push(cursor);
+        last = await call({ server: 'biorxiv', cursor, limit: 25 });
+        seen.push(...served(last.structured, 'biorxiv'));
+        cursor = last.structured.pagination.biorxiv?.nextCursor as number | undefined;
+      }
+      expect(cursors).toEqual(Array.from({ length: 18 }, (_, i) => i * 25));
+      expect(http.calls).toHaveLength(18);
+      expect(seen).toEqual(dois('biorxiv', 0, 449));
+      expect(new Set(seen).size).toBe(449);
+      expect(served(last?.structured ?? { publications: [] }, 'biorxiv')).toHaveLength(24);
+      expect(last?.structured.pagination.biorxiv).toEqual({ cursor: 425, total: 449 });
+      expect(last?.structured).not.toHaveProperty('truncated');
+      expect(last?.structured).not.toHaveProperty('notice');
+      expect(last?.text).toContain('**bioRxiv:** page offset 425, total 449 (last page)');
+    });
+
+    it('continues a walk started at cursor 37 at 62, 87, 112', async () => {
+      const cursors: number[] = [];
+      let cursor = 37;
+      for (let i = 0; i < 3; i++) {
+        const { structured } = await call({ server: 'biorxiv', cursor, limit: 25 });
+        expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', cursor, cursor + 25));
+        cursor = structured.pagination.biorxiv?.nextCursor as number;
+        cursors.push(cursor);
+      }
+      expect(cursors).toEqual([62, 87, 112]);
+    });
+
+    it("at cursor 100 returns medRxiv's last 3 rows with no next cursor and bioRxiv's 25 continuing at 125", async () => {
+      const { structured, text } = await call({ cursor: 100, limit: 25 });
+      expect(served(structured, 'biorxiv')).toEqual(dois('biorxiv', 100, 125));
+      expect(served(structured, 'medrxiv')).toEqual(dois('medrxiv', 100, 103));
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 100, total: 449, nextCursor: 125 },
+        medrxiv: { cursor: 100, total: 103 },
+      });
+      expect(structured).toMatchObject({ truncated: true, shown: 28, cap: 50 });
+      expect(text).toContain('**medRxiv:** page offset 100, total 103 (last page)');
+      expect(text).toContain('**bioRxiv:** page offset 100, total 449 — next cursor: 125');
+    });
+
+    it.each([
+      [
+        449,
+        { biorxiv: { cursor: 449, exhausted: true }, medrxiv: { cursor: 449, exhausted: true } },
+      ],
+      [
+        103,
+        {
+          biorxiv: { cursor: 103, total: 449, nextCursor: 128 },
+          medrxiv: { cursor: 103, exhausted: true },
+        },
+      ],
+    ])(
+      'marks a cursor at %i exhausted, with no total, on the server it reached the end of',
+      async (cursor, pagination) => {
+        const { result, structured } = await call({ cursor, limit: 25 });
+        expect(result.isError).toBeFalsy();
+        expect(structured.pagination).toEqual(pagination);
+        expect(structured.notice).toMatch(
+          new RegExp(`Cursor ${cursor} is at or past the last row`),
+        );
+      },
+    );
+
+    it('reports total 0 for an empty interval at cursor 0, with no truncation', async () => {
+      const { structured } = await call({
+        start_date: '2026-10-01',
+        end_date: '2026-10-07',
+        server: 'biorxiv',
+      });
+      expect(structured.pagination).toEqual({ biorxiv: { cursor: 0, total: 0 } });
+      expect(structured).not.toHaveProperty('truncated');
+      expect(structured.notice).toMatch(/^No journal publications found for publication dates/);
+    });
+
+    it.each([5, 250])('include_abstract removes only the abstract at limit %i', async (limit) => {
+      const shown = Math.min(limit, 100);
+      const withAbstracts = await call({ server: 'biorxiv', limit, include_abstract: true });
+      expect(withAbstracts.structured.publications).toHaveLength(shown);
+      for (const p of withAbstracts.structured.publications) {
+        expect(p.preprintAbstract).toBe(PUBS_ROW_64898.preprint_abstract);
+      }
+      const without = await call({ server: 'biorxiv', limit });
+      expect(served(without.structured, 'biorxiv')).toEqual(
+        served(withAbstracts.structured, 'biorxiv'),
+      );
+      for (const p of without.structured.publications)
+        expect(p).not.toHaveProperty('preprintAbstract');
+      expect(without.text).not.toContain(PUBS_ROW_64898.preprint_abstract);
+    });
+  });
+
+  it('keeps a failed server in failed[] at any limit, ahead of the truncation notice', async () => {
+    mockGetPublishedListing.mockImplementation(
+      perServer({ biorxiv: new Error('bioRxiv down'), medrxiv: page(rows(5), 0, 103) }),
+    );
+    const { result, structured } = await call({ limit: 5 });
+    expect(result.isError).toBeFalsy();
+    expect(mockGetPublishedListing).toHaveBeenCalledWith(
+      'medrxiv',
+      '2026-09-01',
+      '2026-09-07',
+      0,
+      5,
+      expect.any(Number),
+      expect.anything(),
+    );
+    expect(structured.failed).toEqual([{ server: 'biorxiv', error: 'bioRxiv down' }]);
+    expect(structured.pagination).toEqual({ medrxiv: { cursor: 0, total: 103, nextCursor: 5 } });
+    // Both servers were queried, so the page could have held 5 rows from each.
+    expect(structured).toMatchObject({ truncated: true, shown: 5, cap: 10 });
+    // A failed server keeps the general wording: retrying "both" is how it gets included.
+    expect(structured.notice).toBe(
+      "bioRxiv did not answer, so this result set is partial — it holds no bioRxiv publications. See failed[] for the error and retry to include them. More rows remain past this page on medRxiv (next cursor 5) — pass a server's nextCursor as cursor to continue it.",
+    );
   });
 
   // ── Upstream failure ────────────────────────────────────────────────────────

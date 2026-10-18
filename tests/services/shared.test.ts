@@ -1,24 +1,32 @@
 /**
  * @fileoverview Tests for shared service utilities — detectHtmlError,
  * SERVER_VERSION, normalizeUpstreamText, normalizeDoi, normalizeRorId,
- * escapeMarkdown, parseRetryAfterSeconds, findRateLimit, and describeWait.
+ * escapeMarkdown, parseRetryAfterSeconds, findRateLimit, describeWait, the
+ * per-tool-call deadline, and the retry ladder that runs inside it.
  * @module tests/services/shared.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CALL_BUDGET_MS,
+  type CallDeadline,
   describeWait,
   detectHtmlError,
   escapeMarkdown,
   findRateLimit,
+  ladderBudgetMs,
   normalizeDoi,
   normalizeRorId,
   normalizeUpstreamText,
   parseRetryAfterSeconds,
+  remainingBudgetMs,
+  retryWithinBudget,
   SERVER_VERSION,
+  startCallDeadline,
 } from '@/services/shared.js';
 import packageJson from '../../package.json' with { type: 'json' };
+import { settle } from '../helpers/call-budget.js';
 import { rateLimitError } from '../helpers/rate-limit.js';
 
 describe('detectHtmlError', () => {
@@ -604,6 +612,207 @@ describe('describeWait', () => {
 
   it('falls back to a generic phrase when no usable wait was named', () => {
     expect(describeWait(undefined)).toBe('a minute or two');
+  });
+});
+
+describe('call deadline', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('budgets 50 s per tool call, under the 60 s MCP client request timeout', () => {
+    expect(CALL_BUDGET_MS).toBe(50_000);
+    expect(startCallDeadline()).toBe(Date.now() + 50_000);
+  });
+
+  it('counts down from the instant the call started, not from each request', () => {
+    const deadline = startCallDeadline();
+    expect(remainingBudgetMs(deadline)).toBe(50_000);
+    vi.advanceTimersByTime(30_000);
+    expect(remainingBudgetMs(deadline)).toBe(20_000);
+    vi.advanceTimersByTime(19_999);
+    expect(remainingBudgetMs(deadline)).toBe(1);
+  });
+
+  it('reads 0 at the deadline and past it, never a negative budget', () => {
+    const deadline = startCallDeadline();
+    vi.advanceTimersByTime(50_000);
+    expect(remainingBudgetMs(deadline)).toBe(0);
+    vi.advanceTimersByTime(5_000);
+    expect(remainingBudgetMs(deadline)).toBe(0);
+  });
+
+  it('hands a ladder what is left of the budget, down to its last millisecond', () => {
+    const deadline = startCallDeadline();
+    expect(ladderBudgetMs(deadline, 'Service.op')).toBe(50_000);
+    vi.advanceTimersByTime(49_999);
+    expect(ladderBudgetMs(deadline, 'Service.op')).toBe(1);
+  });
+
+  it('fails a ladder the spent budget leaves nothing for as the call running out of time', () => {
+    const deadline = startCallDeadline();
+    vi.advanceTimersByTime(50_000);
+    let err: unknown;
+    try {
+      ladderBudgetMs(deadline, 'Service.op');
+    } catch (thrown) {
+      err = thrown;
+    }
+    expect(err).toBeInstanceOf(McpError);
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: "Service.op was not attempted — the call's 50 s time budget had run out.",
+      data: { reason: 'retry_deadline_exceeded', retryAttempts: 0 },
+    });
+  });
+});
+
+describe('retryWithinBudget', () => {
+  const http429 = (retryAfter?: string) =>
+    new McpError(JsonRpcErrorCode.RateLimited, 'Status: 429', {
+      status: 429,
+      ...(retryAfter !== undefined && { retryAfter }),
+    });
+  /** An attempt still waiting on its origin until the ladder's signal aborts. */
+  const hangs = ({ signal }: { signal: AbortSignal }) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  /** Runs `attempts` in turn, the last one for every attempt after it. */
+  const ladder = (
+    deadline: CallDeadline,
+    attempts: ((a: { signal: AbortSignal }) => Promise<unknown>)[],
+    signal?: AbortSignal,
+  ) => {
+    let n = 0;
+    const attempt = vi.fn((a: { signal: AbortSignal }) => {
+      const run = attempts[Math.min(n, attempts.length - 1)] as (typeof attempts)[number];
+      n += 1;
+      return run(a);
+    });
+    const call = retryWithinBudget(attempt, {
+      operation: 'Service.op',
+      baseDelayMs: 1_000,
+      jitter: 0,
+      deadline,
+      ...(signal && { signal }),
+    });
+    return { attempt, call };
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('fails before any attempt once the budget is spent, as the call running out of time', async () => {
+    const deadline = startCallDeadline();
+    vi.advanceTimersByTime(CALL_BUDGET_MS);
+    const { attempt, call } = ladder(deadline, [() => Promise.resolve('ok')]);
+    const { err } = await settle(call);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: "Service.op was not attempted — the call's 50 s time budget had run out.",
+      data: { reason: 'retry_deadline_exceeded', retryAttempts: 0 },
+    });
+    expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it('bounds the ladder by what is left of the budget', async () => {
+    const deadline = (Date.now() + 3_000) as CallDeadline;
+    const { attempt, call } = ladder(deadline, [hangs]);
+    const { err, elapsedMs } = await settle(call);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: 'Service.op exceeded its 3000ms retry deadline after 1 attempt.',
+      data: { reason: 'retry_deadline_exceeded', retryAttempts: 1 },
+    });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(elapsedMs).toBe(3_000);
+  });
+
+  it('rejects with the 429 an attempt received when the budget ran out in the backoff after it', async () => {
+    const limited = http429();
+    // 500 ms left, less than the 1 s backoff before a second attempt.
+    const { attempt, call } = ladder((Date.now() + 500) as CallDeadline, [
+      () => Promise.reject(limited),
+    ]);
+    const { err } = await settle(call);
+
+    expect(err).toBe(limited);
+    expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects with the last 429 an attempt received when the budget cut a later attempt short', async () => {
+    const first = http429('1');
+    const second = http429('2');
+    const { attempt, call } = ladder((Date.now() + 10_000) as CallDeadline, [
+      () => Promise.reject(first),
+      () => Promise.reject(second),
+      hangs,
+    ]);
+    const { err, elapsedMs } = await settle(call);
+
+    expect(err).toBe(second);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    expect(elapsedMs).toBe(10_000);
+  });
+
+  it('keeps an expiry with no 429 behind it an expiry, whatever the attempts threw', async () => {
+    const outage = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Status: 503', {
+      status: 503,
+    });
+    const { call } = ladder((Date.now() + 10_000) as CallDeadline, [
+      () => Promise.reject(outage),
+      hangs,
+    ]);
+    const { err } = await settle(call);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', retryAttempts: 2 },
+    });
+  });
+
+  it('rejects with every other failure as withRetry threw it', async () => {
+    const plain = new McpError(JsonRpcErrorCode.InvalidParams, 'Status: 400', {
+      status: 400,
+      retryable: false,
+    });
+    expect(
+      (await settle(ladder(startCallDeadline(), [() => Promise.reject(plain)]).call)).err,
+    ).toBe(plain);
+
+    // 429s until the attempts run out inside the budget: the exhausted error,
+    // whose data keeps the 429's status.
+    const { err: exhausted } = await settle(
+      ladder(startCallDeadline(), [() => Promise.reject(http429())]).call,
+    );
+    expect(exhausted).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      message: 'Status: 429 (failed after 4 attempts)',
+      data: { status: 429, retryAttempts: 4 },
+    });
+  });
+
+  it('keeps a caller cancellation after a 429 a cancellation, never the 429', async () => {
+    const caller = new AbortController();
+    const cancelled = new Error('cancelled by caller');
+    setTimeout(() => caller.abort(cancelled), 5_000);
+    const { call } = ladder(
+      startCallDeadline(),
+      [() => Promise.reject(http429()), hangs],
+      caller.signal,
+    );
+    const { err, elapsedMs } = await settle(call);
+
+    expect(err).toBe(cancelled);
+    expect(elapsedMs).toBe(5_000);
   });
 });
 

@@ -5,7 +5,8 @@
  * abstracts for records that fall back to EuropePMC metadata: the ranked search
  * uses the `lite` result type, which never carries `abstractText`, so abstracts
  * come from one DOI-keyed `core` query instead. All requests
- * include a polite User-Agent and are retried with exponential backoff.
+ * include a polite User-Agent and are retried with exponential backoff inside
+ * the calling tool's deadline, which bounds every attempt and backoff.
  * Detects HTML error pages, retries an HTTP 200 body that carries no result
  * list, and classifies an origin rate limit (HTTP 429) as its own retryable
  * `rate_limited` condition carrying the parsed `Retry-After` wait — never the
@@ -22,13 +23,15 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
+  type CallDeadline,
   describeWait,
   detectHtmlError,
   normalizeUpstreamText,
   parseRetryAfterSeconds,
+  retryWithinBudget,
   SERVER_VERSION,
 } from '@/services/shared.js';
 import type {
@@ -104,6 +107,7 @@ function rethrowClassified(err: unknown, cursorMark: string): never {
     );
   }
 
+  // A 429 the budget ran out after arrives here in place of the expiry.
   if (data?.status !== 429) throw err;
 
   const retryAfter = parseRetryAfterSeconds(data.retryAfter);
@@ -162,8 +166,14 @@ export class EuropePmcService {
    * A body with no result list is retried; if every attempt returns one, throws
    * `ValidationError` (`invalid_cursor_mark`) when a cursor page other than `*`
    * was requested, and `ServiceUnavailable` (`empty_response_body`) otherwise.
+   * A deadline that runs out first is a `Timeout` expiry either way: fewer
+   * attempts than the full ladder do not establish that the cursor is at fault.
    */
-  async search(options: SearchOptions, ctx: Context): Promise<EuropePmcSearchResult> {
+  async search(
+    options: SearchOptions,
+    deadline: CallDeadline,
+    ctx: Context,
+  ): Promise<EuropePmcSearchResult> {
     const limit = Math.min(options.limit ?? 25, 100);
 
     // Base terms: the free-text keyword query and/or an AUTH: author clause.
@@ -211,10 +221,10 @@ export class EuropePmcService {
     const url = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
 
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetchWithTimeout(url, 20_000, ctx, {
-            signal: ctx.signal,
+      return await retryWithinBudget(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(url, Math.min(20_000, remainingMs), ctx, {
+            signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
           });
@@ -256,6 +266,7 @@ export class EuropePmcService {
           context: ctx,
           baseDelayMs: 300,
           signal: ctx.signal,
+          deadline,
         },
       );
     } catch (err) {
@@ -272,7 +283,11 @@ export class EuropePmcService {
    * absent from the map. Throws on failure — classified like `search`, with an
    * HTTP 429 as a retryable `rate_limited` error carrying `Retry-After`.
    */
-  async getAbstracts(dois: readonly string[], ctx: Context): Promise<Map<string, string>> {
+  async getAbstracts(
+    dois: readonly string[],
+    deadline: CallDeadline,
+    ctx: Context,
+  ): Promise<Map<string, string>> {
     const unique = [...new Set(dois.map((doi) => doi.toLowerCase()))];
     // Quotes are stripped so a stray one cannot end the DOI phrase early.
     const clause = unique.map((doi) => `DOI:"${doi.replace(/"/g, '')}"`).join(' OR ');
@@ -286,10 +301,10 @@ export class EuropePmcService {
     const url = `${this.baseUrl}/search?${params.toString()}`;
 
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetchWithTimeout(url, 20_000, ctx, {
-            signal: ctx.signal,
+      return await retryWithinBudget(
+        async ({ signal, remainingMs }) => {
+          const response = await fetchWithTimeout(url, Math.min(20_000, remainingMs), ctx, {
+            signal,
             headers: { 'User-Agent': this.userAgent },
             expectedStatuses: EXPECTED_STATUSES,
           });
@@ -319,6 +334,7 @@ export class EuropePmcService {
           context: ctx,
           baseDelayMs: 300,
           signal: ctx.signal,
+          deadline,
         },
       );
     } catch (err) {

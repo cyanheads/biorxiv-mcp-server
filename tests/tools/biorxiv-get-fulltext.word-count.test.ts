@@ -110,7 +110,8 @@ function serveArticle(html: string): void {
 
 const tokens = (text: string): number => text.split(/\s+/).filter(Boolean).length;
 
-describe('biorxiv_get_fulltext wordCount', () => {
+// The real extractor is CPU-bound: this file's slowest test has taken 8.0 s under machine load.
+describe('biorxiv_get_fulltext wordCount', { timeout: 30_000 }, () => {
   beforeEach(() => {
     http.reset();
     http.install();

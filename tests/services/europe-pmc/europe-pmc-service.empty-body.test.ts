@@ -15,6 +15,7 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
+import { startCallDeadline } from '@/services/shared.js';
 
 const BASE = 'https://www.ebi.ac.uk/europepmc/webservices/rest';
 
@@ -96,14 +97,18 @@ describe('EuropePmcService — empty-body responses', () => {
 
   it('returns a genuine zero-hit page after one request', async () => {
     answerWith(ZERO_HIT_BODY);
-    const result = await settle(service.search({ query: 'xyzzy' }, createMockContext()));
+    const result = await settle(
+      service.search({ query: 'xyzzy' }, startCallDeadline(), createMockContext()),
+    );
     expect(result).toEqual({ status: 'fulfilled', value: { hitCount: 0, results: [] } });
     expect(http.calls).toHaveLength(1);
   });
 
   it('returns a populated page after one request', async () => {
     answerWith(POPULATED_BODY);
-    const result = await settle(service.search({ query: 'CRISPR' }, createMockContext()));
+    const result = await settle(
+      service.search({ query: 'CRISPR' }, startCallDeadline(), createMockContext()),
+    );
     expect(result.status).toBe('fulfilled');
     expect(result.status === 'fulfilled' && result.value.results).toHaveLength(1);
     expect(http.calls).toHaveLength(1);
@@ -113,7 +118,9 @@ describe('EuropePmcService — empty-body responses', () => {
 
   it('retries a single empty body on a first-page request and returns the real page', async () => {
     answerWith(EMPTY_BODY, POPULATED_BODY);
-    const result = await settle(service.search({ query: 'CRISPR' }, createMockContext()));
+    const result = await settle(
+      service.search({ query: 'CRISPR' }, startCallDeadline(), createMockContext()),
+    );
     expect(result).toMatchObject({
       status: 'fulfilled',
       value: { hitCount: 11054, nextCursorMark: 'AoIIQGldFig1NjAxNTg1MA==' },
@@ -126,7 +133,9 @@ describe('EuropePmcService — empty-body responses', () => {
 
   it('keeps retrying through three empty bodies and succeeds on the last attempt', async () => {
     answerWith(EMPTY_BODY, EMPTY_BODY, EMPTY_BODY, POPULATED_BODY);
-    const result = await settle(service.search({ query: 'CRISPR' }, createMockContext()));
+    const result = await settle(
+      service.search({ query: 'CRISPR' }, startCallDeadline(), createMockContext()),
+    );
     expect(result).toMatchObject({ status: 'fulfilled', value: { hitCount: 11054 } });
     expect(http.calls).toHaveLength(4);
   });
@@ -136,6 +145,7 @@ describe('EuropePmcService — empty-body responses', () => {
     const result = await settle(
       service.search(
         { query: 'CRISPR', cursorMark: 'AoIIQGldFig1NjAxNTg1MA==' },
+        startCallDeadline(),
         createMockContext(),
       ),
     );
@@ -145,7 +155,9 @@ describe('EuropePmcService — empty-body responses', () => {
 
   it('raises ServiceUnavailable when a first-page empty body persists through every attempt', async () => {
     answerWith(EMPTY_BODY);
-    const result = await settle(service.search({ query: 'CRISPR' }, createMockContext()));
+    const result = await settle(
+      service.search({ query: 'CRISPR' }, startCallDeadline(), createMockContext()),
+    );
     expect(result.status).toBe('rejected');
     const err = (result as PromiseRejectedResult).reason;
     expect(err).toMatchObject({
@@ -162,7 +174,11 @@ describe('EuropePmcService — empty-body responses', () => {
   it('treats an explicit "*" cursor as a first page, not a bad cursor', async () => {
     answerWith(EMPTY_BODY);
     const result = await settle(
-      service.search({ query: 'CRISPR', cursorMark: '*' }, createMockContext()),
+      service.search(
+        { query: 'CRISPR', cursorMark: '*' },
+        startCallDeadline(),
+        createMockContext(),
+      ),
     );
     const err = (result as PromiseRejectedResult).reason;
     expect(err).toMatchObject({
@@ -175,7 +191,7 @@ describe('EuropePmcService — empty-body responses', () => {
   it('treats a blank cursor from a form client as a first page', async () => {
     answerWith(EMPTY_BODY);
     const result = await settle(
-      service.search({ query: 'CRISPR', cursorMark: '' }, createMockContext()),
+      service.search({ query: 'CRISPR', cursorMark: '' }, startCallDeadline(), createMockContext()),
     );
     expect((result as PromiseRejectedResult).reason).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -188,7 +204,11 @@ describe('EuropePmcService — empty-body responses', () => {
   it('treats a whitespace-only cursor as a first page, never invalid_cursor_mark', async () => {
     answerWith(EMPTY_BODY);
     const result = await settle(
-      service.search({ query: 'CRISPR', cursorMark: '  ' }, createMockContext()),
+      service.search(
+        { query: 'CRISPR', cursorMark: '  ' },
+        startCallDeadline(),
+        createMockContext(),
+      ),
     );
     expect((result as PromiseRejectedResult).reason).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -203,6 +223,7 @@ describe('EuropePmcService — empty-body responses', () => {
     const result = await settle(
       service.search(
         { query: 'CRISPR', cursorMark: ' AoIIQGldFig1NjAxNTg1MA==\n' },
+        startCallDeadline(),
         createMockContext(),
       ),
     );
@@ -216,7 +237,11 @@ describe('EuropePmcService — empty-body responses', () => {
   it('classifies a persisting empty body on a supplied cursor as invalid_cursor_mark', async () => {
     answerWith(EMPTY_BODY);
     const result = await settle(
-      service.search({ query: 'crispr', cursorMark: 'garbage!!!' }, createMockContext()),
+      service.search(
+        { query: 'crispr', cursorMark: 'garbage!!!' },
+        startCallDeadline(),
+        createMockContext(),
+      ),
     );
     expect(result.status).toBe('rejected');
     const err = (result as PromiseRejectedResult).reason;
