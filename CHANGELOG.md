@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-17
+
+Every tool call runs its upstream requests on one 50 s budget, so a hung origin ends in a classified error before a client's 60 s timeout. biorxiv_get_preprint and biorxiv_search_preprints serve their per-call cap instead of rejecting an oversized request, and biorxiv_list_published_versions takes a limit (default 25).
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-15
 
 Adds biorxiv_list_published_versions, which lists preprints published as journal articles by journal publication date. biorxiv_get_fulltext keeps citation labels and reference text, names tables whose cells are not on the page, and drops its 50,000-character limit ceiling.
