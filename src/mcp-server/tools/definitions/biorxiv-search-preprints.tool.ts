@@ -23,8 +23,10 @@
  *
  * EuropePMC sometimes answers HTTP 200 with no result list. The service retries
  * that body; one that persists fails the call rather than reading as zero
- * matches — `invalid_cursor_mark` when a cursor page was requested (a malformed
- * token draws that body every time), `search_unavailable` on a first page.
+ * matches, as `search_unavailable`. A cursor page that every attempt fails with
+ * that body or with HTTP 503 — EuropePMC's answer to a token it does not
+ * recognize, and to an outage alike — is `invalid_cursor_mark` instead when one
+ * extra request, the same query's first page, answers.
  *
  * `include_abstract` (default true) drops only the abstract, from enriched and
  * fallback records alike. The ranked search's `lite` records carry no abstract,
@@ -44,10 +46,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
-import type { PreprintRevision } from '@/services/biorxiv/types.js';
+import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
 import {
+  BIORXIV_DOI_PREFIXES,
   describeWait,
   escapeMarkdown,
   findRateLimit,
@@ -55,8 +58,6 @@ import {
   isValidCalendarDate,
   startCallDeadline,
 } from '@/services/shared.js';
-
-const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'];
 
 /** Ranked results one call reads — the bound on its enrichment fan-out and abstract lookup. */
 const RESULTS_PER_CALL = 100;
@@ -78,7 +79,7 @@ type EnrichedPreprint = {
   type?: string | undefined;
   license?: string | undefined;
   category?: string | undefined;
-  server?: string | undefined;
+  server?: BiorxivServer | undefined;
   jatsxmlUrl?: string | undefined;
   awards?: string[] | undefined;
   publishedJournalDoi?: string | undefined;
@@ -163,13 +164,13 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       date_from: blankAsUnset(
         z
           .string()
-          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD, e.g. 2025-03-04')
           .optional(),
       ).describe('Earliest first-publication date filter (YYYY-MM-DD).'),
       date_to: blankAsUnset(
         z
           .string()
-          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD, e.g. 2025-03-04')
           .optional(),
       ).describe('Latest first-publication date filter (YYYY-MM-DD).'),
       limit: z
@@ -216,7 +217,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
             type: z.string().optional().describe('Preprint type.'),
             license: z.string().optional().describe('License identifier.'),
             category: z.string().optional().describe('Subject category.'),
-            server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
+            server: z
+              .enum(['biorxiv', 'medrxiv'])
+              .optional()
+              .describe(
+                'Server the preprint was found on — accepted as the server input of every tool. Present on enriched records only.',
+              ),
             jatsxmlUrl: z.string().optional().describe('URL to the JATS XML full-text.'),
             awards: z
               .array(z.string().describe('One award value as upstream records it.'))
@@ -353,7 +359,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     {
       reason: 'search_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'EuropePMC search endpoint is unreachable, returns a server error, or answers a first-page search without a result list on every retry.',
+      when: 'EuropePMC search endpoint is unreachable, returns a server error, or answers without a result list on every retry. On a cursor_mark page, HTTP 503 or a missing result list on every retry is this reason only when the first page of the same query fails too, or no time is left to check it.',
       recovery:
         'EuropePMC may be temporarily unavailable. Retry after a short delay or use biorxiv_list_recent with a date range instead.',
     },
@@ -361,7 +367,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       reason: 'invalid_cursor_mark',
       code: JsonRpcErrorCode.ValidationError,
       retryable: false,
-      when: 'EuropePMC answers a cursor_mark page request without a result list on every retry — the token is malformed or not one EuropePMC issued.',
+      when: 'EuropePMC answers a cursor_mark page with HTTP 503 or without a result list on every retry while the first page of the same query answers — the token is malformed or not one EuropePMC issued.',
       recovery:
         'Pass the nextCursorMark from the previous page exactly as returned, or omit cursor_mark (or pass "*") to restart from the first page.',
     },
@@ -432,7 +438,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     } catch (err) {
       const cause = err instanceof Error ? err : new Error(String(err));
       // The service already decided this is the caller's cursor, not an outage:
-      // EuropePMC kept answering the cursor page without a result list.
+      // the cursor page failed every attempt while the query's first page answered.
       if (err instanceof McpError && err.data?.reason === 'invalid_cursor_mark') {
         throw ctx.fail(
           'invalid_cursor_mark',
@@ -585,7 +591,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
           ...(latest.type && { type: latest.type }),
           ...(latest.license && { license: latest.license }),
           ...(latest.category && { category: latest.category }),
-          ...(latest.server && { server: latest.server }),
+          server: latest.server,
           ...(latest.jatsxmlUrl && { jatsxmlUrl: latest.jatsxmlUrl }),
           ...(latest.awards && { awards: latest.awards }),
           ...(latest.publishedJournalDoi && { publishedJournalDoi: latest.publishedJournalDoi }),

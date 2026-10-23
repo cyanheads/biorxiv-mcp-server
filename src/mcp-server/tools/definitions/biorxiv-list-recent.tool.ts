@@ -42,8 +42,6 @@ import {
   startCallDeadline,
 } from '@/services/shared.js';
 
-const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-
 const SERVERS = ['biorxiv', 'medrxiv'] as const;
 const SERVER_LABEL = { biorxiv: 'bioRxiv', medrxiv: 'medRxiv' } as const;
 
@@ -66,7 +64,7 @@ function formatPreprint(p: PreprintRevision): string {
   if (p.date) lines.push(`**Date:** ${p.date}`);
   if (p.version) lines.push(`**Version:** ${p.version}`);
   if (p.type) lines.push(`**Type:** ${escapeMarkdown(p.type)}`);
-  if (p.server) lines.push(`**Server:** ${p.server}`);
+  lines.push(`**Server:** ${p.server}`);
   if (p.category) lines.push(`**Category:** ${escapeMarkdown(p.category)}`);
   if (p.license) lines.push(`**License:** ${escapeMarkdown(p.license)}`);
   if (p.authors) lines.push(`**Authors:** ${escapeMarkdown(p.authors)}`);
@@ -84,15 +82,21 @@ function formatPreprint(p: PreprintRevision): string {
 export const biorxivListRecentTool = tool('biorxiv_list_recent', {
   title: 'List Recent Preprints',
   description:
-    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. Abstracts are omitted by default to keep the page small — pass include_abstract: true for the whole page, or call biorxiv_get_preprint (up to 10 DOIs per call) for a few. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings; a server that answers a category filter with its unfiltered listing is left out with a notice, and invalid_category is raised when no server applied it. `funder` limits the listing to bioRxiv preprints funded by that organization, given its ROR ID; an ID api.biorxiv.org has no funder record for raises invalid_funder rather than returning an empty page.',
+    'List preprints posted or revised within a date interval, optionally scoped to one server or a subject category. Returns 30 preprints per page (fixed by the API); pass `cursor` as an integer offset (0, 30, 60, …) to step through additional pages. Abstracts are omitted by default to keep the page small — pass include_abstract: true for the whole page (each row carries the latest-revision abstract of its preprint, whichever revision the row is), or call biorxiv_get_preprint (up to 10 DOIs per call) for a few. When server="both" (default), per-server pagination state is returned separately — use each server\'s `cursor` field for independent advancement. One server failing under server="both" does not abort the call: the other server\'s page is still returned and the failed one is named in `failed[]`, marking the result set as partial rather than complete. Every attempted server failing is a different case and does abort the call, with a retryable upstream_unavailable (or rate_limited) error — an empty page would otherwise be indistinguishable from an interval that genuinely holds nothing. Call biorxiv_list_categories for valid category strings; a server that answers a category filter with its unfiltered listing is left out with a notice, and invalid_category is raised when no server applied it. `funder` limits the listing to bioRxiv preprints funded by that organization, given its ROR ID; an ID api.biorxiv.org has no funder record for raises invalid_funder rather than returning an empty page.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   // biorxiv_search_preprints spells its date bounds date_from / date_to.
   inputAliases: { date_from: 'start_date', date_to: 'end_date' },
 
   input: z.object({
-    start_date: z.string().describe('Start of the date interval (YYYY-MM-DD).'),
-    end_date: z.string().describe('End of the date interval (YYYY-MM-DD).'),
+    start_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD, e.g. 2025-03-04')
+      .describe('Start of the date interval (YYYY-MM-DD).'),
+    end_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD, e.g. 2025-03-04')
+      .describe('End of the date interval (YYYY-MM-DD).'),
     server: z
       .enum(['biorxiv', 'medrxiv', 'both'])
       .default('both')
@@ -145,7 +149,9 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
             abstract: z
               .string()
               .optional()
-              .describe('Abstract text. Present only when include_abstract is true.'),
+              .describe(
+                "The preprint's latest-revision abstract, which differs from this row's own revision when a later one exists — api.biorxiv.org keeps one abstract per preprint. Present only when include_abstract is true.",
+              ),
             awards: z
               .array(z.string().describe('One award value as upstream records it.'))
               .optional()
@@ -156,7 +162,11 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
               .string()
               .optional()
               .describe('Published journal DOI when this preprint has been accepted.'),
-            server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
+            server: z
+              .enum(['biorxiv', 'medrxiv'])
+              .describe(
+                'Server the preprint was listed on — accepted as the server input of every tool.',
+              ),
           })
           .describe('A single preprint entry.'),
       )
@@ -231,7 +241,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'end_date is before start_date, or either date is malformed.',
+      when: 'end_date is before start_date, or either date names no calendar day (2024-02-30, 2024-13-01).',
       recovery: 'Provide valid YYYY-MM-DD dates where start_date is on or before end_date.',
     },
     {
@@ -275,11 +285,8 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       funder: input.funder,
     });
 
-    // Validate dates: shape first, then real-calendar-date (rejects overflow days
-    // like 2024-02-30 that the shape regex accepts but no calendar holds), then range.
-    if (!DATE_REGEX.test(input.start_date) || !DATE_REGEX.test(input.end_date)) {
-      throw ctx.fail('invalid_date_range', 'Date must be in YYYY-MM-DD format.');
-    }
+    // The schema has checked the shape; reject overflow days like 2024-02-30
+    // that the shape accepts but no calendar holds, then an inverted range.
     if (!isValidCalendarDate(input.start_date) || !isValidCalendarDate(input.end_date)) {
       throw ctx.fail('invalid_date_range', 'Date must be a real calendar date (YYYY-MM-DD).');
     }

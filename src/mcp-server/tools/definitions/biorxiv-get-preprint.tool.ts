@@ -41,7 +41,7 @@ function formatRevision(r: PreprintRevision): string {
   lines.push(`#### v${r.version ?? '?'} — ${r.date ?? 'unknown date'}`);
   if (r.title) lines.push(`**Title:** ${escapeMarkdown(r.title)}`);
   lines.push(`**DOI:** ${r.doi}`);
-  if (r.server) lines.push(`**Server:** ${r.server}`);
+  lines.push(`**Server:** ${r.server}`);
   if (r.type) lines.push(`**Type:** ${escapeMarkdown(r.type)}`);
   if (r.category) lines.push(`**Category:** ${escapeMarkdown(r.category)}`);
   if (r.license) lines.push(`**License:** ${escapeMarkdown(r.license)}`);
@@ -89,7 +89,12 @@ const RevisionSchema = z.object({
   license: z.string().optional().describe('License identifier.'),
   category: z.string().optional().describe('Subject category.'),
   jatsxmlUrl: z.string().optional().describe('URL to the JATS XML full-text.'),
-  abstract: z.string().optional().describe('Abstract text.'),
+  abstract: z
+    .string()
+    .optional()
+    .describe(
+      "The preprint's current abstract, present on the latest revision only: api.biorxiv.org keeps one abstract per preprint and repeats it on every revision. For an earlier revision's own abstract, read that revision with biorxiv_get_fulltext and its version input; medRxiv blocks its article pages to some hosts, and there that request fails as fulltext_unavailable.",
+    ),
   awards: z
     .array(z.string().describe('One award value as upstream records it.'))
     .optional()
@@ -97,7 +102,9 @@ const RevisionSchema = z.object({
       'Grant award numbers from the funding statement, verbatim and deduplicated — one value can hold several grants run together without a separator. Absent when none. Funder names are not included: api.biorxiv.org attributes them to unrelated organizations.',
     ),
   publishedJournalDoi: z.string().optional().describe('Published journal DOI when accepted.'),
-  server: z.string().optional().describe('Source server (biorxiv or medrxiv).'),
+  server: z
+    .enum(['biorxiv', 'medrxiv'])
+    .describe('Server the revision was found on — accepted as the server input of every tool.'),
 });
 
 /** Distinct DOIs one call looks up; the rest are returned in `unprocessed`. */
@@ -116,7 +123,7 @@ function echoEntries(entries: readonly string[]): string {
 export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
   title: 'Get Preprint by DOI',
   description:
-    'Fetch full metadata, abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response. Each call looks up the first 10 distinct DOIs and returns the rest, never looked up, in unprocessed[] — pass that list as dois in another call to continue; a repeated DOI is looked up once and an unparseable entry is reported in failed[], so neither counts toward the 10. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable, rate_limited) and a retryable flag; a rate_limited entry also carries the wait in seconds the origin asked for. preprints[], failed[], and unprocessed[] follow input order. DOIs must match the pattern 10.NNNN/…; a doi.org or article URL, a doi: label, and a trailing vN / .full suffix are stripped first, and results report the bare DOI.',
+    'Fetch full metadata, the abstract, all revision history, JATS XML full-text links, and published-journal DOI for one or more preprints by DOI. Each DOI returns all revisions in one response, with the abstract on the latest revision only — the API keeps one abstract per preprint. Each call looks up the first 10 distinct DOIs and returns the rest, never looked up, in unprocessed[] — pass that list as dois in another call to continue; a repeated DOI is looked up once and an unparseable entry is reported in failed[], so neither counts toward the 10. When server="both" (default), each DOI is checked against both bioRxiv and medRxiv; the response includes which server the preprint was found on. Failed lookups are reported per-DOI in failed[] rather than aborting the batch, each carrying a reason (not_found, invalid_doi_format, upstream_unavailable, rate_limited) and a retryable flag; a rate_limited entry also carries the wait in seconds the origin asked for. preprints[], failed[], and unprocessed[] follow input order. DOIs must match the pattern 10.NNNN/…; a doi.org or article URL, a doi: label, and a trailing vN / .full suffix are stripped first, and results report the bare DOI.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

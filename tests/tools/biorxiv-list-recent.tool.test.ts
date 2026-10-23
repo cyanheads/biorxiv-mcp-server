@@ -3,6 +3,7 @@
  * @module tests/tools/biorxiv-list-recent.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,6 +41,7 @@ const LISTING_RESULT: ListingResult = {
 
 describe('biorxivListRecentTool', () => {
   beforeEach(() => {
+    mockGetListing.mockClear();
     mockGetListing.mockResolvedValue(LISTING_RESULT);
     mockIsValidCategory.mockReturnValue(true);
   });
@@ -155,28 +157,72 @@ describe('biorxivListRecentTool', () => {
     });
   });
 
-  it('throws invalid_date_range for malformed start_date', async () => {
-    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
-    const input = biorxivListRecentTool.input.parse({
-      start_date: 'not-a-date',
-      end_date: '2024-01-31',
-    });
-    await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_date_range' },
+  // A malformed date fails at the schema, as on biorxiv_search_preprints and
+  // biorxiv_list_published_versions; invalid_date_range keeps calendar and order.
+  describe.each(['start_date', 'end_date'] as const)('a malformed %s', (bound) => {
+    it.each(['2025-3-4', '7d', 'not-a-date', '', ' 2024-01-01', '2024-01-01T00:00:00Z'])(
+      'rejects %j at the schema as -32602 naming the field, before any upstream call',
+      async (value) => {
+        const result = await runToolContract(
+          biorxivListRecentTool,
+          { start_date: '2024-01-01', end_date: '2024-01-31', [bound]: value } as never,
+          { context: { errors: biorxivListRecentTool.errors } },
+        );
+        expect(result.isError).toBe(true);
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.message).toContain(bound);
+        expect(mockGetListing).not.toHaveBeenCalled();
+      },
+    );
+
+    it('carries a hint naming the YYYY-MM-DD form, not the raw pattern', async () => {
+      const result = await runToolContract(
+        biorxivListRecentTool,
+        { start_date: '2024-01-01', end_date: '2024-01-31', [bound]: '2025-3-4' } as never,
+        { context: { errors: biorxivListRecentTool.errors } },
+      );
+      const hint = envelopeHint(result);
+      expect(hint).toContain('YYYY-MM-DD');
+      expect(hint).not.toContain('\\d');
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain('YYYY-MM-DD');
+      expect(text).not.toContain('\\d');
     });
   });
 
-  it('throws invalid_date_range for malformed end_date', async () => {
-    const ctx = createMockContext({ errors: biorxivListRecentTool.errors });
-    const input = biorxivListRecentTool.input.parse({
-      start_date: '2024-01-01',
-      end_date: 'bad',
-    });
-    await expect(biorxivListRecentTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_date_range' },
-    });
+  it.each([
+    ['date_from', 'start_date'],
+    ['date_to', 'end_date'],
+  ] as const)(
+    'rejects a malformed %s alias at the schema as its %s target',
+    async (alias, target) => {
+      const result = await runToolContract(
+        biorxivListRecentTool,
+        { date_from: '2024-01-01', date_to: '2024-01-31', [alias]: '2025-3-4' } as never,
+        { context: { errors: biorxivListRecentTool.errors } },
+      );
+      const error = (result.structuredContent as { error: { code: number; message: string } })
+        .error;
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.message).toContain(target);
+      expect(mockGetListing).not.toHaveBeenCalled();
+    },
+  );
+
+  it('advertises the YYYY-MM-DD pattern on both required date bounds in tools/list', () => {
+    const schema = z.toJSONSchema(biorxivListRecentTool.input, { io: 'input' }) as {
+      properties: Record<string, { type?: string; pattern?: string }>;
+      required?: string[];
+    };
+    for (const bound of ['start_date', 'end_date']) {
+      expect(schema.properties[bound]).toMatchObject({
+        type: 'string',
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+      });
+      expect(schema.required).toContain(bound);
+    }
   });
 
   it('allows same day for start_date and end_date', async () => {
@@ -793,7 +839,7 @@ describe('biorxivListRecentTool', () => {
 
   it('formats medrxiv pagination block when present', () => {
     const output = {
-      preprints: [{ ...PREPRINT, server: 'medrxiv' }],
+      preprints: [{ ...PREPRINT, server: 'medrxiv' as const }],
       pagination: { medrxiv: { cursor: 0, total: 5, nextCursor: 30 } },
       failed: [],
     };
@@ -925,6 +971,30 @@ describe('biorxivListRecentTool', () => {
       const { structured, text } = await call({ server: 'biorxiv', include_abstract: true });
       expect(structured.preprints).toEqual([FULL]);
       expect(text).toContain(`\n\n${FULL.abstract}`);
+    });
+
+    it('describes the abstract as the latest-revision abstract in tools/list', () => {
+      const schema = z.toJSONSchema(biorxivListRecentTool.output, {
+        io: 'output',
+      }) as unknown as {
+        properties: {
+          preprints: { items: { properties: Record<string, { description?: string }> } };
+        };
+      };
+      const { abstract } = schema.properties.preprints.items.properties;
+      expect(abstract?.description).toMatch(/latest-revision abstract/);
+      expect(abstract?.description).toMatch(/include_abstract/);
+    });
+
+    it('types preprints[].server as the lowercase server enum, always present', () => {
+      const output = (server?: string) => ({
+        preprints: [{ doi: FULL.doi, server }],
+        pagination: {},
+        failed: [],
+      });
+      expect(() => biorxivListRecentTool.output.parse(output('biorxiv'))).not.toThrow();
+      expect(() => biorxivListRecentTool.output.parse(output('medRxiv'))).toThrow();
+      expect(() => biorxivListRecentTool.output.parse(output())).toThrow();
     });
 
     it('omits abstracts from both servers on a two-server page', async () => {

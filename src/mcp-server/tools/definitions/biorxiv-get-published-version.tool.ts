@@ -1,13 +1,24 @@
 /**
- * @fileoverview biorxiv_get_published_version tool — resolves a preprint DOI
- * to its full journal publication record using the /pubs endpoint. Use when
- * you need richer crosswalk metadata than biorxiv_get_preprint provides
- * (journal name, published date, full abstract, corresponding author details).
+ * @fileoverview biorxiv_get_published_version tool — resolves a DOI to its
+ * full crosswalk record using the /pubs endpoint, which is keyed by either
+ * side: a preprint DOI yields the journal version it was published as, and a
+ * journal article's DOI yields the preprint it was posted as. Use when you
+ * need richer crosswalk metadata than biorxiv_get_preprint provides (journal
+ * name, published date, full abstract, corresponding author details), or the
+ * preprint behind a journal article.
  * bioRxiv and medRxiv share their DOI prefixes, so the DOI alone does not
  * identify the server: the default server="both" resolves against both in
  * parallel and the output names the server that answered. A preprint and its
  * crosswalk record live on one server, so each two-server step ends the moment
  * that server answers, and the other server's lookup is cut short.
+ *
+ * A DOI outside the preprint prefixes (`10.1101/`, `10.64898/`) is a journal
+ * DOI: `/pubs` keyed by it is the whole lookup, and no record on any server is
+ * not-found — `/details` never holds a journal DOI, so it is never asked.
+ * Cold Spring Harbor Laboratory Press journal DOIs (`10.1101/gr.…`) carry the
+ * preprint prefix and take the preprint path, where no endpoint recognizes
+ * them; that path's not-found hint names the case rather than calling the DOI
+ * wrong.
  *
  * `/pubs` keyed by preprint DOI never parses a `10.64898/` DOI, so when it
  * answers empty everywhere the preprint's `/details` record supplies the journal
@@ -28,12 +39,14 @@ import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import {
+  BIORXIV_DOI_PREFIXES,
   describeWait,
   escapeMarkdown,
   findRateLimit,
   firstHit,
   type LegOutcome,
   normalizeDoi,
+  notFoundHint,
   startCallDeadline,
 } from '@/services/shared.js';
 
@@ -44,14 +57,14 @@ function errorMessage(reason: unknown): string {
 export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_version', {
   title: 'Get Published Journal Version',
   description:
-    'Resolve a preprint DOI to its full journal publication record — journal DOI, journal name, published date, and corresponding author details. Use when the preprint\'s `publishedJournalDoi` field from biorxiv_get_preprint is present and you need the full crosswalk metadata. bioRxiv and medRxiv share their DOI prefixes, so server="both" (the default) checks both in parallel and the response reports which server answered. Works for 10.1101/ and 10.64898/ DOIs alike; when the crosswalk holds no record for a published preprint, the journal DOI still comes back from the preprint\'s own record, without journal name or date, and a notice says so. Returns a not-found error only when no server holds the preprint or it lists no journal version at all.',
+    'Resolve a DOI to its preprint-to-journal crosswalk record — preprint DOI, journal DOI, journal name, published date, and corresponding author details — from either side: a preprint DOI (10.1101/ or 10.64898/) finds the journal article it was published as, and any other DOI is read as a journal article\'s and finds the bioRxiv or medRxiv preprint it was posted as. Use when biorxiv_get_preprint shows a `publishedJournalDoi` and you need the journal details, or when you hold a journal article and want its preprint. bioRxiv and medRxiv share their DOI prefixes, so server="both" (the default) checks both in parallel and the response reports which server answered. When the crosswalk holds no record for a published preprint, the journal DOI still comes back from the preprint\'s own record, without journal name or date, and a notice says so. Returns a not-found error when no server holds the preprint, it lists no journal version, or no preprint is recorded for the journal DOI.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     doi: z
       .string()
       .describe(
-        'Preprint DOI to resolve (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463). A doi.org or biorxiv.org/medrxiv.org article URL, a doi: prefix, or a vN / .full suffix is accepted and stripped to the bare DOI.',
+        'DOI to resolve: a preprint DOI (e.g. 10.1101/2024.01.15.575123 or 10.64898/2026.05.07.723463) or a journal article DOI (e.g. 10.1016/j.cell.2020.01.001). A doi.org or biorxiv.org/medrxiv.org article URL or a doi: prefix is accepted and stripped to the bare DOI, as is a vN, .full, or .pdf suffix; a journal DOI keeps its own components (10.7554/eLife.55185.sa1 is not 10.7554/eLife.55185). Cold Spring Harbor Laboratory Press journal DOIs (10.1101/gr.…, 10.1101/gad.…, 10.1101/lm.…) share the preprint prefix and cannot be resolved by DOI.',
       ),
     server: z
       .enum(['biorxiv', 'medrxiv', 'both'])
@@ -62,7 +75,11 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
   }),
 
   output: z.object({
-    preprintDoi: z.string().describe('The preprint DOI that was resolved, in bare form.'),
+    preprintDoi: z
+      .string()
+      .describe(
+        'The preprint DOI, in bare form: the input itself when it was a preprint DOI, or the preprint the crosswalk links to the input when it was a journal DOI.',
+      ),
     server: z
       .enum(['biorxiv', 'medrxiv'])
       .describe('The server that returned this published record — never "both".'),
@@ -111,16 +128,16 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     {
       reason: 'doi_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No attempted server holds the preprint, or neither the crosswalk nor its preprint record lists a journal version.',
+      when: 'No attempted server holds the preprint, neither the crosswalk nor its preprint record lists a journal version, or the crosswalk links no preprint to the journal DOI given.',
       recovery:
-        'Retry with server="both" if you scoped to one server; otherwise no journal version is recorded for this preprint yet — confirm the DOI with biorxiv_get_preprint or check again later.',
+        'Confirm the DOI with biorxiv_get_preprint, or check again later if no journal version is recorded for this preprint yet; for a journal DOI, search for its preprint by title with biorxiv_search_preprints.',
     },
     {
       reason: 'invalid_doi_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The input DOI does not match the 10.NNNN/ pattern, even after URL, doi:, and suffix stripping.',
+      when: 'The input does not match the 10.NNNN/ DOI pattern, even after URL, doi:, and suffix stripping.',
       recovery:
-        'Correct the DOI format — bioRxiv DOIs start with 10.1101/ or 10.64898/ followed by the manuscript ID.',
+        'Correct the DOI format — a preprint DOI is 10.1101/ or 10.64898/ followed by the manuscript ID, and a journal DOI is 10., the publisher registrant code, a slash, and the article ID (10.1016/j.cell.2020.01.001).',
     },
     {
       reason: 'upstream_unavailable',
@@ -199,9 +216,9 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       );
     };
 
-    // 1. The crosswalk keyed by preprint DOI — resolves 10.1101/ DOIs directly.
-    // The record lives on the server holding the preprint, so the step ends the
-    // moment that server answers with it.
+    // 1. The crosswalk keyed by the DOI given — resolves 10.1101/ preprint DOIs
+    // and journal DOIs directly. The record lives on the server holding the
+    // preprint, so the step ends the moment that server answers with it.
     const crosswalk = await firstHit(
       servers.map(
         (server) => (signal: AbortSignal) =>
@@ -219,6 +236,25 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     }
     const crosswalkFailure = lookupFailure('Crosswalk lookup', crosswalk.outcomes);
     if (crosswalkFailure) throw crosswalkFailure;
+
+    // A journal DOI ends here: /pubs keyed by it was the whole lookup, and
+    // /details holds preprints alone.
+    if (!BIORXIV_DOI_PREFIXES.some((prefix) => doi.startsWith(prefix))) {
+      throw ctx.fail(
+        'doi_not_found',
+        `No bioRxiv or medRxiv preprint is recorded for journal DOI ${doi} on ${servers.join(' or ')}.`,
+        {
+          doi,
+          servers,
+          recovery: {
+            hint: notFoundHint(
+              servers,
+              'The crosswalk records no bioRxiv or medRxiv preprint for this journal article — it was never posted there, its preprint was never linked to it, or the DOI names part of an article (a figure or review such as 10.7554/eLife.55185.sa1) rather than the article itself. Search for the preprint by title with biorxiv_search_preprints.',
+            ),
+          },
+        },
+      );
+    }
 
     // 2. The crosswalk answered empty everywhere, which is also its answer for
     // every 10.64898/ DOI — the path form never parses one. The preprint's own
@@ -238,11 +274,16 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       if (detailsFailure) throw detailsFailure;
       // No preprint at all: the contract hint's "no journal version yet — check
       // again later" would send the caller to wait on a DOI that does not exist.
+      // A Cold Spring Harbor Laboratory Press journal DOI lands here too, so the
+      // hint stops short of calling the DOI wrong.
       throw ctx.fail('doi_not_found', `No preprint found for ${doi} on ${servers.join(' or ')}.`, {
         doi,
         servers,
         recovery: {
-          hint: 'Retry with server="both" if you scoped to one server; otherwise the DOI is wrong — find the right one with biorxiv_search_preprints.',
+          hint: notFoundHint(
+            servers,
+            'No preprint has this DOI — check it, or find the preprint with biorxiv_search_preprints. A Cold Spring Harbor Laboratory Press journal DOI (10.1101/gr.…, 10.1101/gad.…, 10.1101/lm.…) shares the preprint prefix but cannot be looked up by DOI: search for its preprint by title instead.',
+          ),
         },
       });
     }
@@ -253,7 +294,16 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
       throw ctx.fail(
         'doi_not_found',
         `${doi} has no published journal version: neither the crosswalk nor its ${server} preprint record lists one.`,
-        { doi, servers },
+        {
+          doi,
+          servers,
+          recovery: {
+            hint: notFoundHint(
+              servers,
+              'No journal version is recorded for this preprint yet — confirm the DOI with biorxiv_get_preprint, or check again later.',
+            ),
+          },
+        },
       );
     }
 

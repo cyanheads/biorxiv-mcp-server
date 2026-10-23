@@ -44,6 +44,7 @@ export interface RawPreprintRevision {
   license?: string;
   /** Journal DOI after publication, or "NA" when not yet published */
   published?: string;
+  /** Upstream's spelling (`"bioRxiv"`, `"medRxiv"`); records take the queried server instead */
   server?: string;
   title?: string;
   type?: string;
@@ -67,8 +68,13 @@ export interface RawDetailsResponse {
   }>;
 }
 
-/** A single crosswalk record from /pubs — keyed by DOI or listed by publication-date interval */
+/**
+ * A single crosswalk record from /pubs — keyed by DOI or listed by
+ * publication-date interval — or a /publisher row, which carries six keys and
+ * names the preprint as `biorxiv_doi` rather than `preprint_doi`.
+ */
 export interface RawPublishedRecord {
+  biorxiv_doi?: string;
   preprint_abstract?: string;
   preprint_author_corresponding?: string;
   preprint_author_corresponding_institution?: string;
@@ -102,6 +108,11 @@ export interface RawPublishedResponse {
 
 /** A single preprint revision with normalized optional fields */
 export interface PreprintRevision {
+  /**
+   * The preprint's latest-revision abstract — upstream repeats it on every
+   * revision. `getDetails` sets it on the latest revision only; a listing row
+   * carries it whichever revision the row is.
+   */
   abstract?: string;
   authorCorresponding?: string;
   authorCorrespondingInstitution?: string;
@@ -115,7 +126,8 @@ export interface PreprintRevision {
   license?: string;
   /** Non-null when the preprint has been published; "NA" is normalized to undefined */
   publishedJournalDoi?: string;
-  server?: string;
+  /** The server that was queried — never the upstream spelling (`"bioRxiv"`) */
+  server: BiorxivServer;
   title?: string;
   type?: string;
   version?: string;
@@ -167,7 +179,14 @@ export interface PublishedVersion {
   publishedJournal?: string;
 }
 
-/** Per-server result from the /pubs publication-date interval listing */
+/**
+ * What a publication-date listing reads: one server's `/pubs` interval, or
+ * bioRxiv's `/publisher` interval for one journal DOI prefix (`10.7554`) — that
+ * endpoint takes no server and lists bioRxiv preprints alone.
+ */
+export type PublishedListingSource = BiorxivServer | { publisher: string };
+
+/** Per-source result from the publication-date interval listing */
 export interface PublishedListingResult {
   pagination: {
     cursor: number;
@@ -175,6 +194,12 @@ export interface PublishedListingResult {
     total?: number;
   };
   publications: PublishedVersion[];
+  /**
+   * True when a publisher prefix was sent and the API answered `status:
+   * "publisher string not recognized"` with no rows — it could not read the
+   * prefix, so the empty `publications` is not a result. Absent otherwise.
+   */
+  publisherNotRecognized?: true;
   /**
    * Upstream rows this page served — the requested slice of the upstream
    * page, counting any dropped for naming no preprint. The cursor plus this

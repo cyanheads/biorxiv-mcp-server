@@ -503,6 +503,25 @@ describe('biorxivGetFulltextTool', () => {
     expect(mockFetchFullText).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['both', ''],
+    ['biorxiv', 'Retry with server="both" — this call checked only biorxiv. '],
+    ['medrxiv', 'Retry with server="both" — this call checked only medrxiv. '],
+  ] as const)(
+    'a doi_not_found on server=%s offers the server="both" retry only when scoped',
+    async (server, retry) => {
+      mockGetDetails.mockResolvedValue([]);
+      const result = await runToolContract(biorxivGetFulltextTool, { doi: DOI, server } as never, {
+        context: { errors: biorxivGetFulltextTool.errors },
+      });
+      const expected = `${retry}Check the DOI, or find the correct one with biorxiv_search_preprints.`;
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(envelopeHint(result)).toBe(expected);
+      expect(text).toContain(expected);
+      expect(text.includes('Retry with server="both"')).toBe(retry !== '');
+    },
+  );
+
   it('throws retryable upstream_unavailable when every lookup fails, not doi_not_found', async () => {
     mockGetDetails.mockRejectedValue(new Error('api.biorxiv.org unreachable'));
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });
@@ -847,7 +866,7 @@ describe('biorxivGetFulltextTool', () => {
         ['answered that it does not hold the DOI', () => answerAfter(1_000, []), ''],
       ];
       const PAGE_HINT =
-        'Retry after a short delay — the www.biorxiv.org article page did not answer. api.biorxiv.org resolved this preprint, so biorxiv_get_preprint still serves its title, abstract, and metadata meanwhile.';
+        'Retry after a short delay — the www.biorxiv.org article page did not answer. api.biorxiv.org resolved this preprint, so biorxiv_get_preprint still serves its title, metadata, and current abstract meanwhile.';
       const UPSTREAM_UNAVAILABLE = {
         code: JsonRpcErrorCode.ServiceUnavailable,
         data: {
@@ -1212,6 +1231,27 @@ describe('biorxivGetFulltextTool', () => {
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'fulltext_unavailable' },
     });
+  });
+
+  it('points a fulltext_unavailable caller at the current abstract, never an earlier revision’s', async () => {
+    mockFetchFullText.mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'blocked',
+      detail: 'The full-text HTML page is not accessible (HTTP 403).',
+      sourceUrl: SOURCE_URL,
+    } satisfies FullTextFetchResult);
+    const result = await runToolContract(
+      biorxivGetFulltextTool,
+      { doi: DOI, server: 'medrxiv', version: 1 } as never,
+      { context: { errors: biorxivGetFulltextTool.errors } },
+    );
+    const expected =
+      'Use biorxiv_get_preprint for the title, metadata, and current abstract (the latest revision’s; it holds no earlier revision’s own abstract) — a readable full-text page is not available for this preprint.';
+    expect(envelopeHint(result)).toBe(expected);
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(expected);
   });
 
   it('does not leak secrets in the fulltext_unavailable error', async () => {

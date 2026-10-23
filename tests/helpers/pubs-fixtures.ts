@@ -3,7 +3,8 @@
  * to 2026-09-07, captured from api.biorxiv.org on 2026-10-15 and trimmed to one
  * abstract sentence. Every interval row carries all twelve keys; bioRxiv held
  * 449 rows that week and medRxiv 103, so medRxiv's page at cursor 100 holds the
- * three rows below and nothing past them.
+ * three rows below and nothing past them. Also live `/publisher` rows and
+ * statuses, whose six-key rows name the preprint as `biorxiv_doi`.
  * @module tests/helpers/pubs-fixtures
  */
 
@@ -114,3 +115,62 @@ export const MEDRXIV_C100_ROWS: RawPublishedRecord[] = [
 
 /** The status upstream answers an empty interval, an inverted one, and a cursor at or past the end with. */
 export const NO_ARTICLES = { status: 'no articles found for 2026-09-01 2026-09-07' };
+
+/**
+ * Live `/publisher/10.7554` rows for journal publication dates 2026-10-01 to
+ * 2026-10-02, captured from api.biorxiv.org on 2026-10-23 — exactly the bioRxiv
+ * `/pubs` rows of that interval with an eLife journal DOI. Every row carries
+ * these six keys and no others: the preprint DOI as `biorxiv_doi`, and no
+ * journal name, authors, corresponding author, or abstract.
+ */
+export const PUBLISHER_ELIFE_ROWS: RawPublishedRecord[] = [
+  {
+    biorxiv_doi: '10.1101/2025.09.09.675263',
+    published_doi: '10.7554/eLife.109426.3',
+    preprint_title:
+      'Sex-biased expression of enteroendocrine cell-derived hormones contributes to higher fat storage in Drosophila females',
+    preprint_category: 'physiology',
+    preprint_date: '2025-09-12',
+    published_date: '2026-10-01',
+  },
+  {
+    biorxiv_doi: '10.64898/2026.03.07.709930',
+    published_doi: '10.7554/eLife.111378',
+    preprint_title: 'Genome-wide discovery of cis-regulatory elements in a large genome',
+    preprint_category: 'developmental biology',
+    preprint_date: '2026-03-08',
+    published_date: '2026-10-01',
+  },
+  {
+    biorxiv_doi: '10.1101/2025.08.26.672310',
+    published_doi: '10.7554/eLife.108588',
+    preprint_title:
+      'Bidirectional translocation of actomyosin drives epithelial invagination in ascidian siphon tube morphogenesis',
+    preprint_category: 'developmental biology',
+    preprint_date: '2025-08-30',
+    published_date: '2026-10-01',
+  },
+  {
+    biorxiv_doi: '10.1101/2025.03.26.645547',
+    published_doi: '10.7554/eLife.107370',
+    preprint_title: 'A cortical-hippocampal communication undergoes rebalancing after new learning',
+    preprint_category: 'neuroscience',
+    preprint_date: '2025-03-29',
+    published_date: '2026-10-01',
+  },
+  {
+    biorxiv_doi: '10.64898/2026.01.27.702099',
+    published_doi: '10.7554/eLife.110887',
+    preprint_title:
+      'Distinct allosteric remodeling of HIV-1 Env dynamics on virions by gp41-directed antibodies reveals two modes of neutralization',
+    preprint_category: 'microbiology',
+    preprint_date: '2026-01-28',
+    published_date: '2026-10-02',
+  },
+];
+
+/** The status `/publisher` answers an empty interval and a cursor at or past the end with — it names no dates. */
+export const PUBLISHER_NO_ARTICLES = { status: 'no articles found' };
+
+/** The status `/publisher` answers a prefix it does not recognize (`10.755`, `10.1`, `abc`) with, alongside no rows. */
+export const PUBLISHER_NOT_RECOGNIZED = { status: 'publisher string not recognized' };

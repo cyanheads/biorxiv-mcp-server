@@ -22,7 +22,7 @@ import {
   RATE_LIMIT_RECOVERY_OPENING,
   rateLimitError,
 } from '../helpers/rate-limit.js';
-import { recoveryHint, rejection } from '../helpers/rejection.js';
+import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockGetPublishedVersion = vi.fn();
 // The /details fallback runs whenever the crosswalk answers empty; the default
@@ -254,6 +254,75 @@ describe('biorxivGetPublishedVersionTool', () => {
     expect(recoveryHint(err)).not.toMatch(/has not been accepted/i);
   });
 
+  // The retry on server="both" is advice only to a call that checked one server.
+  describe('doi_not_found hint on the wire', () => {
+    const RETRY_BOTH = 'Retry with server="both"';
+    const JOURNAL_HINT =
+      'The crosswalk records no bioRxiv or medRxiv preprint for this journal article — it was never posted there, its preprint was never linked to it, or the DOI names part of an article (a figure or review such as 10.7554/eLife.55185.sa1) rather than the article itself. Search for the preprint by title with biorxiv_search_preprints.';
+    const NO_PREPRINT_HINT =
+      'No preprint has this DOI — check it, or find the preprint with biorxiv_search_preprints. A Cold Spring Harbor Laboratory Press journal DOI (10.1101/gr.…, 10.1101/gad.…, 10.1101/lm.…) shares the preprint prefix but cannot be looked up by DOI: search for its preprint by title instead.';
+    const NO_JOURNAL_VERSION_HINT =
+      'No journal version is recorded for this preprint yet — confirm the DOI with biorxiv_get_preprint, or check again later.';
+    const scopedTo = (server: string, hint: string) =>
+      `${RETRY_BOTH} — this call checked only ${server}. ${hint}`;
+    const notFound = async (doi: string, server?: 'biorxiv' | 'medrxiv') => {
+      const result = await runToolContract(
+        biorxivGetPublishedVersionTool,
+        { doi, ...(server && { server }) } as never,
+        { context: { errors: biorxivGetPublishedVersionTool.errors } },
+      );
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      const data = (result.structuredContent as { error?: { data?: Record<string, unknown> } })
+        .error?.data;
+      return { hint: envelopeHint(result), text, data };
+    };
+
+    beforeEach(() => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+    });
+
+    it.each([
+      ['a journal DOI', '10.1038/nature12373', JOURNAL_HINT],
+      ['a preprint DOI no server holds', '10.1101/2024.01.01.000001', NO_PREPRINT_HINT],
+    ])(
+      'omits the server="both" retry on %s when the call checked both',
+      async (_case, doi, expected) => {
+        const { hint, text } = await notFound(doi);
+        expect(hint).toBe(expected);
+        expect(text).toContain(expected);
+        expect(text).not.toContain(RETRY_BOTH);
+      },
+    );
+
+    it.each([
+      ['a journal DOI', '10.1038/nature12373', JOURNAL_HINT],
+      ['a preprint DOI no server holds', '10.1101/2024.01.01.000001', NO_PREPRINT_HINT],
+    ])(
+      'opens with the server="both" retry on %s when the call checked one server',
+      async (_case, doi, expected) => {
+        const { hint, text } = await notFound(doi, 'medrxiv');
+        expect(hint).toBe(scopedTo('medrxiv', expected));
+        expect(text).toContain(scopedTo('medrxiv', expected));
+      },
+    );
+
+    it('scopes the retry on a preprint that lists no journal version the same way', async () => {
+      mockGetDetails.mockResolvedValue([{ doi: '10.1101/2024.01.01.000001', version: '1' }]);
+      const both = await notFound('10.1101/2024.01.01.000001');
+      expect(both.hint).toBe(NO_JOURNAL_VERSION_HINT);
+      const scoped = await notFound('10.1101/2024.01.01.000001', 'biorxiv');
+      expect(scoped.hint).toBe(scopedTo('biorxiv', NO_JOURNAL_VERSION_HINT));
+    });
+
+    it('reads a component DOI as a whole journal DOI and names that case in the hint', async () => {
+      const { hint, text, data } = await notFound('10.7554/eLife.85442.sa1');
+      expect(data).toMatchObject({ reason: 'doi_not_found', doi: '10.7554/eLife.85442.sa1' });
+      expect(mockGetPublishedVersion.mock.lastCall?.[0]).toBe('10.7554/eLife.85442.sa1');
+      expect(hint).toBe(JOURNAL_HINT);
+      expect(text).toContain(JOURNAL_HINT);
+    });
+  });
+
   it('declares a rate_limited recovery that holds when the origin named no wait', () => {
     expect(declaredRateLimitRecovery(biorxivGetPublishedVersionTool.errors)).toBe(
       `${RATE_LIMIT_RECOVERY_OPENING}retrying — every preprint metadata tool queries the same origin, so none of them will answer sooner.`,
@@ -311,6 +380,27 @@ describe('biorxivGetPublishedVersionTool', () => {
     });
     const result = await biorxivGetPublishedVersionTool.handler(input, ctx);
     expect(result.server).toBe('medrxiv');
+  });
+
+  it('throws rate_limited, never doi_not_found, when a journal DOI lookup was rate-limited and the other server has no record', async () => {
+    mockGetPublishedVersion.mockImplementation((_doi: string, server: string) =>
+      server === 'biorxiv' ? Promise.reject(rateLimitError(20)) : Promise.resolve(undefined),
+    );
+    const ctx = createMockContext({ errors: biorxivGetPublishedVersionTool.errors });
+    const input = biorxivGetPublishedVersionTool.input.parse({ doi: '10.1093/molbev/msag238' });
+    const err = await rejection(biorxivGetPublishedVersionTool.handler(input, ctx));
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'rate_limited',
+        retryAfter: 20,
+        doi: '10.1093/molbev/msag238',
+        servers: ['biorxiv'],
+      },
+    });
+    expect(recoveryHint(err)).toContain('20 seconds');
+    expect(mockGetDetails).not.toHaveBeenCalled();
   });
 
   it('doi_not_found error does not leak internal details', async () => {

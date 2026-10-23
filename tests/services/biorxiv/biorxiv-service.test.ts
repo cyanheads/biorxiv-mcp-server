@@ -22,6 +22,9 @@ import {
   MEDRXIV_C100_ROWS,
   NO_ARTICLES,
   PUBLISHED_64898,
+  PUBLISHER_ELIFE_ROWS,
+  PUBLISHER_NO_ARTICLES,
+  PUBLISHER_NOT_RECOGNIZED,
   PUBS_ROW_1101,
   PUBS_ROW_64898,
 } from '../../helpers/pubs-fixtures.js';
@@ -429,6 +432,176 @@ describe('BiorxivApiService', () => {
       );
       expect(revision?.authors).toBe('O`Toole, P.; Mu_ller, M.');
     });
+
+    it('reads literal backslash-n paragraph breaks in an older abstract as line breaks', async () => {
+      // Live shape: 10.1101/049882 — `\n` written as two characters, no real newline.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [
+            {
+              doi: '10.1101/049882',
+              version: '1',
+              abstract: String.raw`BackgroundDilp8 inhibits ecdysone synthesis.\n\nResultsOver-expression of Ras caused death.\n\nConclusionsA novel checkpoint.`,
+            },
+          ],
+        }),
+      );
+      const [revision] = await service.getDetails(
+        '10.1101/049882',
+        'biorxiv',
+        startCallDeadline(),
+        createMockContext(),
+      );
+      expect(revision?.abstract).toBe(
+        'Background: Dilp8 inhibits ecdysone synthesis. Results: Over-expression of Ras caused death. Conclusions: A novel checkpoint.',
+      );
+    });
+
+    // Upstream repeats the latest revision's abstract on every revision, while
+    // title, authors, and date stay per-revision.
+    describe('abstract on the latest revision only', () => {
+      const DOI = '10.1101/049882';
+      const details = async (collection: Record<string, unknown>[]) => {
+        mockFetch.mockResolvedValue(makeResponse({ collection }));
+        return service.getDetails(DOI, 'biorxiv', startCallDeadline(), createMockContext());
+      };
+
+      it('keeps the abstract on the highest version and drops it from every earlier one', async () => {
+        const revisions = await details([
+          { doi: DOI, version: '1', title: 'First title', abstract: 'Latest abstract.' },
+          { doi: DOI, version: '2', title: 'Second title', abstract: 'Latest abstract.' },
+          { doi: DOI, version: '3', title: 'Third title', abstract: 'Latest abstract.' },
+        ]);
+        expect(revisions.map((r) => r.abstract)).toEqual([
+          undefined,
+          undefined,
+          'Latest abstract.',
+        ]);
+        expect(revisions.map((r) => r.title)).toEqual([
+          'First title',
+          'Second title',
+          'Third title',
+        ]);
+        expect(revisions.filter((r) => 'abstract' in r)).toHaveLength(1);
+      });
+
+      it('returns revisions in ascending version order, the abstract on the last', async () => {
+        const revisions = await details([
+          { doi: DOI, version: '2', title: 'v2', abstract: 'Latest abstract.' },
+          { doi: DOI, version: '10', title: 'v10', abstract: 'Latest abstract.' },
+          { doi: DOI, version: '9', title: 'v9', abstract: 'Latest abstract.' },
+        ]);
+        expect(revisions.map((r) => r.version)).toEqual(['2', '9', '10']);
+        // Each row keeps its own metadata through the reorder.
+        expect(revisions.map((r) => r.title)).toEqual(['v2', 'v9', 'v10']);
+        expect(revisions.map((r) => r.abstract)).toEqual([
+          undefined,
+          undefined,
+          'Latest abstract.',
+        ]);
+      });
+
+      it('orders rows without a version number first, in their listed order', async () => {
+        const revisions = await details([
+          { doi: DOI, version: '3', title: 'v3', abstract: 'Latest abstract.' },
+          { doi: DOI, title: 'unnumbered A', abstract: 'Latest abstract.' },
+          { doi: DOI, version: '1', title: 'v1', abstract: 'Latest abstract.' },
+          { doi: DOI, version: 'x', title: 'unnumbered B', abstract: 'Latest abstract.' },
+        ]);
+        expect(revisions.map((r) => r.title)).toEqual(['unnumbered A', 'unnumbered B', 'v1', 'v3']);
+        expect(revisions.at(-1)?.abstract).toBe('Latest abstract.');
+        expect(revisions.filter((r) => 'abstract' in r)).toHaveLength(1);
+      });
+
+      it('keeps the last revision listed when none carries a version number', async () => {
+        const revisions = await details([
+          { doi: DOI, abstract: 'Latest abstract.' },
+          { doi: DOI, abstract: 'Latest abstract.' },
+        ]);
+        expect(revisions.map((r) => r.abstract)).toEqual([undefined, 'Latest abstract.']);
+      });
+
+      it('leaves a single-revision preprint its abstract', async () => {
+        const [revision] = await details([
+          { doi: DOI, version: '1', abstract: 'The only abstract.' },
+        ]);
+        expect(revision?.abstract).toBe('The only abstract.');
+      });
+    });
+
+    describe('server', () => {
+      it.each([
+        ['biorxiv', 'bioRxiv'],
+        ['medrxiv', 'medRxiv'],
+      ] as const)(
+        'is the queried server %s in lowercase, not the upstream spelling %s',
+        async (server, upstream) => {
+          mockFetch.mockResolvedValue(
+            makeResponse({
+              collection: [
+                { doi: '10.1101/2020.03.21.990770', version: '1', server: upstream },
+                { doi: '10.1101/2020.03.21.990770', version: '2' },
+              ],
+            }),
+          );
+          const revisions = await service.getDetails(
+            '10.1101/2020.03.21.990770',
+            server,
+            startCallDeadline(),
+            createMockContext(),
+          );
+          expect(revisions.map((r) => r.server)).toEqual([server, server]);
+        },
+      );
+    });
+
+    describe('DOI path key', () => {
+      const calledUrl = () => (mockFetch.mock.calls[0] as string[])[0];
+
+      it.each([
+        ['10.1101/2020.03.21.990770', 'biorxiv'],
+        ['10.1101/339853', 'medrxiv'],
+        ['10.64898/2026.05.07.723463', 'medrxiv'],
+      ] as const)(
+        'keys a single-slash DOI %s on %s exactly as it is written',
+        async (doi, server) => {
+          mockFetch.mockResolvedValue(makeResponse({ collection: [] }));
+          await service.getDetails(doi, server, startCallDeadline(), createMockContext());
+          expect(calledUrl()).toBe(`https://api.biorxiv.org/details/${server}/${doi}/0/json`);
+        },
+      );
+
+      it('double-encodes every slash after the first, so a multi-slash DOI arrives whole', async () => {
+        // Live: sent raw, /details/biorxiv/10.1101/abc/def/0/json is an Apache 404;
+        // %252F reaches the API whole and draws 200 "DOI not recognizable".
+        mockFetch.mockResolvedValue(
+          makeResponse({ messages: [{ status: 'DOI not recognizable' }], collection: [] }),
+        );
+        const revisions = await service.getDetails(
+          '10.1101/abc/def/ghi',
+          'biorxiv',
+          startCallDeadline(),
+          createMockContext(),
+        );
+        expect(calledUrl()).toBe(
+          'https://api.biorxiv.org/details/biorxiv/10.1101/abc%252Fdef%252Fghi/0/json',
+        );
+        expect(revisions).toEqual([]);
+      });
+
+      it('still rejects on an HTTP 404 — a broken route is never read as an absent DOI', async () => {
+        const notFound = new McpError(
+          JsonRpcErrorCode.NotFound,
+          'Fetch failed for https://api.biorxiv.org/details/…. Status: 404',
+          { status: 404, statusText: 'Not Found', errorSource: 'FetchHttpError' },
+        );
+        mockFetch.mockRejectedValue(notFound);
+        const err = await service
+          .getDetails('10.1101/abc/def', 'biorxiv', startCallDeadline(), createMockContext())
+          .catch((e: unknown) => e);
+        expect(err).toBe(notFound);
+      });
+    });
   });
 
   // ── getListing ──────────────────────────────────────────────────────────────
@@ -545,6 +718,31 @@ describe('BiorxivApiService', () => {
       );
       const calledUrl = (mockFetch.mock.calls[0] as string[])[0];
       expect(calledUrl).toContain('category=neuroscience');
+    });
+
+    it('keeps every row its abstract and sets its server from the queried server', async () => {
+      // Live shape: the 2025-03-04 medRxiv listing — a superseded v2 row beside a v1 row,
+      // each carrying its preprint's latest abstract and upstream's "medRxiv".
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ total: 2, cursor: 0 }],
+          collection: [
+            { doi: '10.1101/2024.04.22.24306196', version: '2', abstract: 'A.', server: 'medRxiv' },
+            { doi: '10.1101/2025.03.03.25323100', version: '1', abstract: 'B.', server: 'medRxiv' },
+          ],
+        }),
+      );
+      const result = await service.getListing(
+        'medrxiv',
+        '2025-03-04',
+        '2025-03-04',
+        0,
+        {},
+        startCallDeadline(),
+        createMockContext(),
+      );
+      expect(result.preprints.map((p) => p.abstract)).toEqual(['A.', 'B.']);
+      expect(result.preprints.map((p) => p.server)).toEqual(['medrxiv', 'medrxiv']);
     });
 
     it('throws serviceUnavailable when API returns HTML error page', async () => {
@@ -747,6 +945,58 @@ describe('BiorxivApiService', () => {
         createMockContext(),
       );
       expect(result).toBeUndefined();
+    });
+
+    it('sends a multi-slash DOI whole, never the first two segments the API would read raw', async () => {
+      // Live: raw, /pubs/biorxiv/10.1101/614172/x/json is keyed by `10.1101/614172`
+      // alone — the record of a different DOI.
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'DOI 10.1101/614172/x not recognizable' }],
+          collection: [],
+        }),
+      );
+      const result = await service.getPublishedVersion(
+        '10.1101/614172/x',
+        'biorxiv',
+        startCallDeadline(),
+        createMockContext(),
+      );
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/biorxiv/10.1101/614172%252Fx/json',
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('resolves a multi-slash journal DOI to the first record listed for it', async () => {
+      // Live: /pubs/biorxiv/10.1093/molbev%252Fmsag238/json (trimmed).
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          messages: [{ status: 'ok' }],
+          collection: [
+            {
+              preprint_doi: '10.1101/2025.10.01.679802',
+              published_doi: '10.1093/molbev/msag238',
+              published_journal: 'Molecular Biology and Evolution',
+              published_date: '2026-10-03',
+            },
+          ],
+        }),
+      );
+      const result = await service.getPublishedVersion(
+        '10.1093/molbev/msag238',
+        'biorxiv',
+        startCallDeadline(),
+        createMockContext(),
+      );
+      expect((mockFetch.mock.calls[0] as string[])[0]).toBe(
+        'https://api.biorxiv.org/pubs/biorxiv/10.1093/molbev%252Fmsag238/json',
+      );
+      expect(result).toMatchObject({
+        preprintDoi: '10.1101/2025.10.01.679802',
+        publishedDoi: '10.1093/molbev/msag238',
+        publishedJournal: 'Molecular Biology and Evolution',
+      });
     });
   });
 
@@ -955,6 +1205,125 @@ describe('BiorxivApiService', () => {
       mockFetch.mockResolvedValue(makeHtmlResponse());
       await expect(list('biorxiv', 0)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ServiceUnavailable,
+      });
+    });
+
+    describe('by publisher prefix', () => {
+      const listPublisher = (publisher: string, cursor: number, limit = 100) =>
+        service.getPublishedListing(
+          { publisher },
+          '2026-10-01',
+          '2026-10-02',
+          cursor,
+          limit,
+          startCallDeadline(),
+          createMockContext(),
+        );
+      const requestedUrl = () => (mockFetch.mock.calls[0] as string[])[0];
+
+      it("requests bioRxiv's /publisher page and reads biorxiv_doi as the preprint DOI (live envelope)", async () => {
+        mockFetch.mockResolvedValue(
+          makeResponse({
+            messages: [
+              { status: 'ok', interval: '2026-10-01:2026-10-02', cursor: 0, count: 5, total: 5 },
+            ],
+            collection: PUBLISHER_ELIFE_ROWS,
+          }),
+        );
+        const result = await listPublisher('10.7554', 0);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(requestedUrl()).toBe(
+          'https://api.biorxiv.org/publisher/10.7554/2026-10-01/2026-10-02/0',
+        );
+        expect(result.pagination).toEqual({ cursor: 0, total: 5 });
+        expect(result.rowCount).toBe(5);
+        expect(result).not.toHaveProperty('publisherNotRecognized');
+        expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+          PUBLISHER_ELIFE_ROWS.map((r) => r.biorxiv_doi),
+        );
+        expect(result.publications[0]).toEqual({
+          preprintDoi: '10.1101/2025.09.09.675263',
+          publishedDoi: '10.7554/eLife.109426.3',
+          publishedDate: '2026-10-01',
+          preprintTitle:
+            'Sex-biased expression of enteroendocrine cell-derived hormones contributes to higher fat storage in Drosophila females',
+          preprintCategory: 'physiology',
+          preprintDate: '2025-09-12',
+        });
+        // Nothing a /publisher row lacks is filled in from anywhere else.
+        for (const p of result.publications) {
+          expect(Object.keys(p).sort()).toEqual([
+            'preprintCategory',
+            'preprintDate',
+            'preprintDoi',
+            'preprintTitle',
+            'publishedDate',
+            'publishedDoi',
+          ]);
+        }
+      });
+
+      it('continues at a later cursor, whose echo is a string, and slices the page to limit', async () => {
+        const raw = Array.from({ length: 100 }, (_, i) => ({
+          ...PUBLISHER_ELIFE_ROWS[0],
+          biorxiv_doi: `10.64898/2026.01.01.${700100 + i}`,
+          published_doi: `10.1016/j.example.2026.${100 + i}`,
+        }));
+        mockFetch.mockResolvedValue(
+          makeResponse({
+            messages: [{ status: 'ok', interval: '', cursor: '100', count: 100, total: 401 }],
+            collection: raw,
+          }),
+        );
+        const result = await listPublisher('10.1016', 100, 25);
+        expect(requestedUrl()).toBe(
+          'https://api.biorxiv.org/publisher/10.1016/2026-10-01/2026-10-02/100',
+        );
+        expect(result.rowCount).toBe(25);
+        expect(result.pagination).toEqual({ cursor: 100, total: 401 });
+        expect(result.publications.map((p) => p.preprintDoi)).toEqual(
+          raw.slice(0, 25).map((r) => r.biorxiv_doi),
+        );
+      });
+
+      it.each([
+        ['an empty interval or a prefix with no rows', '10.9999', 0],
+        ['a cursor past the last row', '10.7554', 1000],
+      ])(
+        'reads "no articles found" (%s) as an empty page with no total',
+        async (_label, prefix, cursor) => {
+          mockFetch.mockResolvedValue(
+            makeResponse({ messages: [PUBLISHER_NO_ARTICLES], collection: [] }),
+          );
+          const result = await listPublisher(prefix, cursor);
+          expect(requestedUrl()).toBe(
+            `https://api.biorxiv.org/publisher/${prefix}/2026-10-01/2026-10-02/${cursor}`,
+          );
+          expect(result).toEqual({ publications: [], pagination: { cursor }, rowCount: 0 });
+        },
+      );
+
+      it('flags a prefix upstream does not recognize instead of reading it as an empty page', async () => {
+        mockFetch.mockResolvedValue(
+          makeResponse({ messages: [PUBLISHER_NOT_RECOGNIZED], collection: [] }),
+        );
+        const result = await listPublisher('10.123456', 0);
+        expect(requestedUrl()).toBe(
+          'https://api.biorxiv.org/publisher/10.123456/2026-10-01/2026-10-02/0',
+        );
+        expect(result).toEqual({
+          publications: [],
+          pagination: { cursor: 0 },
+          rowCount: 0,
+          publisherNotRecognized: true,
+        });
+      });
+
+      it('never reads a server-keyed /pubs listing answering that status as an unrecognized prefix', async () => {
+        mockFetch.mockResolvedValue(
+          makeResponse({ messages: [PUBLISHER_NOT_RECOGNIZED], collection: [] }),
+        );
+        expect(await list('biorxiv', 0)).not.toHaveProperty('publisherNotRecognized');
       });
     });
   });

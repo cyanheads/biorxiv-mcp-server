@@ -3,8 +3,14 @@
  * @module tests/tools/biorxiv-get-preprint.tool.test
  */
 
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import {
+  createFetchMock,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
@@ -62,7 +68,11 @@ describe('biorxivGetPreprintTool', () => {
   });
 
   it('accepts the alternative 10.64898/ DOI prefix', async () => {
-    const altRevision: PreprintRevision = { doi: '10.64898/2026.05.07.723463', title: 'Alt' };
+    const altRevision: PreprintRevision = {
+      doi: '10.64898/2026.05.07.723463',
+      title: 'Alt',
+      server: 'biorxiv',
+    };
     mockGetDetails.mockResolvedValue([altRevision]);
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({
@@ -75,7 +85,11 @@ describe('biorxivGetPreprintTool', () => {
   });
 
   it('resolves multiple DOIs in one call and returns all', async () => {
-    const second: PreprintRevision = { doi: '10.1101/2024.02.01.000002', title: 'Second' };
+    const second: PreprintRevision = {
+      doi: '10.1101/2024.02.01.000002',
+      title: 'Second',
+      server: 'biorxiv',
+    };
     mockGetDetails.mockImplementation((doi: string) =>
       doi === '10.1101/2024.01.15.575123' ? Promise.resolve([REVISION]) : Promise.resolve([second]),
     );
@@ -416,7 +430,7 @@ describe('biorxivGetPreprintTool', () => {
   // ── Edge cases ──────────────────────────────────────────────────────────────
 
   it('handles sparse upstream payload without fabricating data', async () => {
-    const sparse: PreprintRevision = { doi: '10.1101/2024.01.15.575123' };
+    const sparse: PreprintRevision = { doi: '10.1101/2024.01.15.575123', server: 'biorxiv' };
     mockGetDetails.mockResolvedValue([sparse]);
     const ctx = createMockContext({ errors: biorxivGetPreprintTool.errors });
     const input = biorxivGetPreprintTool.input.parse({ dois: ['10.1101/2024.01.15.575123'] });
@@ -436,6 +450,107 @@ describe('biorxivGetPreprintTool', () => {
     });
     const result = await biorxivGetPreprintTool.handler(input, ctx);
     expect(result.preprints[0]?.revisions).toHaveLength(2);
+  });
+
+  // ── Revisions through the real service ──────────────────────────────────────
+
+  describe('a three-revision /details record through the real service', () => {
+    const DOI = '10.1101/049882';
+    /** Live shape of 10.1101/049882: titles per revision, the latest abstract on each, `bioRxiv`. */
+    const ABSTRACT = String.raw`BackgroundDilp8 inhibits ecdysone synthesis.\n\nResultsRas caused pupal death.\n\nConclusionsA novel checkpoint.`;
+    const COLLECTION = ['1', '2', '3'].map((version) => ({
+      doi: DOI,
+      version,
+      date: `2016-0${version}-23`,
+      title: `Activated Ras expression, revision ${version}`,
+      abstract: ABSTRACT,
+      server: 'bioRxiv',
+      published: 'NA',
+    }));
+    const http = createFetchMock();
+
+    beforeEach(async () => {
+      const { BiorxivApiService } = await vi.importActual<
+        typeof import('@/services/biorxiv/biorxiv-service.js')
+      >('@/services/biorxiv/biorxiv-service.js');
+      const service = new BiorxivApiService({} as AppConfig, {} as StorageService);
+      mockGetDetails.mockImplementation((...args: Parameters<typeof service.getDetails>) =>
+        service.getDetails(...args),
+      );
+      http.reset();
+      http.install();
+      http.route({
+        match: (request) => new URL(request.url).hostname === 'api.biorxiv.org',
+        respond: (request) =>
+          Response.json({
+            messages: [{ status: 'ok' }],
+            collection: new URL(request.url).pathname.startsWith('/details/biorxiv/')
+              ? COLLECTION
+              : [],
+          }),
+      });
+    });
+
+    afterEach(() => http.restore());
+
+    async function call(server: 'biorxiv' | 'both') {
+      const result = await runToolContract(
+        biorxivGetPreprintTool,
+        { dois: [DOI], server },
+        { context: { errors: biorxivGetPreprintTool.errors } },
+      );
+      const text = (result.content[0] as { text: string }).text;
+      const [preprint] = (
+        result.structuredContent as { preprints: { revisions: PreprintRevision[] }[] }
+      ).preprints;
+      return { result, text, revisions: preprint?.revisions ?? [] };
+    }
+
+    it('carries the abstract on v3 only, on both surfaces', async () => {
+      const { result, text, revisions } = await call('biorxiv');
+      expect(result.isError).toBeFalsy();
+      expect(revisions.map((r) => r.version)).toEqual(['1', '2', '3']);
+      expect(revisions.map((r) => r.abstract)).toEqual([
+        undefined,
+        undefined,
+        'Background: Dilp8 inhibits ecdysone synthesis. Results: Ras caused pupal death. Conclusions: A novel checkpoint.',
+      ]);
+      expect(text.match(/\*\*Abstract:\*\*/g)).toHaveLength(1);
+      expect(text).toContain(
+        '**Abstract:** Background: Dilp8 inhibits ecdysone synthesis. Results: Ras caused pupal death. Conclusions: A novel checkpoint.',
+      );
+      // Titles stay per-revision.
+      for (const version of ['1', '2', '3']) {
+        expect(text).toContain(`**Title:** Activated Ras expression, revision ${version}`);
+      }
+      expect(text).not.toContain(String.raw`\n`);
+    });
+
+    it('reports every revision on lowercase biorxiv, and that value is a valid server input', async () => {
+      const { text, revisions } = await call('both');
+      expect(revisions.map((r) => r.server)).toEqual(['biorxiv', 'biorxiv', 'biorxiv']);
+      expect(text.match(/\*\*Server:\*\* biorxiv\n/g)).toHaveLength(3);
+      expect(text).not.toContain('bioRxiv');
+      const server = revisions[0]?.server;
+      expect(biorxivGetPreprintTool.input.parse({ dois: [DOI], server }).server).toBe('biorxiv');
+    });
+  });
+
+  it('types revisions[].server as the lowercase server enum, always present', () => {
+    const output = (server?: string) => ({
+      preprints: [{ doi: REVISION.doi, revisions: [{ doi: REVISION.doi, server }] }],
+      failed: [],
+      unprocessed: [],
+    });
+    expect(() => biorxivGetPreprintTool.output.parse(output('medrxiv'))).not.toThrow();
+    expect(() => biorxivGetPreprintTool.output.parse(output('bioRxiv'))).toThrow();
+    expect(() => biorxivGetPreprintTool.output.parse(output())).toThrow();
+  });
+
+  it('keeps the server input case-sensitive: "bioRxiv" is still rejected', () => {
+    expect(() =>
+      biorxivGetPreprintTool.input.parse({ dois: [REVISION.doi], server: 'bioRxiv' }),
+    ).toThrow();
   });
 
   // ── Batch cap and remainder ─────────────────────────────────────────────────
@@ -1516,7 +1631,9 @@ describe('biorxivGetPreprintTool', () => {
 
     it('falls back to the raw DOI as the heading when the title is absent', () => {
       const blocks = biorxivGetPreprintTool.format!({
-        preprints: [{ doi: IDENTIFIERS.doi, revisions: [{ doi: IDENTIFIERS.doi }] }],
+        preprints: [
+          { doi: IDENTIFIERS.doi, revisions: [{ doi: IDENTIFIERS.doi, server: 'biorxiv' }] },
+        ],
         failed: [],
         unprocessed: [],
       });

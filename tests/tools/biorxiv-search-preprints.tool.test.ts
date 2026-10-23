@@ -5,7 +5,12 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import type { PreprintRevision } from '@/services/biorxiv/types.js';
@@ -25,7 +30,7 @@ import {
   RATE_LIMIT_RECOVERY_OPENING,
   rateLimitError,
 } from '../helpers/rate-limit.js';
-import { recoveryHint, rejection } from '../helpers/rejection.js';
+import { envelopeHint, recoveryHint, rejection } from '../helpers/rejection.js';
 
 const mockEpmcSearch = vi.fn();
 const mockGetAbstracts = vi.fn();
@@ -166,6 +171,18 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(result.preprints[0]?.server).toBe('medrxiv');
   });
 
+  it('types preprints[].server as the lowercase server enum, absent on a fallback record', () => {
+    const output = (record: Record<string, unknown>) => ({
+      preprints: [{ doi: EPMC_RESULT.doi, enriched: true, ...record }],
+      partial_results: false,
+    });
+    const parse = (record: Record<string, unknown>) => () =>
+      biorxivSearchPreprintsTool.output.parse(output(record));
+    expect(parse({ server: 'medrxiv' })).not.toThrow();
+    expect(parse({ server: 'bioRxiv' })).toThrow();
+    expect(parse({ enriched: false })).not.toThrow();
+  });
+
   it('defaults server to "both" and limit to 25 when omitted', () => {
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
     expect(input.server).toBe('both');
@@ -242,6 +259,20 @@ describe('biorxivSearchPreprintsTool', () => {
         expect(mockEpmcSearch).not.toHaveBeenCalled();
       },
     );
+
+    it('carries a hint naming the YYYY-MM-DD form, not the raw pattern', async () => {
+      const result = await runToolContract(
+        biorxivSearchPreprintsTool,
+        { query: 'drought tolerance', [bound]: '2026-9-1' } as never,
+        { context: { errors: biorxivSearchPreprintsTool.errors } },
+      );
+      const hint = envelopeHint(result);
+      expect(hint).toContain('YYYY-MM-DD');
+      expect(hint).not.toContain('\\d');
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain('YYYY-MM-DD');
+      expect(text).not.toContain('\\d');
+    });
   });
 
   describe.each<['date_from' | 'date_to', { date_from?: string; date_to?: string }]>([
@@ -959,6 +990,52 @@ describe('biorxivSearchPreprintsTool', () => {
       authorCorrespondingInstitution: 'University of South Carolina',
     });
     expect(parsed.preprints[0]?.awards).toEqual(['R01GM146257']);
+  });
+
+  it('enriches from the highest version when /details lists revisions out of order (#71)', async () => {
+    // The real getDetails, so the revision order the tool reads is the service's.
+    const { BiorxivApiService } = await vi.importActual<
+      typeof import('@/services/biorxiv/biorxiv-service.js')
+    >('@/services/biorxiv/biorxiv-service.js');
+    const real = new BiorxivApiService({} as never, {} as never);
+    mockGetDetails.mockImplementation(real.getDetails.bind(real));
+    const http = createFetchMock();
+    http.route({
+      match: (request) => new URL(request.url).hostname === 'api.biorxiv.org',
+      respond: () =>
+        Response.json({
+          collection: ['2', '10', '9'].map((version) => ({
+            doi: EPMC_RESULT.doi,
+            version,
+            title: `Title of revision ${version}`,
+            date: `2024-${version.padStart(2, '0')}-01`,
+            abstract: 'Abstract of revision 10.',
+          })),
+        }),
+    });
+    http.install();
+    try {
+      const result = await runToolContract(
+        biorxivSearchPreprintsTool,
+        { query: 'CRISPR', server: 'biorxiv' } as never,
+        { context: { errors: biorxivSearchPreprintsTool.errors } },
+      );
+      const preprint = (result.structuredContent as { preprints: Record<string, unknown>[] })
+        .preprints[0];
+      expect(preprint).toMatchObject({
+        version: '10',
+        title: 'Title of revision 10',
+        date: '2024-10-01',
+        abstract: 'Abstract of revision 10.',
+        revisionCount: 3,
+      });
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain('Title of revision 10');
+      expect(text).toContain('Abstract of revision 10.');
+      expect(text).not.toContain('Title of revision 9');
+    } finally {
+      http.restore();
+    }
   });
 
   // ── Edge cases ──────────────────────────────────────────────────────────────

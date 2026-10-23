@@ -44,6 +44,7 @@ import {
   findRateLimit,
   firstHit,
   normalizeDoi,
+  notFoundHint,
   remainingBudgetMs,
   startCallDeadline,
 } from '@/services/shared.js';
@@ -76,7 +77,7 @@ function describeDuration(ms: number): string {
 export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
   title: 'Get Preprint Full Text',
   description:
-    'Retrieve a preprint\'s full text as best-effort Markdown, extracted from its rendered HTML article page. Reads the latest version unless one is requested (the version input, or a vN suffix on the DOI), confirms it via the details API, then fetches and extracts the body — abstract, sections, inline citation labels, and the reference list. Table cells are not on the article page: each table appears as its caption, and omittedTables names it with the URL that serves its cells. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) resolves the DOI against both in parallel and the response reports which server answered. This is HTML-to-Markdown extraction, not structured JATS: section structure is approximate and not guaranteed. Long articles exceed a single response, so use offset and limit to page through them (the response reports totalChars, remainingChars, and hasMore); paging is cheap because the extracted article is cached per version for an hour after the first read, so only the first chunk pays for a fetch. Not every preprint has an extractable HTML page — some are PDF-only and some origins block programmatic access — in which case a fulltext_unavailable error routes you to biorxiv_get_preprint for the title, abstract, and metadata. For a preprint that has been published in a journal, the journal\'s version may have richer full text elsewhere.',
+    'Retrieve a preprint\'s full text as best-effort Markdown, extracted from its rendered HTML article page. Reads the latest version unless one is requested (the version input, or a vN suffix on the DOI), confirms it via the details API, then fetches and extracts the body — abstract, sections, inline citation labels, and the reference list. Table cells are not on the article page: each table appears as its caption, and omittedTables names it with the URL that serves its cells. bioRxiv and medRxiv share the 10.1101/ DOI prefix, so server="both" (the default) resolves the DOI against both in parallel and the response reports which server answered. This is HTML-to-Markdown extraction, not structured JATS: section structure is approximate and not guaranteed. Long articles exceed a single response, so use offset and limit to page through them (the response reports totalChars, remainingChars, and hasMore); paging is cheap because the extracted article is cached per version for an hour after the first read, so only the first chunk pays for a fetch. Not every preprint has an extractable HTML page — some are PDF-only and some origins block programmatic access — in which case a fulltext_unavailable error routes you to biorxiv_get_preprint for the title, metadata, and current abstract. For a preprint that has been published in a journal, the journal\'s version may have richer full text elsewhere.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -226,8 +227,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       reason: 'doi_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'The DOI resolves to an empty collection on every attempted server.',
-      recovery:
-        'Retry with server="both" if you scoped to one server, or find the correct DOI with biorxiv_search_preprints.',
+      recovery: 'Check the DOI, or find the correct one with biorxiv_search_preprints.',
     },
     {
       reason: 'upstream_unavailable',
@@ -250,7 +250,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The preprint exists but its full-text HTML page is blocked, missing, or yields no extractable text (PDF-only).',
       recovery:
-        'Use biorxiv_get_preprint for the title, abstract, and metadata — a readable full-text page is not available for this preprint.',
+        'Use biorxiv_get_preprint for the title, metadata, and current abstract (the latest revision’s; it holds no earlier revision’s own abstract) — a readable full-text page is not available for this preprint.',
     },
     {
       reason: 'offset_out_of_range',
@@ -362,6 +362,12 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
       throw ctx.fail('doi_not_found', `No preprint found for ${doi} on ${servers.join(' or ')}.`, {
         doi,
         servers,
+        recovery: {
+          hint: notFoundHint(
+            servers,
+            'Check the DOI, or find the correct one with biorxiv_search_preprints.',
+          ),
+        },
       });
     }
 
@@ -423,7 +429,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
             server,
             version,
             recovery: {
-              hint: `Retry after a short delay — the www.${server}.org article page did not answer. api.biorxiv.org resolved this preprint, so biorxiv_get_preprint still serves its title, abstract, and metadata meanwhile.`,
+              hint: `Retry after a short delay — the www.${server}.org article page did not answer. api.biorxiv.org resolved this preprint, so biorxiv_get_preprint still serves its title, metadata, and current abstract meanwhile.`,
             },
           },
           { cause: err },
@@ -458,7 +464,7 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
           recovery: {
             hint: metadataLimit
               ? `Wait ${wait} before calling biorxiv_get_fulltext again — the ${server} article-page origin and api.biorxiv.org are both rate-limiting this host, so biorxiv_get_preprint will not answer sooner either.`
-              : `Wait ${wait} before calling biorxiv_get_fulltext again — the ${server} article-page origin is rate-limiting this host. api.biorxiv.org answered this call, so biorxiv_get_preprint still serves the title, abstract, and metadata meanwhile.`,
+              : `Wait ${wait} before calling biorxiv_get_fulltext again — the ${server} article-page origin is rate-limiting this host. api.biorxiv.org answered this call, so biorxiv_get_preprint still serves the title, metadata, and current abstract meanwhile.`,
           },
         });
       }

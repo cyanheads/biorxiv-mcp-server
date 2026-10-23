@@ -2,7 +2,8 @@
  * @fileoverview BiorxivApiService — wraps api.biorxiv.org endpoints for
  * preprint details (/details), date-range listing (/details with date interval),
  * crosswalk (/pubs, keyed by preprint DOI or by journal DOI), and journal
- * publications by publication-date interval (/pubs with date interval). Owns the
+ * publications by publication-date interval (/pubs with date interval, or
+ * /publisher for one journal DOI prefix). Owns the
  * category taxonomy and the API's category spelling, and flags a listing whose
  * category filter the API ignored or whose funder ROR ID it does not know. All
  * methods retry with exponential backoff inside the calling tool's deadline,
@@ -37,6 +38,7 @@ import type {
   ListingResult,
   PreprintRevision,
   PublishedListingResult,
+  PublishedListingSource,
   PublishedVersion,
   RawDetailsResponse,
   RawPreprintRevision,
@@ -168,6 +170,13 @@ const UNFILTERED_ECHO = 'all';
 const FUNDER_NOT_FOUND = 'funder value not found';
 
 /**
+ * The `/publisher` status — HTTP 200, no rows — for a prefix the API cannot
+ * read (`10.755`, `abc`). Read as an empty page, it would claim the publisher
+ * published nothing in the interval.
+ */
+const PUBLISHER_NOT_RECOGNIZED = 'publisher string not recognized';
+
+/**
  * The one status this service classifies itself rather than treating as a bug.
  * Passing it to `fetchWithTimeout` only lowers the log severity from `error` to
  * `debug`; the thrown error and its classification are unchanged.
@@ -214,13 +223,39 @@ function rethrowClassified(err: unknown): never {
   );
 }
 
+/**
+ * A DOI as an api.biorxiv.org path key, for `/details` and `/pubs` alike. The
+ * API reads only the first two `/`-separated segments of the key, and its web
+ * server answers a raw extra segment on `/details`, or an encoded slash (`%2F`)
+ * anywhere, with an Apache 404 indistinguishable from a missing route. The API
+ * decodes the key once more itself, so every slash after the first is sent
+ * double-encoded (`%252F`): a DOI with a second slash (`10.1093/genetics/…`)
+ * arrives whole, and one no server holds draws HTTP 200 with an empty
+ * collection rather than the 404. A single-slash DOI — every preprint DOI — is
+ * sent as written.
+ */
+function doiPathKey(doi: string): string {
+  const [registrant = '', ...suffix] = doi.split('/');
+  return `${encodeURIComponent(registrant)}/${suffix.map(encodeURIComponent).join('%252F')}`;
+}
+
 // ─── Normalization helpers ───────────────────────────────────────────────────
 
 /** An `award` value upstream uses for "no award" — absent, not a grant number. */
 const AWARD_PLACEHOLDER = /^n\/?a$/i;
 
-function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
-  const rev: PreprintRevision = { doi: raw.doi };
+/**
+ * Normalize one `/details` row. `server` is the server that was queried, not
+ * the upstream `server` string (`"bioRxiv"`), so the value matches every
+ * tool's `server` input. `withAbstract` false leaves the abstract out:
+ * upstream repeats the latest revision's abstract on every revision.
+ */
+function normalizeRevision(
+  raw: RawPreprintRevision,
+  server: BiorxivServer,
+  withAbstract = true,
+): PreprintRevision {
+  const rev: PreprintRevision = { doi: raw.doi, server };
   const title = normalizeUpstreamText(raw.title);
   if (title) rev.title = title;
   if (raw.authors) rev.authors = raw.authors;
@@ -233,7 +268,7 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   if (raw.license) rev.license = raw.license;
   if (raw.category) rev.category = raw.category;
   if (raw.jatsxml) rev.jatsxmlUrl = raw.jatsxml;
-  const abstract = normalizeUpstreamText(raw.abstract);
+  const abstract = withAbstract ? normalizeUpstreamText(raw.abstract) : undefined;
   if (abstract) rev.abstract = abstract;
   // Only the awards are kept: upstream replaces each funder's name and ROR ID
   // with an unrelated organization while leaving the award in place.
@@ -247,14 +282,26 @@ function normalizeRevision(raw: RawPreprintRevision): PreprintRevision {
   }
   // Normalize "NA" to absent — callers should check undefined, not "NA"
   if (raw.published && raw.published !== 'NA') rev.publishedJournalDoi = raw.published;
-  if (raw.server) rev.server = raw.server;
   return rev;
 }
 
-/** Normalize a `/pubs` crosswalk record; undefined when it names no preprint. */
+/**
+ * A `/details` row's version number for ordering revisions; a row that carries
+ * none ranks below every numbered row.
+ */
+function versionRank(raw: RawPreprintRevision): number {
+  const version = Number.parseInt(raw.version ?? '', 10);
+  return Number.isNaN(version) ? Number.MIN_SAFE_INTEGER : version;
+}
+
+/**
+ * Normalize a `/pubs` crosswalk record or a `/publisher` row, which names its
+ * preprint as `biorxiv_doi`; undefined when it names no preprint.
+ */
 function normalizePublished(record: RawPublishedRecord): PublishedVersion | undefined {
-  if (!record.preprint_doi) return;
-  const pv: PublishedVersion = { preprintDoi: record.preprint_doi };
+  const preprintDoi = record.preprint_doi || record.biorxiv_doi;
+  if (!preprintDoi) return;
+  const pv: PublishedVersion = { preprintDoi };
   if (record.published_doi) pv.publishedDoi = record.published_doi;
   if (record.published_journal) pv.publishedJournal = record.published_journal;
   if (record.published_date) pv.publishedDate = record.published_date;
@@ -311,8 +358,15 @@ export class BiorxivApiService {
   }
 
   /**
-   * Fetch all revisions for a DOI from a single server.
-   * Returns an empty collection if the DOI is not found on this server.
+   * Fetch all revisions for a DOI from a single server, in ascending version
+   * order whatever order upstream lists them in, so the last is the latest:
+   * rows without a version number come first, and rows that tie keep their
+   * listed order ({@link versionRank}).
+   * Only the latest revision carries `abstract`: upstream repeats the latest
+   * revision's abstract on every revision, while title, authors, and date stay
+   * per-revision.
+   * Returns an empty collection if the DOI is not found on this server, a DOI
+   * with a second slash included ({@link doiPathKey}); any HTTP 404 rejects.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    * `signal` stops the lookup when it aborts — a fan-out leg's own signal, so
    * one leg can be cut short without cancelling the call; it defaults to the
@@ -325,8 +379,7 @@ export class BiorxivApiService {
     ctx: Context,
     signal: AbortSignal = ctx.signal,
   ): Promise<PreprintRevision[]> {
-    const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
-    const url = `${this.baseUrl}/details/${server}/${encodedDoi}/0/json`;
+    const url = `${this.baseUrl}/details/${server}/${doiPathKey(doi)}/0/json`;
     try {
       return await retryWithinBudget(
         async ({ signal, remainingMs }) => {
@@ -342,8 +395,13 @@ export class BiorxivApiService {
               { url },
             );
           }
-          const data = JSON.parse(text) as RawDetailsResponse;
-          return (data.collection ?? []).map(normalizeRevision);
+          // Stable: rows with the same rank keep the order upstream listed them in.
+          const collection = ((JSON.parse(text) as RawDetailsResponse).collection ?? []).toSorted(
+            (a, b) => versionRank(a) - versionRank(b),
+          );
+          return collection.map((raw, i) =>
+            normalizeRevision(raw, server, i === collection.length - 1),
+          );
         },
         {
           operation: 'BiorxivApiService.getDetails',
@@ -410,7 +468,9 @@ export class BiorxivApiService {
               : typeof rawTotal === 'string'
                 ? parseInt(rawTotal, 10) || 0
                 : 0;
-          const preprints = (data.collection ?? []).map(normalizeRevision);
+          // Each row keeps its abstract — its preprint's latest-revision abstract,
+          // since no row says whether a later revision exists.
+          const preprints = (data.collection ?? []).map((raw) => normalizeRevision(raw, server));
           const categoryIgnored = !!category && msg?.category === UNFILTERED_ECHO;
           const funderNotFound = !!funder && msg?.status === FUNDER_NOT_FOUND;
           return {
@@ -434,12 +494,14 @@ export class BiorxivApiService {
   }
 
   /**
-   * Resolve a preprint DOI to its published journal record via /pubs endpoint.
-   * Returns undefined when the preprint is not yet published — and for every
-   * `10.64898/` DOI, which this path form never parses (see
-   * {@link getPublishedVersionByJournalDoi} for the lookup that does resolve them).
-   * The record lives on the server that holds the preprint: the other server
-   * answers an empty collection.
+   * Resolve a DOI to its crosswalk record via the /pubs endpoint, which is
+   * keyed by either side: a preprint DOI, or the DOI of the journal article it
+   * was published as. Returns the first record listed, or undefined when there
+   * is none — a preprint not yet published, a journal article with no recorded
+   * preprint, and every `10.64898/` preprint DOI, which this path form never
+   * parses (see {@link getPublishedVersionByJournalDoi} for the lookup that
+   * does resolve them). The record lives on the server that holds the
+   * preprint: the other server answers an empty collection.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    * `signal` stops the lookup when it aborts, as on {@link getDetails}.
    */
@@ -450,9 +512,15 @@ export class BiorxivApiService {
     ctx: Context,
     signal: AbortSignal = ctx.signal,
   ): Promise<PublishedVersion | undefined> {
-    const encodedDoi = doi.split('/').map(encodeURIComponent).join('/');
     const record = (
-      await this.fetchCrosswalk(encodedDoi, server, 'getPublishedVersion', deadline, ctx, signal)
+      await this.fetchCrosswalk(
+        doiPathKey(doi),
+        server,
+        'getPublishedVersion',
+        deadline,
+        ctx,
+        signal,
+      )
     )[0];
     return record ? normalizePublished(record) : undefined;
   }
@@ -460,13 +528,9 @@ export class BiorxivApiService {
   /**
    * Resolve the crosswalk record the other way round: `/pubs` keyed by the
    * journal DOI a preprint's `/details` record names. Answers for `10.64898/`
-   * preprints, whose own DOI the path form never parses. The API reads only the
-   * first two `/`-separated segments of the key, and its web server answers an
-   * encoded slash (`%2F`) with a 404 — but the API decodes the key once more
-   * itself, so every slash after the first is sent double-encoded (`%252F`) and
-   * a journal DOI with a second slash (`10.1093/genetics/…`) still arrives
-   * whole. Returns only the record for `preprintDoi`, or undefined when none
-   * names it.
+   * preprints, whose own DOI the path form never parses; a journal DOI with a
+   * second slash (`10.1093/genetics/…`) arrives whole ({@link doiPathKey}).
+   * Returns only the record for `preprintDoi`, or undefined when none names it.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getPublishedVersionByJournalDoi(
@@ -476,11 +540,9 @@ export class BiorxivApiService {
     deadline: CallDeadline,
     ctx: Context,
   ): Promise<PublishedVersion | undefined> {
-    const [registrant = '', ...suffix] = journalDoi.split('/');
-    const encodedDoi = `${encodeURIComponent(registrant)}/${suffix.map(encodeURIComponent).join('%252F')}`;
     const wanted = preprintDoi.toLowerCase();
     const records = await this.fetchCrosswalk(
-      encodedDoi,
+      doiPathKey(journalDoi),
       server,
       'getPublishedVersionByJournalDoi',
       deadline,
@@ -493,18 +555,22 @@ export class BiorxivApiService {
 
   /**
    * List the preprints published as journal articles within a journal
-   * publication-date interval on a single server: the first `limit` rows of
-   * the 100-row page upstream serves from `cursor`, a plain row offset. The API
+   * publication-date interval from one source — a server's `/pubs` listing, or
+   * bioRxiv's `/publisher` listing for one journal DOI prefix, which pages the
+   * same way: the first `limit` rows of the 100-row page upstream serves from
+   * `cursor`, a plain row offset. The API
    * takes no page-size parameter, so the slice is taken here, on upstream rows.
    * Upstream answers an empty interval and a cursor at or past the last row
    * alike — "no articles found", no total — so `total` is absent whenever the
    * page is empty, and only the caller knows which of the two it asked for. A
    * row naming no preprint is dropped after the slice, so `rowCount` — every
-   * row the slice served — is what a cursor advances by.
+   * row the slice served — is what a cursor advances by. A `/publisher` row
+   * carries no journal name, authors, or abstract, so those stay absent; a
+   * prefix the API cannot read is flagged `publisherNotRecognized`.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    */
   async getPublishedListing(
-    server: BiorxivServer,
+    source: PublishedListingSource,
     startDate: string,
     endDate: string,
     cursor: number,
@@ -512,7 +578,10 @@ export class BiorxivApiService {
     deadline: CallDeadline,
     ctx: Context,
   ): Promise<PublishedListingResult> {
-    const url = `${this.baseUrl}/pubs/${server}/${startDate}/${endDate}/${cursor}/json`;
+    const byPublisher = typeof source !== 'string';
+    const url = byPublisher
+      ? `${this.baseUrl}/publisher/${encodeURIComponent(source.publisher)}/${startDate}/${endDate}/${cursor}`
+      : `${this.baseUrl}/pubs/${source}/${startDate}/${endDate}/${cursor}/json`;
     try {
       return await retryWithinBudget(
         async ({ signal, remainingMs }) => {
@@ -532,10 +601,13 @@ export class BiorxivApiService {
           const rows = (data.collection ?? []).slice(0, limit);
           const publications = rows.flatMap((record) => normalizePublished(record) ?? []);
           const total = parseCount(data.messages?.[0]?.total);
+          const publisherNotRecognized =
+            byPublisher && data.messages?.[0]?.status === PUBLISHER_NOT_RECOGNIZED;
           return {
             publications,
             pagination: { cursor, ...(total !== undefined && { total }) },
             rowCount: rows.length,
+            ...(publisherNotRecognized && { publisherNotRecognized }),
           };
         },
         {

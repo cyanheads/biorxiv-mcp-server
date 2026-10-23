@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for biorxiv_list_published_versions — publication-date
  * interval listing, per-server pagination, past-the-end cursors, partial and
- * total upstream failure, include_abstract, and both client surfaces.
+ * total upstream failure, include_abstract, the publisher filter, and both
+ * client surfaces.
  * @module tests/tools/biorxiv-list-published-versions.tool.test
  */
 
@@ -19,7 +20,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivListPublishedVersionsTool as listTool } from '@/mcp-server/tools/definitions/biorxiv-list-published-versions.tool.js';
 import type { PublishedListingResult, PublishedVersion } from '@/services/biorxiv/types.js';
 import { ESCAPED, IDENTIFIERS, UPSTREAM } from '../helpers/markdown-fixtures.js';
-import { NO_ARTICLES, PUBLISHED_64898, PUBS_ROW_64898 } from '../helpers/pubs-fixtures.js';
+import {
+  NO_ARTICLES,
+  PUBLISHED_64898,
+  PUBLISHER_ELIFE_ROWS,
+  PUBLISHER_NO_ARTICLES,
+  PUBLISHER_NOT_RECOGNIZED,
+  PUBS_ROW_64898,
+} from '../helpers/pubs-fixtures.js';
 import {
   declaredRateLimitRecovery,
   RATE_LIMIT_RECOVERY_OPENING,
@@ -149,6 +157,14 @@ describe('biorxivListPublishedVersionsTool', () => {
         expect(mockGetPublishedListing).not.toHaveBeenCalled();
       },
     );
+
+    it('carries a hint naming the YYYY-MM-DD form, not the raw pattern', async () => {
+      const { result, text } = await call({ server: 'biorxiv', [bound]: '2026-9-1' });
+      expect(envelopeHint(result)).toContain('YYYY-MM-DD');
+      expect(envelopeHint(result)).not.toContain('\\d');
+      expect(text).toContain('YYYY-MM-DD');
+      expect(text).not.toContain('\\d');
+    });
   });
 
   it('rejects a malformed date_from alias at the schema as its start_date target', async () => {
@@ -923,5 +939,363 @@ describe('biorxivListPublishedVersionsTool', () => {
 
     const { text } = await call({ server: 'biorxiv' });
     expect(text).toContain('No journal publications found');
+  });
+
+  // ── publisher ───────────────────────────────────────────────────────────────
+
+  describe('publisher', () => {
+    const NARROWED =
+      'The publisher filter applies to bioRxiv only — api.biorxiv.org has no medRxiv publisher listing — so only bioRxiv was queried and there is no medRxiv pagination entry.';
+    const FIELDS_ABSENT =
+      'Rows listed by publisher carry no journal name, authors, corresponding author, or abstract — pass a preprintDoi to biorxiv_get_published_version for its full record.';
+
+    it.each(['10.7554', '10.1016', '10.15252', '10.123456'])(
+      'accepts the bare prefix %s',
+      (publisher) => {
+        expect(listTool.input.parse({ ...WEEK, publisher }).publisher).toBe(publisher);
+      },
+    );
+
+    it.each(['10.7554/eLife.109354', '10.755', '10.1', 'eLife', '10.7554/', 'doi:10.7554'])(
+      'rejects %j at the schema as -32602 naming the field, before any upstream call',
+      async (publisher) => {
+        const { result } = await call({ server: 'biorxiv', publisher });
+        expect(result.isError).toBe(true);
+        const error = (result.structuredContent as { error: { code: number; message: string } })
+          .error;
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.message).toContain('publisher');
+        expect(mockGetPublishedListing).not.toHaveBeenCalled();
+      },
+    );
+
+    it('carries a hint naming the DOI-prefix form, not the raw pattern', async () => {
+      const { result, text } = await call({ server: 'biorxiv', publisher: '10.7554/eLife.109354' });
+      expect(envelopeHint(result)).toContain('10.7554');
+      expect(envelopeHint(result)).not.toContain('\\d');
+      expect(text).toContain('10.7554');
+      expect(text).not.toContain('\\d');
+    });
+
+    describe('the publisher check runs in linear time', () => {
+      /** Thread CPU microseconds one input parse takes, the least of three runs. */
+      function cpuMicros(publisher: string): number {
+        let best = Number.POSITIVE_INFINITY;
+        for (let run = 0; run < 3; run++) {
+          const start = process.threadCpuUsage();
+          listTool.input.safeParse({ ...WEEK, publisher });
+          const spent = process.threadCpuUsage(start);
+          best = Math.min(best, spent.user + spent.system);
+        }
+        return best;
+      }
+
+      /** `head`, then the unit repeated to `chars` characters, then the tail. */
+      const build = (head: string, unit: string, chars: number, tail = '') =>
+        head + unit.repeat(Math.ceil(chars / unit.length)) + tail;
+
+      it.each([
+        ['a long line ending in a break', '', '§1 x', '\ny'],
+        ['breaks throughout', '', '  \r\n', ''],
+        ['a prefix whose digits never end', '10.', '1', 'x'],
+        ['a repeated prefix opener', '', '10.', ''],
+        ['digits padded by whitespace', ' \t', '7', ' \n'],
+      ])('%s: 5k → 320k characters', (_shape, head, unit, tail) => {
+        const timings: number[] = [];
+        for (let chars = 5_000; chars <= 320_000; chars *= 2) {
+          const micros = cpuMicros(build(head, unit, chars, tail));
+          expect(micros).toBeLessThan(250_000);
+          timings.push(micros);
+        }
+        const first = Math.max(timings[0] ?? 1, 1);
+        const last = timings.at(-1) ?? 0;
+        expect(last / first).toBeLessThan(256);
+      });
+    });
+
+    it('advertises the prefix pattern in tools/list and leaves publisher optional', () => {
+      const schema = z.toJSONSchema(listTool.input, { io: 'input' }) as {
+        properties: Record<string, { type?: string; pattern?: string }>;
+        required?: string[];
+      };
+      expect(schema.properties.publisher).toMatchObject({
+        type: 'string',
+        pattern: '^10\\.\\d{4,}$',
+      });
+      expect(schema.required).not.toContain('publisher');
+    });
+
+    // Regression: a call without publisher is the call it was before the input existed.
+    it('without publisher, queries /pubs on each requested server with the same arguments as before', async () => {
+      await call({});
+      await call({ server: 'medrxiv', cursor: 100, limit: 50 });
+      expect(mockGetPublishedListing.mock.calls).toEqual([
+        ['biorxiv', '2026-09-01', '2026-09-07', 0, 25, expect.any(Number), expect.anything()],
+        ['medrxiv', '2026-09-01', '2026-09-07', 0, 25, expect.any(Number), expect.anything()],
+        ['medrxiv', '2026-09-01', '2026-09-07', 100, 50, expect.any(Number), expect.anything()],
+      ]);
+    });
+
+    it.each(['', '   ', '\t\n'])(
+      'reads a blank publisher %j as omitted — the same calls and result as no publisher',
+      async (publisher) => {
+        mockGetPublishedListing.mockImplementation(
+          perServer({ biorxiv: page([PUBLISHED_64898], 0, 1), medrxiv: page([MEDRXIV_PUB], 0, 1) }),
+        );
+        const omitted = await call({});
+        const blank = await call({ publisher });
+        expect(blank.result.isError).toBeFalsy();
+        // Each call carries its own deadline and context; every other argument matches.
+        const sameArgs = (server: string) => [
+          server,
+          '2026-09-01',
+          '2026-09-07',
+          0,
+          25,
+          expect.any(Number),
+          expect.anything(),
+        ];
+        expect(mockGetPublishedListing.mock.calls).toEqual([
+          sameArgs('biorxiv'),
+          sameArgs('medrxiv'),
+          sameArgs('biorxiv'),
+          sameArgs('medrxiv'),
+        ]);
+        expect(blank.structured).toEqual(omitted.structured);
+        expect(blank.text).toBe(omitted.text);
+      },
+    );
+
+    it('rejects publisher with server "medrxiv" as invalid_publisher before any request', async () => {
+      const ctx = createMockContext({ errors: listTool.errors });
+      const err = await rejection(
+        listTool.handler(
+          listTool.input.parse({ ...WEEK, server: 'medrxiv', publisher: '10.7554' }),
+          ctx,
+        ),
+      );
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_publisher', publisher: '10.7554' },
+      });
+      expect(err.message).toMatch(/bioRxiv only/);
+      expect(recoveryHint(err)).toMatch(/"biorxiv" or "both"/);
+      expect(mockGetPublishedListing).not.toHaveBeenCalled();
+
+      const { result, text } = await call({ server: 'medrxiv', publisher: '10.7554' });
+      expect(result.isError).toBe(true);
+      expect(text).toContain('invalid_publisher');
+      // The declared recovery also names "biorxiv" or "both"; only the throw's own hint reads this way.
+      const hint =
+        'Set server to "biorxiv" or "both" (which queries bioRxiv alone under a publisher filter), or omit publisher to list medRxiv.';
+      expect(envelopeHint(result)).toBe(hint);
+      expect(text).toContain(hint);
+      expect(mockGetPublishedListing).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The real service against a fake bioRxiv `/publisher` endpoint shaped like
+     * the live one: 100 rows a page from any cursor offset, `total` as a
+     * number, "no articles found" with no total past the end or for a prefix
+     * with no rows, and "publisher string not recognized" for a prefix it
+     * cannot parse. A catch-all route records any other request, `/pubs` included.
+     */
+    describe('against the publisher endpoint', () => {
+      const http = createFetchMock();
+      const PUBLISHER = /^\/publisher\/([^/]+)\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}\/(\d+)$/;
+      const OCT = { start_date: '2026-10-01', end_date: '2026-10-02' };
+      /** 401 synthetic `10.1016` rows, like Elsevier's 2026-09-01..10-07. */
+      const ELSEVIER = Array.from({ length: 401 }, (_, i) => ({
+        ...PUBLISHER_ELIFE_ROWS[0],
+        biorxiv_doi: `10.64898/2026.02.01.${800000 + i}`,
+        published_doi: `10.1016/j.example.2026.${i}`,
+      }));
+      const ROWS: Record<string, readonly object[]> = {
+        '10.7554': PUBLISHER_ELIFE_ROWS,
+        '10.1016': ELSEVIER,
+        '10.9999': [],
+      };
+      const requested = () => http.calls.map((c) => new URL(c.request.url).pathname);
+
+      beforeEach(async () => {
+        http.reset();
+        http.route(
+          {
+            match: (request) => PUBLISHER.test(new URL(request.url).pathname),
+            respond: (request) => {
+              const [, prefix = '', at] = PUBLISHER.exec(new URL(request.url).pathname) as string[];
+              // No pattern-valid prefix drew this status live; the fake gives it to
+              // every prefix it does not hold, so the mapping is reachable.
+              const all = ROWS[prefix];
+              if (!all)
+                return Response.json({ messages: [PUBLISHER_NOT_RECOGNIZED], collection: [] });
+              const cursor = Number(at);
+              const collection = all.slice(cursor, cursor + 100);
+              if (collection.length === 0) {
+                return Response.json({ messages: [PUBLISHER_NO_ARTICLES], collection: [] });
+              }
+              return Response.json({
+                messages: [
+                  {
+                    status: 'ok',
+                    interval: '2026-10-01:2026-10-02',
+                    cursor: cursor === 0 ? 0 : String(cursor),
+                    count: collection.length,
+                    total: all.length,
+                  },
+                ],
+                collection,
+              });
+            },
+          },
+          { match: () => true, respond: () => new Response('Not Found', { status: 404 }) },
+        );
+        http.install();
+        const { BiorxivApiService } = await vi.importActual<
+          typeof import('@/services/biorxiv/biorxiv-service.js')
+        >('@/services/biorxiv/biorxiv-service.js');
+        const real = new BiorxivApiService({} as AppConfig, {} as StorageService);
+        mockGetPublishedListing.mockImplementation(real.getPublishedListing.bind(real));
+      });
+
+      afterEach(() => http.restore());
+
+      it('under "both", lists exactly bioRxiv\'s 10.7554 rows from /publisher alone and says why medRxiv is absent', async () => {
+        const { result, structured, text } = await call({ ...OCT, publisher: '10.7554' });
+        expect(result.isError).toBeFalsy();
+        expect(requested()).toEqual(['/publisher/10.7554/2026-10-01/2026-10-02/0']);
+        expect(
+          structured.publications.map((p) => [p.server, p.preprintDoi, p.publishedDoi]),
+        ).toEqual(PUBLISHER_ELIFE_ROWS.map((r) => ['biorxiv', r.biorxiv_doi, r.published_doi]));
+        expect(structured.pagination).toEqual({ biorxiv: { cursor: 0, total: 5 } });
+        expect(structured.notice).toBe(`${NARROWED} ${FIELDS_ABSENT}`);
+        expect(text).toContain(`${NARROWED} ${FIELDS_ABSENT}`);
+        expect(text).toContain('**bioRxiv:** page offset 0, total 5 (last page)');
+        expect(text).not.toContain('**medRxiv:**');
+      });
+
+      it('with server "biorxiv", queries the same endpoint and does not call it narrowed', async () => {
+        const { structured } = await call({ ...OCT, server: 'biorxiv', publisher: '10.7554' });
+        expect(requested()).toEqual(['/publisher/10.7554/2026-10-01/2026-10-02/0']);
+        expect(structured.publications).toHaveLength(5);
+        expect(structured.notice).toBe(FIELDS_ABSENT);
+      });
+
+      it('carries no journal name, authors, corresponding author, or abstract — include_abstract adds none — on either surface', async () => {
+        const { structured, text } = await call({
+          ...OCT,
+          server: 'biorxiv',
+          publisher: '10.7554',
+          include_abstract: true,
+        });
+        for (const p of structured.publications) {
+          expect(Object.keys(p).sort()).toEqual([
+            'preprintCategory',
+            'preprintDate',
+            'preprintDoi',
+            'preprintTitle',
+            'publishedDate',
+            'publishedDoi',
+            'server',
+          ]);
+        }
+        for (const absent of [
+          '**Journal:**',
+          '**Authors:**',
+          '**Corresponding Author:**',
+          '**Institution:**',
+        ]) {
+          expect(text).not.toContain(absent);
+        }
+        for (const line of [
+          '### Sex-biased expression of enteroendocrine cell-derived hormones contributes to higher fat storage in Drosophila females',
+          '**Preprint DOI:** 10.1101/2025.09.09.675263',
+          '**Server:** biorxiv',
+          '**Published DOI:** 10.7554/eLife.109426.3',
+          '**Published Date:** 2026-10-01',
+          '**Preprint Date:** 2025-09-12',
+          '**Category:** physiology',
+        ]) {
+          expect(text).toContain(line);
+        }
+        expect(text).toContain(FIELDS_ABSENT);
+      });
+
+      it('continues a prefix past 100 rows at nextCursor, ends on its last page, and marks a cursor past it exhausted with no total', async () => {
+        const first = await call({ ...OCT, server: 'biorxiv', publisher: '10.1016', limit: 100 });
+        expect(first.structured.pagination).toEqual({
+          biorxiv: { cursor: 0, total: 401, nextCursor: 100 },
+        });
+        expect(first.structured).toMatchObject({ truncated: true, shown: 100, cap: 100 });
+        expect(first.text).toContain('**bioRxiv:** page offset 0, total 401 — next cursor: 100');
+
+        const second = await call({
+          ...OCT,
+          server: 'biorxiv',
+          publisher: '10.1016',
+          limit: 100,
+          cursor: 100,
+        });
+        expect(second.structured.publications.map((p) => p.preprintDoi)).toEqual(
+          ELSEVIER.slice(100, 200).map((r) => r.biorxiv_doi),
+        );
+        expect(second.structured.pagination.biorxiv).toEqual({
+          cursor: 100,
+          total: 401,
+          nextCursor: 200,
+        });
+
+        const last = await call({ ...OCT, server: 'biorxiv', publisher: '10.1016', cursor: 400 });
+        expect(last.structured.pagination.biorxiv).toEqual({ cursor: 400, total: 401 });
+        expect(last.text).toContain('**bioRxiv:** page offset 400, total 401 (last page)');
+
+        const past = await call({ ...OCT, publisher: '10.1016', cursor: 500 });
+        expect(past.result.isError).toBeFalsy();
+        expect(past.structured.pagination).toEqual({ biorxiv: { cursor: 500, exhausted: true } });
+        expect(past.structured.notice).toMatch(/Cursor 500 is at or past the last row/);
+        expect(past.structured.notice).not.toMatch(/No journal publications found/);
+
+        expect(requested()).toEqual([
+          '/publisher/10.1016/2026-10-01/2026-10-02/0',
+          '/publisher/10.1016/2026-10-01/2026-10-02/100',
+          '/publisher/10.1016/2026-10-01/2026-10-02/400',
+          '/publisher/10.1016/2026-10-01/2026-10-02/500',
+        ]);
+      });
+
+      it('reports total 0 and the empty-interval notice, naming the publisher, for a prefix with no rows', async () => {
+        const { result, structured, text } = await call({ ...OCT, publisher: '10.9999' });
+        expect(result.isError).toBeFalsy();
+        expect(structured.publications).toEqual([]);
+        expect(structured.pagination).toEqual({ biorxiv: { cursor: 0, total: 0 } });
+        const empty =
+          "No journal publications found for publication dates 2026-10-01–2026-10-02 on bioRxiv under publisher prefix 10.9999. Try widening the date range, or check the prefix against one of the publisher's journal DOIs — the part before the slash.";
+        expect(structured.notice).toBe(`${NARROWED} ${empty}`);
+        expect(text).toContain(empty);
+        expect(text).toContain('**bioRxiv:** page offset 0, total 0 (last page)');
+      });
+
+      it('raises invalid_publisher, never an empty page, when upstream does not recognize the prefix', async () => {
+        const ctx = createMockContext({ errors: listTool.errors });
+        const err = await rejection(
+          listTool.handler(listTool.input.parse({ ...OCT, publisher: '10.123456' }), ctx),
+        );
+        expect(err).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'invalid_publisher', publisher: '10.123456' },
+        });
+        expect(err.message).toContain('10.123456');
+        expect(err.message).toMatch(/not an empty result/);
+
+        const { result, text } = await call({ ...OCT, server: 'biorxiv', publisher: '10.123456' });
+        expect(result.isError).toBe(true);
+        expect(text).toContain('invalid_publisher');
+        expect(envelopeHint(result)).toMatch(/part of a journal DOI before the slash/);
+        expect(requested()).toEqual([
+          '/publisher/10.123456/2026-10-01/2026-10-02/0',
+          '/publisher/10.123456/2026-10-01/2026-10-02/0',
+        ]);
+      });
+    });
   });
 });
