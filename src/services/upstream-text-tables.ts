@@ -7,7 +7,9 @@
  * across 14 bioRxiv and medRxiv windows (2021-03 to 2026-09), with glyphs
  * checked against EuropePMC's rendering of the same records. Both tables are
  * closed on purpose: a name or heading missing here passes through verbatim,
- * so a misread can only leave text as upstream sent it, never rewrite it.
+ * so a misread can only leave text as upstream sent it, never rewrite it. Also
+ * the TeX control words opening with `\n`, which the literal line-break reading
+ * leaves as written.
  * @module services/upstream-text-tables
  */
 
@@ -298,3 +300,43 @@ export const SECTION_HEADINGS: readonly string[] = [
  * fuse to words and acronyms (`AimTo`, `AimsSCORE2`), which still split.
  */
 export const GENE_SYMBOL_HEADINGS: ReadonlySet<string> = new Set(['aim', 'aims']);
+
+/**
+ * TeX and LaTeX control words that open with `\n`, so a backslash-`n` that
+ * begins one (`\nabla`, `\neq`, `\nu_0`) is never read as a literal line
+ * break. None appears in the sampled `/details` records — every backslash-`n`
+ * there is a break — but LaTeX does reach upstream text (`\mathrm{F}`), and a
+ * word missing here can only turn that TeX command into a line break.
+ */
+export const TEX_N_COMMANDS: readonly string[] = [
+  'nabla',
+  'natural',
+  'ne',
+  'nearrow',
+  'neg',
+  'neq',
+  'newline',
+  'nexists',
+  'ngeq',
+  'ngtr',
+  'ni',
+  'nleftarrow',
+  'nleq',
+  'nless',
+  'nmid',
+  'noindent',
+  'nolimits',
+  'nonumber',
+  'normalsize',
+  'not',
+  'notin',
+  'nparallel',
+  'nprec',
+  'nrightarrow',
+  'nsim',
+  'nsubseteq',
+  'nsucc',
+  'nsupseteq',
+  'nu',
+  'nwarrow',
+];

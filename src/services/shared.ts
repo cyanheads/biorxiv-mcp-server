@@ -18,6 +18,7 @@ import {
   BRACKET_PLACEHOLDERS,
   GENE_SYMBOL_HEADINGS,
   SECTION_HEADINGS,
+  TEX_N_COMMANDS,
 } from './upstream-text-tables.js';
 
 /** Detect HTML error pages returned instead of JSON by upstream APIs. */
@@ -48,6 +49,15 @@ export function isValidCalendarDate(dateStr: string): boolean {
   );
 }
 
+/**
+ * The DOI prefixes bioRxiv and medRxiv issue preprint DOIs under — both servers
+ * share both, so a prefix never names the server. Cold Spring Harbor
+ * Laboratory Press also registers its journal articles under `10.1101/`
+ * (`10.1101/gr.…`, `gad.…`, `lm.…`), so a DOI here is a preprint DOI or one of
+ * those; any other DOI is a journal article's.
+ */
+export const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'] as const;
+
 /** A preprint DOI reduced to its bare form, plus the revision a version suffix named. */
 export interface NormalizedDoi {
   /** Bare DOI, e.g. `10.64898/2026.03.11.711201`. */
@@ -74,11 +84,31 @@ const DOI_SCHEME_PREFIX = /^doi:\s*/i;
  */
 const ARTICLE_SUFFIX = /(?<=\d)(?:v(\d+))?(?:\.[a-z][\w+-]*)*\/?$/i;
 
+/**
+ * The page-format tabs a journal DOI is pasted with (`.pdf`, `.full`,
+ * `.full.pdf`, `.full-text`, …), compared lowercased. A journal DOI's own
+ * trailing components — `.sa1`, `.g001`, `.t001`, Wiley's `.x` — are none of
+ * these.
+ */
+const PAGE_FORMAT_TABS = new Set([
+  'full',
+  'pdf',
+  'full-text',
+  'pdf+html',
+  'abstract',
+  'article-info',
+  'article-metrics',
+  'supplementary-material',
+]);
+
+/** A `vN` revision ending a journal DOI, after a digit, matched case-insensitively. */
+const JOURNAL_REVISION = /(?<=\d)v(\d+)$/i;
+
 /** `10.` + a registrant code of four or more digits + `/` + a non-empty suffix. */
 const BARE_DOI = /^10\.\d{4,}\/\S+$/;
 
 /**
- * Reduce a pasted preprint reference to its bare DOI. Accepts the bare DOI
+ * Reduce a pasted preprint or journal reference to its bare DOI. Accepts the bare DOI
  * itself, a `https://doi.org/` or `http(s)://dx.doi.org/` resolver URL, a
  * `doi:` label, or a `{www.}{biorxiv,medrxiv}.org/content/` article URL — any
  * of them with a trailing `vN` revision and an article-tab suffix (`.full`,
@@ -87,8 +117,13 @@ const BARE_DOI = /^10\.\d{4,}\/\S+$/;
  * suffix named alongside the DOI, and `undefined` when what is left is not a
  * DOI — callers raise their `invalid_doi_format` on that.
  *
- * A bare DOI passes through unchanged: stripping only ever removes text around
- * a bioRxiv/medRxiv identifier, never characters of one.
+ * On a DOI under {@link BIORXIV_DOI_PREFIXES}, any article-tab suffix is
+ * stripped, only ever as text around the bioRxiv/medRxiv identifier, never
+ * characters of one. Any other DOI is a journal's, whose own trailing
+ * components (`10.7554/eLife.55185.sa1`, `….pone.0123456.g001`, Wiley's `.x`)
+ * name a different record than the DOI without them, so only the page-format
+ * tabs (`.pdf`, `.full`, `.full.pdf`, `.full-text`, …) and a `vN` revision
+ * after a digit are stripped from it, never one of its own components.
  */
 export function normalizeDoi(input: string): NormalizedDoi | undefined {
   let text = input.trim();
@@ -96,7 +131,18 @@ export function normalizeDoi(input: string): NormalizedDoi | undefined {
   text = url
     ? text.slice(url[0].length).replace(/[?#].*$/, '')
     : text.replace(DOI_SCHEME_PREFIX, '');
-  const suffix = ARTICLE_SUFFIX.exec(text);
+  let suffix: RegExpExecArray | null;
+  if (BIORXIV_DOI_PREFIXES.some((prefix) => text.startsWith(prefix))) {
+    suffix = ARTICLE_SUFFIX.exec(text);
+  } else {
+    // Component by component from the end, so the pass stays linear in the input.
+    const parts = text.replace(/\/$/, '').split('.');
+    while (parts.length > 1 && PAGE_FORMAT_TABS.has(parts.at(-1)?.toLowerCase() ?? '')) {
+      parts.pop();
+    }
+    text = parts.join('.');
+    suffix = JOURNAL_REVISION.exec(text);
+  }
   const version = suffix?.[1];
   if (suffix) text = text.slice(0, suffix.index);
   if (!BARE_DOI.test(text)) return;
@@ -200,6 +246,24 @@ const SYMBOL_CODE_POINT = /^[^\p{ASCII}\p{C}]$/u;
 const INLINE_TAG =
   /(?<!<(?:[A-Za-z/!?][^<>]*)?)<\/?(?:i|b|u|em|strong|sub|sup|small|br|p|span|div|a|h[1-6])\b[^>]*>/gi;
 
+/**
+ * A backslash escape left in older bioRxiv text, never following another
+ * backslash (`\\` is TeX's own line break): a literal backslash-`n` — two
+ * characters, not a newline — standing for a line break, unless it opens a TeX
+ * control word (`\nabla`, `\neq`), or a literal backslash-`"` standing for a
+ * double quote. The lookarounds read a bounded number of characters, so one
+ * pass is linear in the text.
+ */
+const LITERAL_ESCAPE = new RegExp(
+  String.raw`(?<!\\)\\(?:"|(?!(?:${TEX_N_COMMANDS.join('|')})(?![A-Za-z]))n)`,
+  'g',
+);
+
+/** What a {@link LITERAL_ESCAPE} match stands for. */
+function unescapeLiteral(match: string): string {
+  return match === '\\"' ? '"' : '\n';
+}
+
 /** A marked-up heading's text as ` Heading: `, or a blank when it held none. */
 function headingLabel(_match: string, heading: string): string {
   const label = heading.trim().replace(/:$/, '');
@@ -235,6 +299,13 @@ function stripInlineTags(text: string): string {
  * into raw title and abstract text, so no upstream markup reaches
  * `structuredContent` or the rendered `content[]`. Handles:
  *
+ * - the two backslash escapes bioRxiv abstracts posted before December 2019
+ *   carry: a literal backslash-`n` (single, paired, or longer runs) read as a
+ *   real line break, and a literal backslash-`"` read as `"` — first, so the
+ *   heading and list handling below sees the breaks. Only in text with no real
+ *   line break, the one form those abstracts use, and never where the
+ *   backslash follows another backslash or a backslash-`n` opens a TeX
+ *   control word (`\nabla`, `\neq`);
  * - whole blocks removed with everything inside: figures (`O_FIG … C_FIG`),
  *   display figures (`O_FIG_DISPLAY_L … C_FIG_DISPLAY`), and tables
  *   (`O_TBL … C_TBL`, caption included) — image refs, `SRC=` paths,
@@ -272,7 +343,8 @@ function stripInlineTags(text: string): string {
  */
 export function normalizeUpstreamText(text: string | undefined): string | undefined {
   if (!text) return;
-  let cleaned = text
+  const unescaped = text.includes('\n') ? text : text.replace(LITERAL_ESCAPE, unescapeLiteral);
+  let cleaned = unescaped
     // Whole blocks — display figures before plain ones, whose lazy match would
     // otherwise stop at the C_FIG inside C_FIG_DISPLAY and strand `_DISPLAY`.
     .replace(/O_FIG_DISPLAY[\s\S]*?C_FIG_DISPLAY/g, ' ')
@@ -446,6 +518,17 @@ export function findRateLimit(errors: readonly unknown[]): { retryAfter?: number
 export function describeWait(seconds: number | undefined): string {
   if (seconds === undefined) return 'a minute or two';
   return seconds === 1 ? '1 second' : `${seconds} seconds`;
+}
+
+/**
+ * A not-found recovery hint for a lookup across `servers`. A call that checked
+ * one server only is first sent to the other, since bioRxiv and medRxiv share
+ * their DOI prefixes; a call that checked both gets `hint` alone.
+ */
+export function notFoundHint(servers: readonly string[], hint: string): string {
+  return servers.length === 1
+    ? `Retry with server="both" — this call checked only ${servers[0]}. ${hint}`
+    : hint;
 }
 
 /**

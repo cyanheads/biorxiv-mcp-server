@@ -444,6 +444,116 @@ describe('normalizeUpstreamText', () => {
     expect(out).toBe('Key messages: • At the base. • A*T to G*C. Results: We edit.');
     expect(out).not.toMatch(/^[-+#>]|\n|\*\*|^\d+\. /);
   });
+
+  // ── Literal backslash-n line breaks ─────────────────────────────────────────
+  // Older bioRxiv abstracts (numeric DOIs, posted before December 2019) mark
+  // their line breaks with the two characters `\` `n` and carry no real newline.
+
+  it('reads paired literal \\n\\n paragraph breaks as line breaks, splitting fused headings', () => {
+    // Live shape: 10.1101/049882 (all five revisions).
+    const raw = String.raw`BackgroundDilp8-mediated inhibition of ecdysone synthesis. We examined early pupal death in certain cases.\n\nResultsOver-expression of activated Ras caused organismal death.\n\nConclusionsOur results reveal a novel checkpoint.`;
+    expect(normalizeUpstreamText(raw)).toBe(
+      'Background: Dilp8-mediated inhibition of ecdysone synthesis. We examined early pupal death in certain cases. Results: Over-expression of activated Ras caused organismal death. Conclusions: Our results reveal a novel checkpoint.',
+    );
+  });
+
+  it('reads single literal \\n breaks inside list markup and longer runs as line breaks', () => {
+    // Live shapes: 10.1101/248419 (single breaks between list items, a run of four
+    // before a figure block) and 10.1101/113506 (a lowercase heading after a break).
+    const list = String.raw`We discuss a new approach.\n\nHighlightsO_LISimple models allow deduction of principles\nC_LIO_LIDetailed models can be accurate\nC_LI\n\n\n\nO_FIG O_LINKSMALLFIG SRC=\"FIGDIR/small/248419_ufig1.gif\">\nView larger version (28K):\norg.highwire.dtl.DTLVardef@1cc6c8b M_FIG Graphical abstract\n\nC_FIG`;
+    expect(normalizeUpstreamText(list)).toBe(
+      'We discuss a new approach. Highlights: • Simple models allow deduction of principles • Detailed models can be accurate',
+    );
+    const lowercase = String.raw`at low vaccine coverage.\n\nsummaryTargeting health care workers decreases outbreak size.`;
+    expect(normalizeUpstreamText(lowercase)).toBe(
+      'at low vaccine coverage. summaryTargeting health care workers decreases outbreak size.',
+    );
+  });
+
+  it('keeps a TeX control word that opens with \\n, and an escaped \\\\, as written', () => {
+    const tex = String.raw`the gradient $\nabla f$, where $a \neq b$ and $\ne c$, with frequency $\nu_0$, $x \notin S$, $\neg p$, row\\next, and \newline here`;
+    expect(normalizeUpstreamText(tex)).toBe(tex);
+    // A TeX word only when its letters end there: `\nuse` and `\nequal` are breaks.
+    expect(
+      normalizeUpstreamText(String.raw`Intro.\n\nNuclear import.\nuse of it.\nequal parts.`),
+    ).toBe('Intro. Nuclear import. use of it. equal parts.');
+  });
+
+  it('leaves text with real line breaks byte-identical, a literal \\n in it included', () => {
+    // Characterization: upstream uses one form or the other, never both in one
+    // field, so text that already carries real line breaks is read as before.
+    const raw = 'Intro.\n\nResultsWe used \\n as a separator.';
+    expect(normalizeUpstreamText(raw)).toBe(String.raw`Intro. Results: We used \n as a separator.`);
+  });
+
+  it('reads a literal \\" as a double quote in the same text', () => {
+    // Live shape: 10.1101/113506 (all three revisions) — quotes escaped beside literal breaks.
+    const raw = String.raw`a transmission model.\n\nResultsWe found that for some outbreaks (we call \"type 1\") HCW amplified transmission. However, in outbreaks with longer time courses (\"type 2 outbreaks\"), reactive community vaccination decreased the number of cases.`;
+    const out = normalizeUpstreamText(raw);
+    expect(out).toBe(
+      'a transmission model. Results: We found that for some outbreaks (we call "type 1") HCW amplified transmission. However, in outbreaks with longer time courses ("type 2 outbreaks"), reactive community vaccination decreased the number of cases.',
+    );
+    expect(out).not.toContain('\\');
+    // A quote escaped in a field with no literal break is the same form.
+    expect(normalizeUpstreamText(String.raw`the \"type 1\" outbreaks`)).toBe(
+      'the "type 1" outbreaks',
+    );
+  });
+
+  it('keeps a \\" after an escaped backslash, and in text with real line breaks, as written', () => {
+    const escaped = String.raw`row\\"quoted`;
+    expect(normalizeUpstreamText(escaped)).toBe(escaped);
+    const raw = 'Intro.\n\nResultsWe call it \\"type 1\\".';
+    expect(normalizeUpstreamText(raw)).toBe(String.raw`Intro. Results: We call it \"type 1\".`);
+  });
+
+  it('leaves text without a backslash byte-identical', () => {
+    // Characterization: titles and recent abstracts carry no backslash at all.
+    const raw = 'Ras signaling in eye discs: a novel post-pupariation checkpoint';
+    expect(normalizeUpstreamText(raw)).toBe(raw);
+  });
+
+  describe('literal \\n conversion runs in linear time', () => {
+    /** Thread CPU microseconds one call takes, the least of three runs. */
+    function cpuMicros(text: string): number {
+      let best = Number.POSITIVE_INFINITY;
+      for (let run = 0; run < 3; run++) {
+        const start = process.threadCpuUsage();
+        normalizeUpstreamText(text);
+        const spent = process.threadCpuUsage(start);
+        best = Math.min(best, spent.user + spent.system);
+      }
+      return best;
+    }
+
+    /** The unit repeated to `chars` characters, then the tail. */
+    const build = (unit: string, chars: number, tail = '') =>
+      unit.repeat(Math.ceil(chars / unit.length)) + tail;
+
+    it.each([
+      ['a long line ending in a real break', '§1 x', '\ny'],
+      ['real breaks throughout', '  \r\n', ''],
+      ['a long line ending in a literal break', '§1 x', String.raw`\ny`],
+      ['literal breaks throughout', String.raw`\n`, ''],
+      ['a repeated TeX prefix with no ending', String.raw`\nabl`, ''],
+      ['a repeated TeX word', String.raw`\ne`, ''],
+      ['escaped backslashes before n', String.raw`\\n`, ''],
+      ['a long line ending in a literal quote', '§1 x', String.raw`\"y`],
+      ['literal quotes throughout', String.raw`\"`, ''],
+      ['escaped backslashes before a quote', String.raw`\\"`, ''],
+    ])('%s: 5k → 320k characters', (_shape, unit, tail) => {
+      const timings: number[] = [];
+      for (let chars = 5_000; chars <= 320_000; chars *= 2) {
+        const micros = cpuMicros(build(unit, chars, tail));
+        expect(micros).toBeLessThan(250_000);
+        timings.push(micros);
+      }
+      const first = Math.max(timings[0] ?? 1, 1);
+      const last = timings.at(-1) ?? 0;
+      // The conversion scales linearly with input size.
+      expect(last / first).toBeLessThan(256);
+    });
+  });
 });
 
 describe('escapeMarkdown', () => {
@@ -919,6 +1029,94 @@ describe('normalizeDoi', () => {
   it('leaves a v that does not follow a digit, or has no digits after it, in place', () => {
     expect(normalizeDoi('10.1234/abcv2')).toEqual({ doi: '10.1234/abcv2' });
     expect(normalizeDoi(`${BARE}v`)).toEqual({ doi: `${BARE}v` });
+  });
+
+  // A journal's component DOIs (peer-review reports, figures, tables, Wiley's
+  // `.x`) end in a `.`-component of the DOI itself; stripping it names the
+  // parent record.
+  it.each([
+    '10.7554/eLife.55185.sa1',
+    '10.7554/eLife.55185.sa2',
+    '10.1371/journal.pone.0123456.g001',
+    '10.1371/journal.pone.0123456.t001',
+    '10.1111/j.1365-2958.2006.05172.x',
+    '10.21203/rs.3.rs-123456/v1',
+  ])('keeps the suffix of a journal DOI: %s', (doi) => {
+    expect(normalizeDoi(doi)).toEqual({ doi });
+    expect(normalizeDoi(`https://doi.org/${doi}`)).toEqual({ doi });
+  });
+
+  // A journal DOI pasted with a page-format or revision suffix still names the
+  // article: those suffixes are never part of a registered DOI.
+  it.each([
+    ['10.1016/j.cell.2020.01.001.pdf', { doi: '10.1016/j.cell.2020.01.001' }],
+    ['10.1016/j.cell.2020.01.001.full', { doi: '10.1016/j.cell.2020.01.001' }],
+    ['10.1016/j.cell.2020.01.001.full.pdf', { doi: '10.1016/j.cell.2020.01.001' }],
+    ['10.1016/j.cell.2020.01.001.full-text', { doi: '10.1016/j.cell.2020.01.001' }],
+    ['10.1016/j.cell.2020.01.001.Full.PDF/', { doi: '10.1016/j.cell.2020.01.001' }],
+    ['10.3389/fimmu.2020.01234.full', { doi: '10.3389/fimmu.2020.01234' }],
+    ['10.1186/s13059-020-02154-5.pdf', { doi: '10.1186/s13059-020-02154-5' }],
+    ['10.1038/s41586-020-2012-7v2', { doi: '10.1038/s41586-020-2012-7', version: '2' }],
+    ['10.1038/s41586-020-2012-7v2.full', { doi: '10.1038/s41586-020-2012-7', version: '2' }],
+    ['10.5281/zenodo.1234567V3.pdf', { doi: '10.5281/zenodo.1234567', version: '3' }],
+    ['10.7554/eLife.55185.sa1.pdf', { doi: '10.7554/eLife.55185.sa1' }],
+    ['10.1111/j.1365-2958.2006.05172.x.pdf', { doi: '10.1111/j.1365-2958.2006.05172.x' }],
+  ])('strips the page-format or revision suffix from journal DOI %s', (input, expected) => {
+    expect(normalizeDoi(input)).toEqual(expected);
+    expect(normalizeDoi(`https://doi.org/${input}`)).toEqual(expected);
+  });
+
+  describe('reads a journal DOI suffix in linear time', () => {
+    /** Thread CPU microseconds one call takes, the least of three runs. */
+    function cpuMicros(text: string): number {
+      let best = Number.POSITIVE_INFINITY;
+      for (let run = 0; run < 3; run++) {
+        const start = process.threadCpuUsage();
+        normalizeDoi(text);
+        const spent = process.threadCpuUsage(start);
+        best = Math.min(best, spent.user + spent.system);
+      }
+      return best;
+    }
+
+    /** A journal DOI whose suffix is the unit repeated to `chars` characters, then the tail. */
+    const build = (unit: string, chars: number, tail = '') =>
+      `10.1016/j${unit.repeat(Math.ceil(chars / unit.length))}${tail}`;
+
+    it.each([
+      ['a long line ending in a real break', '§1 x', '\ny'],
+      ['real breaks throughout', '  \r\n', ''],
+      ['page-format suffixes throughout', '.pdf', ''],
+      ['page-format suffixes ending in another component', '.pdf', '.x'],
+      ['revision-like runs ending in a letter', '1v1', 'x'],
+    ])('%s: 5k → 320k characters', (_shape, unit, tail) => {
+      const timings: number[] = [];
+      for (let chars = 5_000; chars <= 320_000; chars *= 2) {
+        const micros = cpuMicros(build(unit, chars, tail));
+        expect(micros).toBeLessThan(250_000);
+        timings.push(micros);
+      }
+      const first = Math.max(timings[0] ?? 1, 1);
+      const last = timings.at(-1) ?? 0;
+      // Reading the suffix scales linearly with input size.
+      expect(last / first).toBeLessThan(256);
+    });
+  });
+
+  it.each([
+    ['10.1038/nature12373/', '10.1038/nature12373'],
+    ['https://doi.org/10.1038/S41586-020-2380-Z/', '10.1038/S41586-020-2380-Z'],
+    ['doi: 10.7554/eLife.55185.sa1/', '10.7554/eLife.55185.sa1'],
+  ])('drops only the trailing slash from a journal DOI: %s', (input, doi) => {
+    expect(normalizeDoi(input)).toEqual({ doi });
+  });
+
+  it.each([
+    ['10.1101/2020.03.21.990770v2', { doi: '10.1101/2020.03.21.990770', version: '2' }],
+    ['10.1101/2020.03.21.990770v1.full', { doi: '10.1101/2020.03.21.990770', version: '1' }],
+    ['https://doi.org/10.1101/2020.03.21.990770', { doi: '10.1101/2020.03.21.990770' }],
+  ])('still strips the article-page suffix from a preprint DOI: %s', (input, expected) => {
+    expect(normalizeDoi(input)).toEqual(expected);
   });
 
   it.each([
