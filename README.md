@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -38,8 +38,8 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 | `biorxiv_get_preprint` | Fetch full metadata, abstract, revision history, and journal crosswalk for one or more preprints by DOI |
 | `biorxiv_list_recent` | List preprints posted or updated within a date interval, with optional server, category, and funder filters |
 | `biorxiv_search_preprints` | Search preprints by keyword and/or author via EuropePMC for relevance ranking, enriched with bioRxiv/medRxiv metadata |
-| `biorxiv_get_published_version` | Resolve a preprint DOI to its journal publication record (journal DOI, name, published date) |
-| `biorxiv_list_published_versions` | List preprints that appeared as journal articles within a journal publication-date interval, whenever they were posted |
+| `biorxiv_get_published_version` | Resolve a preprint DOI to its journal publication record (journal DOI, name, published date), or a journal article's DOI to the preprint it was posted as |
+| `biorxiv_list_published_versions` | List preprints that appeared as journal articles within a journal publication-date interval, whenever they were posted, optionally from one publisher |
 | `biorxiv_get_fulltext` | Retrieve a preprint's full text as best-effort Markdown extracted from its rendered HTML article page |
 | `biorxiv_list_categories` | List valid subject category strings for bioRxiv and medRxiv |
 
@@ -49,7 +49,8 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 
 - Takes DOIs bare or pasted (`https://doi.org/…`, `doi:…`, a `biorxiv.org`/`medrxiv.org` article URL, a `vN` or `.full` suffix), scoped to `biorxiv`, `medrxiv`, or `both` (default `both`)
 - Accepts up to 200 entries and looks up the first 10 distinct DOIs; the rest come back in `unprocessed[]` to pass in another call. A repeated DOI is looked up once, and every list keeps input order
-- Each preprint returns its full revision history in `revisions[]` — title, authors, abstract, category, license, `awards`, `jatsxmlUrl`, and `publishedJournalDoi` once accepted. Funder names are omitted because the upstream API misattributes them
+- Each preprint returns its full revision history in `revisions[]` — title, authors, category, license, `awards`, `jatsxmlUrl`, `publishedJournalDoi` once accepted, and the `server` it was found on (`biorxiv` or `medrxiv`, ready to pass back as `server`). Funder names are omitted because the upstream API misattributes them
+- The abstract sits on the latest revision only: the upstream API keeps one abstract per preprint. An earlier revision's own abstract is on its article page, through `biorxiv_get_fulltext` with `version`
 - A DOI that fails lands in `failed[]` with a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag; `not_found` only when every attempted server answered
 
 ---
@@ -58,7 +59,7 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 
 - Takes a `start_date`/`end_date` interval, `server` (default `both`), and optional `category` (a value from `biorxiv_list_categories`) and bioRxiv-only `funder` (a ROR ID) filters; a filter that cannot be applied raises `invalid_category` or `invalid_funder`
 - Pages of 30 advance with an integer `cursor`, tracked per server (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); a cursor past the last page is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
-- Abstracts are omitted by default; `include_abstract: true` adds them
+- Abstracts are omitted by default; `include_abstract: true` adds them. Each is the preprint's latest-revision abstract, even on a row for an earlier revision
 
 ---
 
@@ -72,8 +73,9 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 
 ### `biorxiv_get_published_version` <sub>tool</sub>
 
-- Takes one preprint DOI and `server` (default `both`); `10.64898/` DOIs resolve through the preprint's own journal DOI
-- Returns journal DOI, journal name, published date, corresponding-author institution, and the `server` that answered; if no server answers it raises a retryable `upstream_unavailable` or `rate_limited`, never `doi_not_found`
+- Takes one DOI and `server` (default `both`): a preprint DOI (`10.1101/`, `10.64898/`), or a journal article's DOI, which resolves to the preprint it was posted as (`10.1016/j.cell.2020.01.001` → `10.1101/614172`); `10.64898/` DOIs resolve through the preprint's own journal DOI
+- Returns the preprint DOI, journal DOI, journal name, published date, corresponding-author institution, and the `server` that answered; if no server answers it raises a retryable `upstream_unavailable` or `rate_limited`, never `doi_not_found`
+- Cold Spring Harbor Laboratory Press journal DOIs (`10.1101/gr.…`, `gad.…`, `lm.…`) share the preprint prefix and cannot be resolved by DOI
 
 ---
 
@@ -81,6 +83,7 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 
 - Takes a `start_date`/`end_date` interval of journal publication dates and `server` (default `both`); each row matches the record `biorxiv_get_published_version` returns, and may be a preprint posted years earlier
 - Returns `limit` rows per server (default 25, up to the API's 100-row page) from an integer `cursor`, continued at each server's `nextCursor`; a cursor past the last row is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
+- Optional `publisher`, a journal DOI prefix (`10.7554` for eLife), lists only the bioRxiv preprints published under it; `server: "both"` queries bioRxiv alone, and `server: "medrxiv"` or a prefix the API does not recognize raises `invalid_publisher`. These rows carry no journal name, authors, or abstract
 - Abstracts are omitted by default; `include_abstract: true` adds them
 
 ---
