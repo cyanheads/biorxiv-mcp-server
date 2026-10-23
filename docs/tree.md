@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-10-15 12:23:16
+Generated on: 2026-10-23 17:28:59
 
 ```text
 biorxiv-mcp-server/
@@ -174,8 +174,13 @@ biorxiv-mcp-server/
 │   ├── fixtures/
 │   │   └── highwire/
 │   │       ├── biorxiv-015347v1.html
+│   │       ├── biorxiv-336701v1.html
 │   │       ├── biorxiv-596311v1.html
-│   │       └── medrxiv-20062463v1.html
+│   │       ├── biorxiv-627082v3.html
+│   │       ├── biorxiv-736350v1.html
+│   │       ├── medrxiv-20062463v1.html
+│   │       ├── medrxiv-26361261v1.html
+│   │       └── medrxiv-26361515v1.html
 │   ├── helpers/
 │   │   ├── call-budget.ts
 │   │   ├── highwire-fixtures.ts
@@ -210,7 +215,8 @@ biorxiv-mcp-server/
 │       ├── biorxiv-search-preprints.rate-limit.test.ts
 │       ├── biorxiv-search-preprints.tool.test.ts
 │       ├── doi-input.test.ts
-│       └── funder-awards.test.ts
+│       ├── funder-awards.test.ts
+│       └── multi-slash-doi.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

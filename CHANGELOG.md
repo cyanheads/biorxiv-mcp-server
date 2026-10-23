@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-23
+
+biorxiv_get_published_version resolves a journal article's DOI to its preprint, biorxiv_list_published_versions filters by publisher DOI prefix, and biorxiv_get_fulltext renders figures, references, and formulas once. Only the latest revision carries an abstract, and record server is lowercase.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-17
 
 Every tool call runs its upstream requests on one 50 s budget, so a hung origin ends in a classified error before a client's 60 s timeout. biorxiv_get_preprint and biorxiv_search_preprints serve their per-call cap instead of rejecting an oversized request, and biorxiv_list_published_versions takes a limit (default 25).
