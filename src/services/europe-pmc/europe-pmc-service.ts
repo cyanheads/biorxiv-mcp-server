@@ -10,7 +10,9 @@
  * Detects HTML error pages, retries an HTTP 200 body that carries no result
  * list, and classifies an origin rate limit (HTTP 429) as its own retryable
  * `rate_limited` condition carrying the parsed `Retry-After` wait — never the
- * upstream response body.
+ * upstream response body. A cursor page that fails every attempt the way a
+ * malformed `cursorMark` does is told apart from an outage by one request for
+ * the same query's first page.
  * @module services/europe-pmc/europe-pmc-service
  */
 
@@ -23,7 +25,7 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, type RetryAttempt } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
   type CallDeadline,
@@ -31,6 +33,7 @@ import {
   detectHtmlError,
   normalizeUpstreamText,
   parseRetryAfterSeconds,
+  remainingBudgetMs,
   retryWithinBudget,
   SERVER_VERSION,
 } from '@/services/shared.js';
@@ -49,26 +52,68 @@ const EXPECTED_STATUSES = [429];
 
 /**
  * `data.reason` on the error thrown for an HTTP 200 body with no `resultList`.
- * EuropePMC answers some requests with only `{"version":"6.9"}` — intermittently
- * for a valid first page or cursor page, and on every attempt for a malformed
- * `cursorMark`. Read as data, the body becomes a zero-result page, so it is
- * thrown as a transient `ServiceUnavailable` inside `withRetry` instead.
+ * EuropePMC answers some requests with only `{"version":"6.9"}`, intermittently
+ * for a valid first page or cursor page. Read as data, the body becomes a
+ * zero-result page, so it is thrown as a transient `ServiceUnavailable` inside
+ * `withRetry` instead.
  */
 const EMPTY_BODY_REASON = 'empty_response_body';
+
+/**
+ * How one failed attempt reads if a malformed `cursorMark` caused it — HTTP 503
+ * or the empty body — or `undefined` for a failure no malformed token produces.
+ */
+function tokenFailure(err: unknown): string | undefined {
+  if (!(err instanceof McpError)) return;
+  const data = err.data as { reason?: unknown; status?: unknown } | undefined;
+  if (data?.reason === EMPTY_BODY_REASON) return 'came back with no result list';
+  if (data?.status === 503) return 'failed with HTTP 503';
+  return;
+}
+
+/**
+ * The `invalid_cursor_mark` error a cursor page's failure becomes if the token
+ * is to blame, or `undefined` when the failure is not one a malformed token
+ * produces. EuropePMC answers a `cursorMark` it does not recognize on every
+ * attempt — with its generic outage answer, HTTP 503, and earlier with the
+ * empty body — so only a ladder that ran every attempt and failed each one of
+ * those two ways qualifies; `answers` holds how they failed, and is `undefined`
+ * once any attempt failed some other way. Only the same query's first page
+ * answering (see `EuropePmcService.firstPageAnswers`) then settles that the
+ * token was at fault. A ladder the budget cut short ends on
+ * `retry_deadline_exceeded` and no `status`, so it never qualifies: the
+ * attempts that did not run might have answered.
+ *
+ * The message is written here rather than kept from the exhausted error, whose
+ * `(failed after N attempts)` suffix would reach the caller inside the tool's
+ * message; the count is in `data.retryAttempts`.
+ */
+function asInvalidCursorMark(
+  err: unknown,
+  cursorMark: string,
+  answers: ReadonlySet<string> | undefined,
+): McpError | undefined {
+  if (!answers || !tokenFailure(err)) return;
+  const { retryAttempts } = (err as McpError).data as { retryAttempts?: unknown };
+  if (typeof retryAttempts !== 'number') return;
+  return validationError(
+    `EuropePMC did not recognize the supplied cursor_mark — ${retryAttempts} consecutive attempts ${[...answers].join(' or ')}, while the first page of the same query answered.`,
+    { reason: 'invalid_cursor_mark', cursor_mark: cursorMark, retryAttempts },
+    { cause: err },
+  );
+}
 
 /**
  * Re-throws a failed EuropePMC call with the two conditions this service
  * classifies itself:
  *
- * - an empty body that outlasted every retry — a caller error when a cursor
- *   page was requested (`invalid_cursor_mark`), an upstream failure on a first
- *   page, which has no caller input to blame;
+ * - an empty body that outlasted every retry, as an upstream failure;
  * - HTTP 429, as its own retryable `rate_limited` condition.
  *
  * Everything else — 5xx, timeout, network error, the HTML-error guard below —
  * re-throws untouched for the framework's auto-classifier.
  *
- * The empty-body errors are built fresh rather than re-thrown: `withRetry`
+ * The empty-body error is built fresh rather than re-thrown: `withRetry`
  * suffixes an exhausted error's message with `(failed after N attempts)`, and
  * that wording would otherwise reach the caller inside the tool's message. The
  * attempt count moves to `data.retryAttempts`.
@@ -80,7 +125,7 @@ const EMPTY_BODY_REASON = 'empty_response_body';
  * and fails fast when the requested wait exceeds its cap, so by the time a 429
  * reaches here the waiting is over and only classification is left.
  */
-function rethrowClassified(err: unknown, cursorMark: string): never {
+function rethrowClassified(err: unknown): never {
   const data =
     err instanceof McpError
       ? (err.data as
@@ -92,16 +137,8 @@ function rethrowClassified(err: unknown, cursorMark: string): never {
     // Always set: the empty body is transient, so it only escapes `withRetry`
     // exhausted, and exhaustion is what attaches the count.
     const retryAttempts = data.retryAttempts as number;
-    const tries = `${retryAttempts} consecutive attempts`;
-    if (cursorMark !== '*') {
-      throw validationError(
-        `EuropePMC did not recognize the supplied cursor_mark — ${tries} came back with no result list.`,
-        { reason: 'invalid_cursor_mark', cursor_mark: cursorMark, retryAttempts },
-        { cause: err },
-      );
-    }
     throw serviceUnavailable(
-      `EuropePMC answered ${tries} with HTTP 200 and no result list.`,
+      `EuropePMC answered ${retryAttempts} consecutive attempts with HTTP 200 and no result list.`,
       { reason: EMPTY_BODY_REASON, retryAttempts },
       { cause: err },
     );
@@ -164,10 +201,15 @@ export class EuropePmcService {
    * firstPublicationDate), which carries no abstract — see `getAbstracts`.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
    * A body with no result list is retried; if every attempt returns one, throws
-   * `ValidationError` (`invalid_cursor_mark`) when a cursor page other than `*`
-   * was requested, and `ServiceUnavailable` (`empty_response_body`) otherwise.
-   * A deadline that runs out first is a `Timeout` expiry either way: fewer
-   * attempts than the full ladder do not establish that the cursor is at fault.
+   * `ServiceUnavailable` (`empty_response_body`).
+   *
+   * On a cursor page other than `*`, a ladder that every attempt failed with
+   * HTTP 503 or the empty body sends one more request, unretried: the same
+   * query's first page. When that answers, throws `ValidationError`
+   * (`invalid_cursor_mark`) — four requests plus one; otherwise the ladder's
+   * own failure. A deadline that runs out first is a `Timeout` expiry either
+   * way: fewer attempts than the full ladder do not establish that the cursor
+   * is at fault.
    */
   async search(
     options: SearchOptions,
@@ -220,9 +262,22 @@ export class EuropePmcService {
 
     const url = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
 
+    // How each attempt failed, while every one failed the way a malformed token
+    // does; cleared for good by any other failure, so a ladder that merely ended
+    // on an HTTP 503 or the empty body is never checked against the first page.
+    let tokenAnswers: Set<string> | undefined = new Set();
+    const observed =
+      (attempt: (a: RetryAttempt) => Promise<EuropePmcSearchResult>) => (a: RetryAttempt) =>
+        attempt(a).catch((err: unknown) => {
+          const answer = tokenFailure(err);
+          if (answer) tokenAnswers?.add(answer);
+          else tokenAnswers = undefined;
+          throw err;
+        });
+
     try {
       return await retryWithinBudget(
-        async ({ signal, remainingMs }) => {
+        observed(async ({ signal, remainingMs }) => {
           const response = await fetchWithTimeout(url, Math.min(20_000, remainingMs), ctx, {
             signal,
             headers: { 'User-Agent': this.userAgent },
@@ -260,7 +315,7 @@ export class EuropePmcService {
             // callers read "no field" as "no more pages".
             ...(data.nextCursorMark && { nextCursorMark: data.nextCursorMark }),
           };
-        },
+        }),
         {
           operation: 'EuropePmcService.search',
           context: ctx,
@@ -270,7 +325,44 @@ export class EuropePmcService {
         },
       );
     } catch (err) {
-      rethrowClassified(err, cursorMark);
+      const invalidCursor =
+        cursorMark === '*' ? undefined : asInvalidCursorMark(err, cursorMark, tokenAnswers);
+      if (invalidCursor) {
+        params.set('cursorMark', '*');
+        params.set('pageSize', '1');
+        const firstPageUrl = `${this.baseUrl}/search?${params.toString()}&filter=${filterParam}`;
+        if (await this.firstPageAnswers(firstPageUrl, deadline, ctx)) throw invalidCursor;
+      }
+      rethrowClassified(err);
+    }
+  }
+
+  /**
+   * Whether EuropePMC answers a first-page search right now: one request, never
+   * retried, timed out at 20 s or what is left of the call's budget, and not
+   * sent at all once that budget is spent. A miss of any kind — a status, the
+   * empty body, a page that is not JSON, a network error, the timeout — is
+   * `false`; retrying would only add requests against an origin that may be in
+   * outage. A caller cancellation is re-thrown, never read as a miss.
+   */
+  private async firstPageAnswers(
+    url: string,
+    deadline: CallDeadline,
+    ctx: Context,
+  ): Promise<boolean> {
+    const budgetMs = remainingBudgetMs(deadline);
+    if (budgetMs === 0) return false;
+    try {
+      const response = await fetchWithTimeout(url, Math.min(20_000, budgetMs), ctx, {
+        signal: ctx.signal,
+        headers: { 'User-Agent': this.userAgent },
+        expectedStatuses: EXPECTED_STATUSES,
+      });
+      const data = JSON.parse(await response.text()) as RawEuropePmcSearchResponse | null;
+      return data?.resultList != null;
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      return false;
     }
   }
 
@@ -338,8 +430,7 @@ export class EuropePmcService {
         },
       );
     } catch (err) {
-      // No cursor: an empty body that outlasts the retries is an upstream failure.
-      rethrowClassified(err, '*');
+      rethrowClassified(err);
     }
   }
 }

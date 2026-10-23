@@ -1,6 +1,7 @@
 /**
  * @fileoverview biorxiv_search_preprints end to end against EuropePMC's
- * empty-body response (HTTP 200, `{"version":"6.9"}` only). Only
+ * empty-body response (HTTP 200, `{"version":"6.9"}` only) and the HTTP 503 it
+ * answers a malformed cursor with. Only
  * `globalThis.fetch` for the EuropePMC origin is faked — the real
  * `fetchWithTimeout`, `withRetry`, `EuropePmcService` classification, tool
  * handler, `format()`, and error envelope all run, so both client surfaces
@@ -72,10 +73,37 @@ function answerWith(...bodies: unknown[]): void {
   });
 }
 
+/** EuropePMC's outage answer — also what it sends for a malformed cursor (captured live). */
+function outage(): Response {
+  return Response.json(
+    { errCode: 503, errMsg: 'Search service is temporarily unavailable. Please retry later.' },
+    { status: 503 },
+  );
+}
+
+/** Answer cursor-page requests with `cursorPage`, `cursorMark=*` requests with `firstPage`. */
+function answerPages(
+  cursorPage: (request: Request) => Response | Promise<Response>,
+  firstPage: (request: Request) => Response | Promise<Response>,
+): void {
+  http.route({
+    match: (request) => new URL(request.url).hostname === 'www.ebi.ac.uk',
+    respond: (request) =>
+      new URL(request.url).searchParams.get('cursorMark') === '*'
+        ? firstPage(request)
+        : cursorPage(request),
+  });
+}
+
+/** The `cursorMark` of every EuropePMC request sent, in order. */
+function sentPages(): (string | null)[] {
+  return http.calls.map((call) => new URL(call.request.url).searchParams.get('cursorMark'));
+}
+
 /** Run the tool through its contract boundary while fake timers skip the backoff. */
-async function run(input: Record<string, unknown>) {
+async function run(input: Record<string, unknown>, signal?: AbortSignal) {
   const pending = runToolContract(biorxivSearchPreprintsTool, input as never, {
-    context: { errors: biorxivSearchPreprintsTool.errors },
+    context: { errors: biorxivSearchPreprintsTool.errors, ...(signal && { signal }) },
   });
   await vi.runAllTimersAsync();
   return pending;
@@ -144,7 +172,10 @@ describe('biorxiv_search_preprints — EuropePMC empty-body responses', () => {
   });
 
   it('raises invalid_cursor_mark for a cursor EuropePMC never recognizes (#43)', async () => {
-    answerWith(EMPTY_BODY);
+    answerPages(
+      () => Response.json(EMPTY_BODY),
+      () => Response.json(POPULATED_BODY),
+    );
     const result = await run({ query: 'crispr', cursor_mark: 'garbage!!!' });
 
     expect(result.isError).toBe(true);
@@ -164,7 +195,92 @@ describe('biorxiv_search_preprints — EuropePMC empty-body responses', () => {
     expect(rendered).toContain('Recovery:');
     expect(rendered).toContain('nextCursorMark');
     expect(rendered).toContain('(reason invalid_cursor_mark · not retryable)');
-    expect(http.calls).toHaveLength(4);
+    expect(sentPages()).toEqual(['garbage!!!', 'garbage!!!', 'garbage!!!', 'garbage!!!', '*']);
+  });
+
+  it('raises search_unavailable when the empty body persists on the first page too', async () => {
+    answerPages(
+      () => Response.json(EMPTY_BODY),
+      () => Response.json(EMPTY_BODY),
+    );
+    const result = await run({ query: 'crispr', cursor_mark: 'garbage!!!' });
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data.reason).toBe('search_unavailable');
+    expect(error.message).toContain('no result list');
+    expect(text(result)).toContain('(reason search_unavailable)');
+    expect(sentPages()).toEqual(['garbage!!!', 'garbage!!!', 'garbage!!!', 'garbage!!!', '*']);
+  });
+
+  // ── #72: a malformed cursor answered HTTP 503 ──────────────────────────────
+
+  it('raises invalid_cursor_mark for a cursor answered HTTP 503 while the first page answers', async () => {
+    answerPages(outage, () => Response.json(POPULATED_BODY));
+    const result = await run({ query: 'CRISPR', cursor_mark: 'garbage' });
+
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({
+      reason: 'invalid_cursor_mark',
+      cursor_mark: 'garbage',
+      retryable: false,
+    });
+    expect(error.message).toContain('cursor_mark');
+    expect(error.message).toContain('HTTP 503');
+    expect(error.message).not.toContain('failed after');
+    expect((error.data.recovery as { hint: string }).hint).toContain('nextCursorMark');
+    const rendered = text(result);
+    expect(rendered).toContain('HTTP 503');
+    expect(rendered).toContain('nextCursorMark');
+    expect(rendered).toContain('(reason invalid_cursor_mark · not retryable)');
+    expect(rendered).not.toContain('search_unavailable');
+    expect(sentPages()).toEqual(['garbage', 'garbage', 'garbage', 'garbage', '*']);
+  });
+
+  it('keeps search_unavailable for a cursor answered HTTP 503 when the first page fails too', async () => {
+    answerPages(outage, outage);
+    const result = await run({ query: 'CRISPR', cursor_mark: 'garbage' });
+
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data.reason).toBe('search_unavailable');
+    expect(error.message).toContain('Status: 503');
+    const rendered = text(result);
+    expect(rendered).toContain('Status: 503');
+    expect(rendered).toContain('(reason search_unavailable)');
+    expect(rendered).toContain('biorxiv_list_recent');
+    expect(sentPages()).toEqual(['garbage', 'garbage', 'garbage', 'garbage', '*']);
+  });
+
+  it('keeps search_unavailable for a first page answered HTTP 503, with no extra request', async () => {
+    answerPages(outage, outage);
+    const result = await run({ query: 'CRISPR' });
+    expect(errorOf(result).data.reason).toBe('search_unavailable');
+    expect(text(result)).toContain('(reason search_unavailable)');
+    expect(sentPages()).toEqual(['*', '*', '*', '*']);
+  });
+
+  it('reports a cancellation during the first-page request as a cancellation on both surfaces', async () => {
+    const caller = new AbortController();
+    answerPages(outage, (request) => {
+      caller.abort(new Error('cancelled by caller'));
+      return new Promise((_resolve, reject) => {
+        if (request.signal.aborted) reject(request.signal.reason);
+        request.signal.addEventListener('abort', () => reject(request.signal.reason));
+      });
+    });
+    const result = await run({ query: 'CRISPR', cursor_mark: 'garbage' }, caller.signal);
+
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error.data?.reason).toBeUndefined();
+    expect(error.message).toContain('was aborted');
+    const rendered = text(result);
+    expect(rendered).toContain('was aborted');
+    expect(rendered).not.toContain('search_unavailable');
+    expect(rendered).not.toContain('invalid_cursor_mark');
+    expect(sentPages()).toHaveLength(5);
   });
 
   it('treats cursor_mark "*" as a first page — search_unavailable, never invalid_cursor_mark', async () => {
