@@ -1,27 +1,49 @@
 /**
  * @fileoverview Trimmed bioRxiv/medRxiv article pages for full-text extraction
  * tests, kept as HTML under `tests/fixtures/highwire/`. Each is an excerpt of a
- * captured Highwire page — a few paragraphs, the table blocks, and a handful of
- * reference entries — with the markup copied verbatim: `a.xref-bibr` /
- * `a.xref-fig` / `a.xref-table` labels (parenthesized, italic, and superscript),
- * `div.ref-list` entries with `div.cit-metadata` and `.cit-extra` link-outs, and
- * the `div.table` caption + `table-expand-popup` block that stands in for a
- * table's cells. Each fixture lists what extraction must keep, so a test can
- * assert every reference and label rather than a sample.
+ * captured Highwire page — a few paragraphs, figure and table blocks, and a
+ * handful of reference entries — with the markup copied verbatim: `a.xref-bibr`
+ * / `a.xref-fig` / `a.xref-table` labels (parenthesized, italic, and
+ * superscript), `div.fig` blocks whose image link and image repeat the caption
+ * in `title` and `alt`, `div.ref-list` entries with `span.ref-label`,
+ * `div.cit-metadata`, and `.cit-extra` link-outs, the `div.table` caption +
+ * `table-expand-popup` block that stands in for a table's cells, and
+ * `span.disp-formula` images set inside paragraphs. Each fixture lists what
+ * extraction must keep, so a test can assert every reference, label, figure,
+ * and formula rather than a sample.
  * @module tests/helpers/highwire-fixtures
  */
 
 import { readFileSync } from 'node:fs';
 
+/** One figure image and how it must render. */
+export interface FixtureFigure {
+  /** The image's alt text: the figure's printed label, without trailing punctuation. */
+  alt: string;
+  /** A phrase of the figure's caption, which the Markdown must carry exactly once. Absent for a figure that prints no caption. */
+  caption?: string;
+  src: string;
+}
+
 /** One trimmed article page and the facts extraction must preserve from it. */
 export interface HighwireFixture {
   doi: string;
+  /** Every figure image on the page, in page order. */
+  figures: FixtureFigure[];
+  /** The image URL of every display formula on the page, in page order. */
+  formulas: string[];
   html: string;
   /** Every inline citation, figure, and table label, as the page prints it in context. */
   labels: string[];
   /** DOIs the reference link-outs carry. */
   referenceDois: string[];
-  /** The title of every reference entry in the fixture's reference list. */
+  /**
+   * How each reference entry opens in the Markdown, in page order: the list's
+   * own number when the printed labels count up one by one, otherwise a bullet
+   * and the printed label.
+   */
+  referenceMarkers: string[];
+  /** The title of every reference entry in the fixture's reference lists. */
   referenceTitles: string[];
   server: 'biorxiv' | 'medrxiv';
   /** The article page the HTML was captured from. */
@@ -37,13 +59,31 @@ const load = (name: string): string =>
 const popup = (host: string, id: string) =>
   `https://www.${host}.org/highwire/markup/${id}/expansion?width=1000&height=500&iframe=true&postprocessors=highwire_tables%2Chighwire_reclass%2Chighwire_figures%2Chighwire_math%2Chighwire_inline_linked_media%2Chighwire_embed`;
 
-/** bioRxiv 10.1101/2020.03.30.015347 v1 — italic parenthesized numeric citations and one table. */
+/**
+ * bioRxiv 10.1101/2020.03.30.015347 v1 — italic parenthesized numeric citations,
+ * one table, two figures whose image-link titles hold no `)`, and a reference
+ * excerpt labelled 1–3, 16, 17.
+ */
 export const BIORXIV_015347: HighwireFixture = {
   server: 'biorxiv',
   doi: '10.1101/2020.03.30.015347',
   version: '1',
   sourceUrl: 'https://www.biorxiv.org/content/10.1101/2020.03.30.015347v1.full',
   html: load('biorxiv-015347v1.html'),
+  formulas: [],
+  figures: [
+    {
+      alt: 'Figure S2',
+      src: 'https://www.biorxiv.org/content/biorxiv/early/2020/03/31/2020.03.30.015347/F5.medium.gif',
+      caption: 'Ferrets inoculated with F13-E virus or CTan-H virus were euthanized on day 13 p.i.',
+    },
+    {
+      alt: 'Figure S4',
+      src: 'https://www.biorxiv.org/content/biorxiv/early/2020/03/31/2020.03.30.015347/F7.medium.gif',
+      caption: 'Eight ferrets were inoculated intratracheally with 10<sup>5</sup> PFU of CTan-H.',
+    },
+  ],
+  referenceMarkers: ['- 1.', '- 2.', '- 3.', '- 16.', '- 17.'],
   referenceTitles: [
     'SARS-CoV-2 Viral Load in Upper Respiratory Specimens of Infected Patients',
     'A Novel Coronavirus from Patients with Pneumonia in China, 2019',
@@ -75,6 +115,9 @@ export const BIORXIV_596311: HighwireFixture = {
   version: '1',
   sourceUrl: 'https://www.biorxiv.org/content/10.1101/2024.05.28.596311v1.full',
   html: load('biorxiv-596311v1.html'),
+  formulas: [],
+  figures: [],
+  referenceMarkers: ['1.', '2.', '3.', '4.'],
   referenceTitles: [
     'Callosotomy patients exhibit temporal uncoupling during continuous bimanual movements',
     'Haptic object localization in the vibrissal system: behavior and performance',
@@ -108,6 +151,9 @@ export const MEDRXIV_20062463: HighwireFixture = {
   version: '1',
   sourceUrl: 'https://www.medrxiv.org/content/10.1101/2020.04.14.20062463v1.full',
   html: load('medrxiv-20062463v1.html'),
+  formulas: [],
+  figures: [],
+  referenceMarkers: ['1.', '2.', '3.'],
   referenceTitles: [
     'Novel Coronavirus Press Archives - Public Health Department - County of Santa Clara',
     'Report 12 - The global impact of COVID-19 and strategies for mitigation and suppression',
@@ -119,6 +165,166 @@ export const MEDRXIV_20062463: HighwireFixture = {
     { label: 'Table 2', url: popup('medrxiv', '160732') },
   ],
   referenceDois: [],
+};
+
+/**
+ * bioRxiv 10.1101/2024.12.06.627082 v3 — figures whose image-link titles hold
+ * `)` and `>`, a figure under its own section heading, and a Methods reference
+ * list labelled from 53.
+ */
+export const BIORXIV_627082: HighwireFixture = {
+  server: 'biorxiv',
+  doi: '10.1101/2024.12.06.627082',
+  version: '3',
+  sourceUrl: 'https://www.biorxiv.org/content/10.1101/2024.12.06.627082v3.full',
+  html: load('biorxiv-627082v3.html'),
+  formulas: [],
+  figures: [
+    {
+      alt: 'Figure 1',
+      src: 'https://www.biorxiv.org/content/biorxiv/early/2026/09/30/2024.12.06.627082/F1.medium.gif',
+      caption: 'Fire perimeters contained >10% forest in the year before burn.',
+    },
+    {
+      alt: 'Figure 2',
+      src: 'https://www.biorxiv.org/content/biorxiv/early/2026/09/30/2024.12.06.627082/F2.medium.gif',
+      caption: 'by state and year, compared with the total forest area that burned',
+    },
+    {
+      alt: 'Supplementary Figure 1',
+      src: 'https://www.biorxiv.org/content/biorxiv/early/2026/09/30/2024.12.06.627082/F6.medium.gif',
+      caption: 'occurring with >0.1 bc-CBI.',
+    },
+  ],
+  labels: ['(Figure 1)', '(Figure 2)', '(26)', '(Figure 3A)', '(Figure 3B)', '(Figure 3C)'],
+  tables: [],
+  referenceDois: ['10.1073/pnas.2208120120', '10.1002/fee.1311', '10.1016/j.rse.2019.111356'],
+  referenceMarkers: ['1.', '2.', '3.', '53.', '54.', '55.'],
+  referenceTitles: [
+    'Reduced fire severity offers near-term buffer to climate-driven declines in conifer resilience across the western United States',
+    'Effects of Wildfire on Soils and Watershed Processes',
+    'Changing disturbance regimes, ecological memory, and forest resilience',
+    'A Project for Monitoring Trends in Burn Severity',
+    'Landscape Change Monitoring System (LCMS)',
+    'Lessons learned implementing an operational continuous United States national land change monitoring capability: The Land Change Monitoring, Assessment, and Projection (LCMAP) approach',
+  ],
+};
+
+/**
+ * bioRxiv 10.64898/2026.07.03.736350 v1 — a figure between two paragraphs that
+ * cite it, and references labelled `(1).`.
+ */
+export const BIORXIV_736350: HighwireFixture = {
+  server: 'biorxiv',
+  doi: '10.64898/2026.07.03.736350',
+  version: '1',
+  sourceUrl: 'https://www.biorxiv.org/content/10.64898/2026.07.03.736350v1.full',
+  html: load('biorxiv-736350v1.html'),
+  formulas: [],
+  figures: [
+    {
+      alt: 'Figure 2',
+      src: 'https://www.biorxiv.org/content/biorxiv/early/2026/07/03/2026.07.03.736350/F2.medium.gif',
+      caption: 'Live-cell fluorescence microscopy of HEK293T cells',
+    },
+  ],
+  labels: ['(Figure 2A)', '(Figure 2B)', '(Figure 2C)'],
+  tables: [],
+  referenceDois: [
+    '10.1371/journal.pbio.3002071',
+    '10.1038/nature24644',
+    '10.1038/s41587-020-0491-6',
+  ],
+  referenceMarkers: ['1.', '2.', '3.'],
+  referenceTitles: [
+    'In the Business of Base Editors: Evolution from Bench to Bedside',
+    'Programmable Base Editing of A•T to G•C in Genomic DNA without DNA Cleavage',
+    'Directed Evolution of Adenine Base Editors with Increased Activity and Therapeutic Application',
+  ],
+};
+
+/**
+ * medRxiv 10.64898/2026.08.27.26361515 v1 — a figure labelled `Figure 1:` whose
+ * image-link title holds no `)`, a figure that prints no label or caption,
+ * display formulas set inside paragraphs (one with text after it, two in one
+ * paragraph), and references labelled `[1].`.
+ */
+export const MEDRXIV_26361515: HighwireFixture = {
+  server: 'medrxiv',
+  doi: '10.64898/2026.08.27.26361515',
+  version: '1',
+  sourceUrl: 'https://www.medrxiv.org/content/10.64898/2026.08.27.26361515v1.full',
+  html: load('medrxiv-26361515v1.html'),
+  figures: [
+    {
+      alt: 'Figure 1',
+      src: 'https://www.medrxiv.org/content/medrxiv/early/2026/09/01/2026.08.27.26361515/F1.medium.gif',
+      caption: 'ULEZ Expansion Map by Stage',
+    },
+    {
+      alt: '',
+      src: 'https://www.medrxiv.org/content/medrxiv/early/2026/09/01/2026.08.27.26361515/F2.medium.gif',
+    },
+  ],
+  formulas: [3, 23, 24].map(
+    (n) =>
+      `https://www.medrxiv.org/sites/default/files/highwire/medrxiv/early/2026/09/01/2026.08.27.26361515/embed/graphic-${n}.gif`,
+  ),
+  labels: ['Figure 1 shows', 'matrix completion \\[20\\]'],
+  tables: [],
+  referenceDois: ['10.1289/EHP11506', '10.2174/1381612822666151109111712'],
+  referenceMarkers: ['1.', '2.', '3.'],
+  referenceTitles: [
+    'Effect of Air Pollution on Heart Failure: Systematic Review and Meta-Analysis',
+    'Air Pollution Exposure and Blood Pressure: An Updated Review of the Literature',
+    'Air Pollution Deaths Attributable to Fossil Fuels: Observational and Modelling Study',
+  ],
+};
+
+/** medRxiv 10.64898/2026.08.27.26361261 v1 — Fig. S16, one figure holding two images. */
+export const MEDRXIV_26361261: HighwireFixture = {
+  server: 'medrxiv',
+  doi: '10.64898/2026.08.27.26361261',
+  version: '1',
+  sourceUrl: 'https://www.medrxiv.org/content/10.64898/2026.08.27.26361261v1.full',
+  html: load('medrxiv-26361261v1.html'),
+  formulas: [],
+  figures: [
+    {
+      alt: 'Fig. S16 (1 of 2)',
+      src: 'https://www.medrxiv.org/content/medrxiv/early/2026/09/01/2026.08.27.26361261/F20/graphic-23.medium.gif',
+      caption: 'Cytokine concentrations in CSF are shown',
+    },
+    {
+      alt: 'Fig. S16 (2 of 2)',
+      src: 'https://www.medrxiv.org/content/medrxiv/early/2026/09/01/2026.08.27.26361261/F20/graphic-24.medium.gif',
+      caption: 'Cytokine concentrations in CSF are shown',
+    },
+  ],
+  labels: [],
+  tables: [],
+  referenceDois: [],
+  referenceMarkers: [],
+  referenceTitles: [],
+};
+
+/**
+ * bioRxiv 10.1101/336701 v1 — one paragraph whose subscripts carry an escaped
+ * `<` (`<sub>&lt;50x</sub>`), which must reach the Markdown as written.
+ */
+export const BIORXIV_336701: HighwireFixture = {
+  server: 'biorxiv',
+  doi: '10.1101/336701',
+  version: '1',
+  sourceUrl: 'https://www.biorxiv.org/content/10.1101/336701v1.full',
+  html: load('biorxiv-336701v1.html'),
+  formulas: [],
+  figures: [],
+  labels: [],
+  tables: [],
+  referenceDois: [],
+  referenceMarkers: [],
+  referenceTitles: [],
 };
 
 /**
@@ -141,5 +347,17 @@ export function authorYearVariant(): HighwireFixture & { authorYearLabels: strin
   return { ...BIORXIV_015347, html, labels: [], authorYearLabels };
 }
 
-/** Every fixture page, for assertions that hold on all of them. */
-export const HIGHWIRE_FIXTURES = [BIORXIV_015347, BIORXIV_596311, MEDRXIV_20062463];
+/**
+ * Every fixture page with figures or references, for assertions that hold on
+ * all of them. {@link BIORXIV_336701} stays out: its body escapes are the case
+ * the figure-entity assertion must not reach.
+ */
+export const HIGHWIRE_FIXTURES = [
+  BIORXIV_015347,
+  BIORXIV_596311,
+  MEDRXIV_20062463,
+  BIORXIV_627082,
+  BIORXIV_736350,
+  MEDRXIV_26361515,
+  MEDRXIV_26361261,
+];

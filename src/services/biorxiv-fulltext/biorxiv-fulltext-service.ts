@@ -3,8 +3,9 @@
  * HTML page from the bioRxiv/medRxiv website (`www.{server}.org/content/{doi}v{N}.full`)
  * and extracts readable Markdown via the framework HTML extractor. The page is
  * reshaped first (`prepareArticlePage`) so the extractor keeps inline citation
- * labels and reference text, and the tables the page carries no cells for are
- * returned by name with the URL that serves them.
+ * labels and reference text, renders each figure and reference number once, sets
+ * each display formula in a block of its own, and the tables the page carries no
+ * cells for are returned by name with the URL that serves them.
  *
  * This is a DISTINCT fetch path from BiorxivApiService: it EXPECTS an HTML
  * document (the rendered article page), so it never routes through the JSON
@@ -14,7 +15,7 @@
  * the extractor.
  *
  * Extracted articles are cached in `ctx.state` under
- * `fulltext/v3/{server}/{doi}/{version}` for {@link FULLTEXT_CACHE_TTL_SECONDS}
+ * `fulltext/v4/{server}/{doi}/{version}` for {@link FULLTEXT_CACHE_TTL_SECONDS}
  * seconds, so paging a long article with offset/limit costs one origin fetch and
  * one extraction instead of one per chunk. `ctx.state` is tenant-scoped, which is
  * the intended blast radius — no cross-tenant or process-wide sharing. Only
@@ -76,16 +77,55 @@ const EXPECTED_STATUSES = [...DETERMINISTIC_UNAVAILABLE_STATUSES, 429];
 const FULLTEXT_CACHE_TTL_SECONDS = 3_600;
 
 /**
- * Cache key: `fulltext/v3/{server}/{doi}/{version}`. Slash-delimited because the
+ * Cache key: `fulltext/v4/{server}/{doi}/{version}`. Slash-delimited because the
  * storage layer validates keys against `[a-zA-Z0-9_.\-/]` — a colon separator is
  * rejected outright, and a DOI's own `/` and `.` are already inside the allowed
- * set. The `v3` segment is the cached-value schema generation — bump it when
- * {@link CachedArticle} changes so entries written by an older build are never
- * read back under the new shape. (`v2` dropped the extractor's `wordCount`; `v3`
- * added `omittedTables` and keeps citation labels and reference text.)
+ * set. The `v4` segment is the cached-value generation — bump it when
+ * {@link CachedArticle} or the Markdown it holds changes shape, so entries
+ * written by an older build are never read back. (`v2` dropped the extractor's
+ * `wordCount`; `v3` added `omittedTables` and keeps citation labels and
+ * reference text; `v4` renders each figure once, numbers each reference once,
+ * and sets each display formula in a block of its own.)
  */
 const cacheKeyFor = (server: BiorxivServer, doi: string, version: string): string =>
-  `fulltext/v3/${server}/${doi}/${version}`;
+  `fulltext/v4/${server}/${doi}/${version}`;
+
+/**
+ * A reference label that is one integer: `12.`, `(12).`, or `[12].`. Anchored at
+ * both ends, so a label carrying anything else (`12a.`, `1–2.`) is not a number.
+ */
+const NUMERIC_REF_LABEL = /^[([]?(\d+)[)\]]?\.?$/;
+
+/** An element of a page parsed by linkedom. */
+type PageElement = NonNullable<
+  ReturnType<ReturnType<typeof parseHTML>['document']['querySelector']>
+>;
+
+/**
+ * The elements under `root` matching `selector` that no other match contains.
+ * Every pass of {@link prepareArticlePage} that queries a match's own subtree
+ * runs over these: a match nested inside another is reached through that one's
+ * subtree and handled as part of it. Outermost matches have disjoint subtrees,
+ * so each pass stays linear in the page's size.
+ */
+function outermost(root: PageElement, selector: string): PageElement[] {
+  const nested = new Set<PageElement>();
+  return [...root.querySelectorAll(selector)].filter((el) => {
+    if (nested.has(el)) return false;
+    for (const inner of el.querySelectorAll(selector)) nested.add(inner);
+    return true;
+  });
+}
+
+/**
+ * The URL an image shows. The page lazy-loads: `src` holds a `data:`
+ * placeholder and `data-src` the image, so `data-src` wins, and a `src` that is
+ * a `data:` URL counts as no source.
+ */
+function imageSource(image: PageElement | null): string | undefined {
+  const src = image?.getAttribute('data-src') ?? image?.getAttribute('src');
+  return src && !src.startsWith('data:') ? src : undefined;
+}
 
 /**
  * Rewrites the article container so the extractor keeps what its cleanup rules
@@ -99,6 +139,41 @@ const cacheKeyFor = (server: BiorxivServer, doi: string, version: string): strin
  * reshaped here instead:
  *
  * - each cross-reference anchor becomes its own label text;
+ * - each inline formula (`span.inline-formula`) becomes a bare `<img>` with an
+ *   empty alt where the span stood, inside its sentence (the image source is
+ *   read as for figures, and a formula with none is left as the page has it).
+ *   The page gives the formula image the alt `Embedded Image`, which Defuddle
+ *   reads as a caption: it lifts the image out of the sentence into a captioned
+ *   figure, so the alt becomes a paragraph of its own and the sentence's tail
+ *   starts a new one;
+ * - each display formula (`span.disp-formula`) becomes a bare `<img>` with an
+ *   empty alt in a paragraph of its own, and a paragraph that held formulas is
+ *   split around them, dropping the runs that hold only whitespace (the image
+ *   source is read as for figures, and a formula with none is left as the page
+ *   has it). The page sets the formula image inside the paragraph with the alt
+ *   `Embedded Image`, which Defuddle reads as a caption: it makes the image a
+ *   captioned figure, whose start tag closes the open paragraph, so the text
+ *   after the formula loses its block and the next formula in the paragraph is
+ *   glued onto it. The page prints no formula label for an alt, and Defuddle
+ *   collapses adjacent images that share a non-empty alt, so consecutive
+ *   equations keep an empty one;
+ * - each figure (`div.fig`) loses its "Download figure" / "Open in new tab"
+ *   links, and each of its images becomes a bare `<img>` in its own paragraph,
+ *   alt-texted with the figure's printed label (`Figure 2`, `Fig. S16 (1 of 2)`
+ *   when the figure holds several). The source is the lazy-loaded `data-src`, or
+ *   a `src` that is not a `data:` placeholder; an image with neither is left to
+ *   the extractor as the page has it. The page's image link carries the caption
+ *   in its `title`, and the image the caption again in its `alt`: Defuddle
+ *   emits the alt as the image text, then again as a paragraph, and its
+ *   empty-link cleanup leaves the title's text after its first `)` spliced onto
+ *   the preceding block, or glues the image onto that block when the title has
+ *   none. The `div.fig-caption` below stays the figure's one caption. Distinct
+ *   alts keep Defuddle from collapsing a figure's images into one, and the
+ *   paragraph keeps the image off the `Figure N.` line;
+ * - in a reference list (`ol.cit-list`) whose printed labels are consecutive
+ *   integers, the labels give way to the list's own numbering, starting at the
+ *   first label (a Methods list can start at 53); any other list keeps its
+ *   labels and is rendered unordered, so no entry carries two numbers;
  * - in the reference list, the `↵` backlinks go, every `.cit-extra` link-out but
  *   the DOI one goes (the OpenURL ones are an unexpanded `{openurl}` template,
  *   the PubMed ones often a truncated `access_num`), the DOI one becomes a
@@ -111,6 +186,8 @@ const cacheKeyFor = (server: BiorxivServer, doi: string, version: string): strin
  *   its `id` when it prints none. The cells are never fetched: each would cost
  *   a request to an origin that rate-limits after a handful.
  *
+ * Each pass that queries a match's subtree runs over the outermost matches only
+ * ({@link outermost}), so the reshaping runs in linear time.
  * A page without the container is returned unchanged. An `href` that does not
  * parse as a URL counts as no link: the page is upstream markup, and one bad
  * link must not cost the caller the whole article.
@@ -123,13 +200,96 @@ function prepareArticlePage(
   const view = document.querySelector(FULLTEXT_CONTENT_SELECTOR);
   if (!view) return { html, omittedTables: [] };
 
-  for (const anchor of view.querySelectorAll('a[class^="xref-"]')) {
+  for (const anchor of outermost(view, 'a[class^="xref-"]')) {
     anchor.replaceWith(document.createTextNode(anchor.textContent ?? ''));
   }
 
-  for (const refList of view.querySelectorAll('div.ref-list')) {
+  for (const formula of outermost(view, 'span.inline-formula')) {
+    const src = imageSource(formula.querySelector('img'));
+    if (!src) continue;
+    const image = document.createElement('img');
+    image.setAttribute('src', src);
+    image.setAttribute('alt', '');
+    formula.replaceWith(image);
+  }
+
+  const formulaBlocks = new Set<PageElement>();
+  const heldFormulas = new Set<PageElement>();
+  for (const formula of outermost(view, 'span.disp-formula')) {
+    const src = imageSource(formula.querySelector('img'));
+    if (!src) continue;
+    const image = document.createElement('img');
+    image.setAttribute('src', src);
+    image.setAttribute('alt', '');
+    const block = document.createElement('p');
+    block.append(image);
+    formulaBlocks.add(block);
+    const parent = formula.parentElement;
+    if (parent?.localName === 'p') heldFormulas.add(parent);
+    formula.replaceWith(block);
+  }
+  // One pass over each paragraph's children, so a paragraph of many formulas
+  // is split in time linear in its length.
+  for (const paragraph of heldFormulas) {
+    const parts: PageElement[] = [];
+    let run = document.createElement('p');
+    // A run holding only the whitespace around a formula is dropped, not left an empty paragraph.
+    const endRun = () => {
+      if (run.children.length > 0 || run.textContent?.trim()) parts.push(run);
+      run = document.createElement('p');
+    };
+    for (const node of [...paragraph.childNodes]) {
+      if (formulaBlocks.has(node)) {
+        endRun();
+        parts.push(node);
+      } else {
+        run.append(node);
+      }
+    }
+    endRun();
+    paragraph.replaceWith(...parts);
+  }
+
+  for (const figure of outermost(view, 'div.fig')) {
+    for (const links of figure.querySelectorAll('ul.highwire-figure-links')) links.remove();
+    const label =
+      figure.querySelector('.fig-label')?.textContent?.trim().replace(/[.:]$/, '') ?? '';
+    const holders = outermost(figure, '.fig-inline-img');
+    for (const [index, holder] of holders.entries()) {
+      const src = imageSource(holder.querySelector('img'));
+      if (!src) continue;
+      const image = document.createElement('img');
+      image.setAttribute('src', src);
+      image.setAttribute(
+        'alt',
+        holders.length > 1 ? `${label} (${index + 1} of ${holders.length})`.trim() : label,
+      );
+      const block = document.createElement('p');
+      block.append(image);
+      holder.replaceChildren(block);
+    }
+  }
+
+  for (const refList of outermost(view, 'div.ref-list')) {
+    for (const list of refList.querySelectorAll('ol.cit-list')) {
+      const labels = [...list.children].map((item) =>
+        [...item.children].find((child) => child.matches('span.ref-label')),
+      );
+      const numbers = labels.map((label) =>
+        Number(NUMERIC_REF_LABEL.exec(label?.textContent?.trim() ?? '')?.[1] ?? Number.NaN),
+      );
+      const first = numbers[0];
+      if (first !== undefined && numbers.every((n, i) => n === first + i)) {
+        list.setAttribute('start', String(first));
+        for (const label of labels) label?.remove();
+      } else {
+        const unordered = document.createElement('ul');
+        unordered.append(...list.childNodes);
+        list.replaceWith(unordered);
+      }
+    }
     for (const backlink of refList.querySelectorAll('a.rev-xref-ref')) backlink.remove();
-    for (const extra of refList.querySelectorAll('.cit-extra')) {
+    for (const extra of outermost(refList, '.cit-extra')) {
       for (const link of extra.querySelectorAll('a')) {
         const doi = link.classList.contains('cit-ref-sprinkles-doi')
           ? URL.parse(link.getAttribute('href') ?? '', sourceUrl)?.searchParams.get('access_num')
@@ -149,7 +309,7 @@ function prepareArticlePage(
   }
 
   const omittedTables: OmittedTable[] = [];
-  for (const table of view.querySelectorAll('div.table')) {
+  for (const table of outermost(view, 'div.table')) {
     const href = table.querySelector('a.table-expand-popup')?.getAttribute('href');
     for (const callout of table.querySelectorAll('.table-callout-links')) callout.remove();
     const url = href ? URL.parse(href, sourceUrl) : null;

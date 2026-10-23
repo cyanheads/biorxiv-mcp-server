@@ -3,8 +3,8 @@
  * extraction, challenge/block detection, 429 rate-limit classification,
  * unavailable-vs-transient classification, and the per-version ctx.state cache.
  * Extraction on trimmed Highwire article pages runs the real htmlExtractor, so
- * citation labels, reference text, and omitted tables are asserted on what
- * defuddle actually returns.
+ * citation labels, reference text, figures, display formulas, and omitted
+ * tables are asserted on what defuddle actually returns.
  * @module tests/services/biorxiv-fulltext/biorxiv-fulltext-service.test
  */
 
@@ -21,10 +21,15 @@ import { type FetchCall, hungOrigin, settle, slowOrigin } from '../../helpers/ca
 import {
   authorYearVariant,
   BIORXIV_015347,
+  BIORXIV_336701,
   BIORXIV_596311,
+  BIORXIV_627082,
+  BIORXIV_736350,
   HIGHWIRE_FIXTURES,
   type HighwireFixture,
   MEDRXIV_20062463,
+  MEDRXIV_26361261,
+  MEDRXIV_26361515,
 } from '../../helpers/highwire-fixtures.js';
 
 const mockFetch = vi.fn();
@@ -272,7 +277,7 @@ describe('BiorxivFullTextService', () => {
     if (result.kind === 'article') expect(result.title).toBeUndefined();
   });
 
-  it('caches under the v3 key generation, never reading a v1 or v2 entry back', async () => {
+  it('caches under the v4 key generation, never reading a v1, v2, or v3 entry back', async () => {
     mockFetch.mockResolvedValue(makeHtmlResponse(ARTICLE_HTML));
     mockExtract.mockResolvedValue({ content: 'Fresh extraction.' });
     const ctx = tenantCtx();
@@ -283,11 +288,17 @@ describe('BiorxivFullTextService', () => {
     };
     await ctx.state.set(`fulltext/v1/biorxiv/${DOI}/1`, stale);
     await ctx.state.set(`fulltext/v2/biorxiv/${DOI}/1`, stale);
+    // A v3 entry has the current shape but Markdown rendered before figures and
+    // reference numbers were reshaped.
+    await ctx.state.set(`fulltext/v3/biorxiv/${DOI}/1`, {
+      markdown: 'Stale body from an older build.',
+      sourceUrl: `https://www.biorxiv.org/content/${DOI}v1.full`,
+    });
 
     const result = await service.fetchFullText('biorxiv', DOI, '1', startCallDeadline(), ctx);
     expect(result.kind === 'article' && result.markdown).toBe('Fresh extraction.');
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(await ctx.state.get(`fulltext/v3/biorxiv/${DOI}/1`)).toMatchObject({
+    expect(await ctx.state.get(`fulltext/v4/biorxiv/${DOI}/1`)).toMatchObject({
       markdown: 'Fresh extraction.',
     });
   });
@@ -356,11 +367,272 @@ describe('BiorxivFullTextService', () => {
           expect(result.markdown).not.toMatch(/View this table|View popup|View inline|powerpoint/i);
           for (const { label } of fixture.tables) expect(result.markdown).toContain(label);
         });
+
+        it('renders each figure image once, in its own block under its printed label, and its caption once', async () => {
+          const { markdown } = await extract(fixture);
+          const blocks = markdown.split('\n\n');
+          for (const { alt, src, caption } of fixture.figures) {
+            expect(blocks).toContain(`![${alt}](${src})`);
+            if (caption) expect(markdown.split(caption)).toHaveLength(2);
+          }
+          expect(markdown.match(/!\[/g) ?? []).toHaveLength(
+            fixture.figures.length + fixture.formulas.length,
+          );
+          // What the image link's caption-bearing title left behind, and its chrome.
+          expect(markdown).not.toMatch(/"\)$/m);
+          expect(markdown).not.toMatch(/Download figure|Open in new tab/);
+          expect(markdown).not.toMatch(/&(?:gt|lt|amp);/);
+        });
+
+        it('renders each display formula as an image block of its own, with no caption text', async () => {
+          const { markdown } = await extract(fixture);
+          const blocks = markdown.split('\n\n');
+          for (const src of fixture.formulas) expect(blocks).toContain(`![](${src})`);
+          // The formula image's alt, which the extractor read as a figure caption.
+          expect(markdown).not.toContain('Embedded Image');
+        });
+
+        it('numbers each reference entry once, with the number the page prints', async () => {
+          const { markdown } = await extract(fixture);
+          const references = markdown.slice(Math.max(0, markdown.search(/^## .*Reference/m)));
+          expect(references.match(/^(?:\d+\.|- \S+)/gm) ?? []).toEqual(fixture.referenceMarkers);
+          // A list number followed by the printed label: `1. 1.`, `1. (1).`, `1. \[1\].`, `1. 53.`
+          expect(markdown).not.toMatch(/^\d+\. +\\?[([]?\d+\\?[)\]]?\.(?:\s|$)/m);
+        });
       },
     );
 
-    // Only these two pages carry `.cit-extra` link-outs to drop.
-    it.each([BIORXIV_015347, BIORXIV_596311].map((f) => [f.sourceUrl, f] as const))(
+    it('splits nothing onto a paragraph or heading: the body text before a figure ends its block', async () => {
+      const repro2 = (await extract(BIORXIV_627082)).markdown;
+      expect(repro2).toContain(
+        'wildfire perimeters constitute less area than that which occurred with prescribed burning.\n\n',
+      );
+      expect(repro2).toContain('\n\n## Supplementary figures\n\n');
+      const repro1 = (await extract(BIORXIV_736350)).markdown;
+      expect(repro1).toContain('in living cells (Figure 2A).\n\n');
+      const gluedOnto015347 = (await extract(BIORXIV_015347)).markdown;
+      expect(gluedOnto015347).toContain(
+        'but its replication in other organs is undetectable.\n\n![Figure S2]',
+      );
+    });
+
+    it('sets each display formula between the intact text around it, in page order', async () => {
+      const { markdown } = await extract(MEDRXIV_26361515);
+      const blocks = markdown.split('\n\n');
+      const [adq, estimate, effect] = MEDRXIV_26361515.formulas;
+      const adqAt = blocks.indexOf('From this, ADQ usage is calculated as:');
+      expect(adqAt).toBeGreaterThan(-1);
+      expect(blocks.slice(adqAt + 1, adqAt + 3)).toEqual([
+        `![](${adq})`,
+        'By estimating ADQ usage, we account for changes in the strength of prescribed drugs, not just their volume, providing a more comprehensive view of prescribing trends.',
+      ]);
+      // Two formulas in one paragraph: the second used to be glued onto the text before it.
+      const givenAt = blocks.findIndex((block) =>
+        block.endsWith('for treated units post-treatment are given by:'),
+      );
+      expect(blocks[givenAt]).toMatch(/^Since \*λ<sub>i<\/sub>\* and \*f<sub>t<\/sub>\*/);
+      expect(blocks.slice(givenAt + 1, givenAt + 5)).toEqual([
+        `![](${estimate})`,
+        'The treatment effect is then computed as:',
+        `![](${effect})`,
+        '## References',
+      ]);
+    });
+
+    it('keeps formulas that follow one another with nothing between, each as its own image', async () => {
+      const [adq = ''] = MEDRXIV_26361515.formulas;
+      const span =
+        /<span class="disp-formula" id="disp-formula-1">[\s\S]*?<\/noscript><\/span>\s*<\/span>/.exec(
+          MEDRXIV_26361515.html,
+        )?.[0] ?? '';
+      expect(span).toContain('graphic-3.gif');
+      const formula = (n: number) => span.replaceAll('graphic-3.gif', `graphic-${n}.gif`);
+      // Consecutive equations, each in a paragraph holding nothing else.
+      const html = MEDRXIV_26361515.html.replace(
+        'prescribing trends.</p>',
+        `prescribing trends.</p><p id="p-29">\n${formula(4)}\n</p><p id="p-30">\n${formula(5)}\n</p>`,
+      );
+      const { markdown } = await extract({ ...MEDRXIV_26361515, html });
+      const blocks = markdown.split('\n\n');
+      const at = blocks.indexOf(`![](${adq})`);
+      expect(at).toBeGreaterThan(-1);
+      expect(blocks.slice(at + 2, at + 5)).toEqual([
+        `![](${adq.replace('graphic-3', 'graphic-4')})`,
+        `![](${adq.replace('graphic-3', 'graphic-5')})`,
+        '## 3 Results',
+      ]);
+    });
+
+    it('leaves a display formula whose only source is a placeholder in its paragraph', async () => {
+      const span =
+        /<span class="disp-formula" id="disp-formula-1">[\s\S]*?<\/noscript><\/span>\s*<\/span>/.exec(
+          MEDRXIV_26361515.html,
+        )?.[0] ?? '';
+      const placeholderOnly = span
+        .replace(/ data-src="[^"]*"/, '')
+        .replace(/<noscript>[\s\S]*?<\/noscript>/, '');
+      expect(placeholderOnly).toContain('src="data:image/gif');
+      expect(placeholderOnly).not.toContain('graphic-3.gif');
+      const html = MEDRXIV_26361515.html.replace(span, placeholderOnly);
+      expect(html).not.toBe(MEDRXIV_26361515.html);
+      const { markdown } = await extract({ ...MEDRXIV_26361515, html });
+      expect(markdown).not.toContain('data:image');
+      expect(markdown.split('\n\n')).toContainEqual(
+        expect.stringMatching(
+          /^From this, ADQ usage is calculated as:\s+By estimating ADQ usage, /,
+        ),
+      );
+    });
+
+    describe('inline formulas', () => {
+      const src = (n: number) =>
+        `https://www.medrxiv.org/sites/default/files/highwire/medrxiv/early/2026/09/01/2026.08.27.26361515/embed/inline-graphic-${n}.gif`;
+      /** The page's lazy-loaded inline formula: a `data:` placeholder, `data-src`, and a `<noscript>` copy. */
+      const lazy = (n: number) =>
+        `<span class="inline-formula" id="inline-formula-${n}"><span class="highwire-responsive-lazyload"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" class="highwire-embed lazyload" alt="Embedded Image" data-src="${src(n)}"/><noscript><img class="highwire-embed" alt="Embedded Image" src="${src(n)}"/></noscript></span></span>`;
+      const plain = (n: number) =>
+        `<span class="inline-formula" id="inline-formula-${n}"><img src="${src(n)}" class="highwire-embed" alt="Embedded Image"/></span>`;
+      const withSentence = (sentence: string) => {
+        const html = MEDRXIV_26361515.html.replace('compiled using ArcGIS.', sentence);
+        expect(html).not.toBe(MEDRXIV_26361515.html);
+        return { ...MEDRXIV_26361515, html };
+      };
+
+      it.each([
+        ['lazy-loaded', lazy],
+        ['with a plain src', plain],
+      ])(
+        'sets a %s inline formula inside its sentence, with no caption text',
+        async (_shape, formula) => {
+          const { markdown } = await extract(
+            withSentence(`compiled using ArcGIS with probability ${formula(1)} if we assume it.`),
+          );
+          expect(markdown).toContain(
+            `compiled using ArcGIS with probability ![](${src(1)}) if we assume it.`,
+          );
+          expect(markdown).not.toContain('Embedded Image');
+        },
+      );
+
+      it('keeps several inline formulas in one sentence in page order', async () => {
+        const { markdown } = await extract(
+          withSentence(
+            `compiled using ArcGIS ${lazy(1)} and ${lazy(2)}, then ${lazy(3)} at scale.`,
+          ),
+        );
+        expect(markdown).toContain(
+          `compiled using ArcGIS ![](${src(1)}) and ![](${src(2)}), then ![](${src(3)}) at scale.`,
+        );
+        expect(markdown).not.toContain('Embedded Image');
+      });
+
+      it('handles an inline formula nested in another as part of the outer one', async () => {
+        const nested = `<span class="inline-formula" id="inline-formula-1"><img data-src="${src(1)}" alt="Embedded Image"/>${plain(2)}</span>`;
+        const { markdown } = await extract(
+          withSentence(`compiled using ArcGIS ${nested} at scale.`),
+        );
+        expect(markdown).toContain(`compiled using ArcGIS ![](${src(1)}) at scale.`);
+        expect(markdown).not.toContain('Embedded Image');
+      });
+
+      it('leaves an inline formula with no image source as the page has it', async () => {
+        const { markdown } = await extract(
+          withSentence(
+            'compiled using ArcGIS <span class="inline-formula" id="inline-formula-1"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="x"/></span> at scale.',
+          ),
+        );
+        // The placeholder renders as nothing: the sentence closes up around it.
+        expect(markdown).toContain('compiled using ArcGIS at scale.\n\n');
+        expect(markdown).not.toContain('data:image');
+      });
+    });
+
+    it('numbers a reference list from its first printed label, whatever form the label takes', async () => {
+      const methods = (await extract(BIORXIV_627082)).markdown;
+      expect(methods).toContain(
+        '53. Eidenshink, J. et al. A Project for Monitoring Trends in Burn Severity. Fire Ecol. 3, 3–21 (2007).',
+      );
+      expect(methods).toContain('1. K. T. Davis, et al., Reduced fire severity');
+      expect((await extract(BIORXIV_736350)).markdown).toContain(
+        '1. Porto, E. M. Komor, A. C. In the Business of Base Editors',
+      );
+      expect((await extract(MEDRXIV_26361515)).markdown).toContain(
+        '1. Yanhui Jia et al. ‘Effect of Air Pollution on Heart Failure',
+      );
+    });
+
+    it.each([
+      [
+        'a label that is not one integer',
+        (html: string) => html.replace('>2.</span>', '>2a.</span>'),
+        ['- 1.', '- 2a.', '- 3.', '- 4.'],
+      ],
+      [
+        'an entry with no label',
+        (html: string) => html.replace('<span class="ref-label">2.</span>', ''),
+        ['- 1.', '- Knutsen,', '- 3.', '- 4.'],
+      ],
+    ])('keeps the printed labels of a list with %s, unordered', async (_how, edit, markers) => {
+      const html = edit(BIORXIV_596311.html);
+      expect(html).not.toBe(BIORXIV_596311.html);
+      const { markdown } = await extract({ ...BIORXIV_596311, html });
+      const references = markdown.slice(markdown.search(/^## .*Reference/m));
+      expect(references.match(/^(?:\d+\.|- \S+)/gm)).toEqual(markers);
+      const text = markdownAsText(markdown);
+      for (const title of BIORXIV_596311.referenceTitles) expect(text).toContain(title);
+    });
+
+    it('keeps every image of a figure that prints no label, each under its own position', async () => {
+      const html = MEDRXIV_26361261.html.replace('<span class="fig-label">Fig. S16.</span>', '');
+      expect(html).not.toBe(MEDRXIV_26361261.html);
+      const { markdown } = await extract({ ...MEDRXIV_26361261, html });
+      const blocks = markdown.split('\n\n');
+      for (const [i, { src }] of MEDRXIV_26361261.figures.entries()) {
+        expect(blocks).toContain(`![(${i + 1} of 2)](${src})`);
+      }
+    });
+
+    it('takes a figure image the page serves without lazy loading from its src', async () => {
+      const [figure] = BIORXIV_736350.figures;
+      const html = BIORXIV_736350.html.replace(
+        /src="data:image\/gif;base64,[^"]*" data-src="([^"]*)"/,
+        'src="$1"',
+      );
+      expect(html).not.toBe(BIORXIV_736350.html);
+      const { markdown } = await extract({ ...BIORXIV_736350, html });
+      expect(markdown.split('\n\n')).toContain(`![Figure 2](${figure?.src})`);
+      expect(markdown.split(figure?.caption ?? '')).toHaveLength(2);
+    });
+
+    it('leaves a figure image whose only source is a placeholder to the extractor', async () => {
+      const html = BIORXIV_736350.html
+        .replace(/ data-src="[^"]*"/, '')
+        .replace(/<noscript>.*?<\/noscript>/, '');
+      expect(html).not.toBe(BIORXIV_736350.html);
+      const { markdown } = await extract({ ...BIORXIV_736350, html });
+      // No image block: the paragraph before the figure runs straight into its caption.
+      expect(markdown).not.toContain('![Figure 2]');
+      expect(markdown).not.toContain('data:image');
+      expect(markdown).toContain(
+        'in living cells (Figure 2A).\n\nFigure 2. TadA8e-L68-sfGFP is a fluorescent base editor',
+      );
+      // The figure's links still go.
+      expect(markdown).not.toMatch(/Download figure|Open in new tab/);
+    });
+
+    it('leaves inline HTML escapes in body text as the page writes them', async () => {
+      const { markdown } = await extract(BIORXIV_336701);
+      expect(markdown).toContain('(n = 6<sub>&lt;50x</sub>, n = 1<sub>relative</sub>');
+      expect(markdown).toContain('(n = 16<sub>&lt;50x</sub>, n = 4<sub>relatives</sub>');
+    });
+
+    // The pages whose `.cit-extra` blocks hold link-outs to drop. medRxiv 26361515
+    // also has them, but one of its references cites an `/openurl/` URL in its text.
+    it.each(
+      [BIORXIV_015347, BIORXIV_596311, BIORXIV_627082, BIORXIV_736350].map(
+        (f) => [f.sourceUrl, f] as const,
+      ),
+    )(
       'drops the broken OpenURL link-outs and keeps each reference DOI as a doi.org link: %s',
       async (_url, fixture) => {
         const { markdown } = await extract(fixture);
@@ -444,6 +716,160 @@ describe('BiorxivFullTextService', () => {
       expect(second).toEqual(first);
       expect(second.omittedTables).toEqual(MEDRXIV_20062463.tables);
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ── Page reshaping cost ──────────────────────────────────────────────────────
+
+  /**
+   * The page passes read printed labels and walk the page's markup, and each
+   * scales linearly with input size: label and paragraph text as one long line
+   * ending in a break and as breaks throughout, a numeric label that never
+   * closes, a paragraph of many formulas, and every element a pass queries the
+   * subtree of — citation anchors, inline and display formulas, figures and their image holders,
+   * reference lists and their link-out blocks, tables — nested in one another.
+   * Thread CPU time, never wall clock; the extractor is stubbed so only the page
+   * pass is measured.
+   */
+  describe('page reshaping cost', { timeout: 60_000 }, () => {
+    const page = (body: string) =>
+      `<html><body><div class="article fulltext-view">${body}</div></body></html>`;
+    const refList = (items: string) =>
+      `<div class="ref-list"><ol class="cit-list">${items}</ol></div>`;
+    const figure = (label: string) =>
+      `<div class="fig"><div class="fig-inline-img"><img data-src="https://example.org/F1.gif"></div><div class="fig-caption"><span class="fig-label">${label}</span></div></div>`;
+    const formula =
+      '<span class="disp-formula"><img data-src="https://example.org/graphic-1.gif"></span>';
+    const table = (label: string) =>
+      `<div class="table"><div class="table-caption"><span class="table-label">${label}</span></div><ul class="table-callout-links"><li><a class="table-expand-popup" href="/T1.expansion.html">View popup</a></li></ul></div>`;
+
+    /** Builds a page of roughly `size` characters from one repeating shape. */
+    const SHAPES: [string, (size: number) => string][] = [
+      [
+        'a reference label on one long line ending in a break',
+        (n) => refList(`<li><span class="ref-label">${'§1 x'.repeat(n / 4)}\ny</span>Entry.</li>`),
+      ],
+      [
+        'a reference label of breaks throughout',
+        (n) => refList(`<li><span class="ref-label">${'  \r\n'.repeat(n / 4)}</span>Entry.</li>`),
+      ],
+      [
+        'a bracketed reference number that never closes',
+        (n) => refList(`<li><span class="ref-label">[${'1'.repeat(n)}x</span>Entry.</li>`),
+      ],
+      [
+        'a figure label on one long line ending in a break',
+        (n) => figure(`${'§1 x'.repeat(n / 4)}\ny`),
+      ],
+      ['a figure label of breaks throughout', (n) => figure('  \r\n'.repeat(n / 4))],
+      [
+        'figures nested in figures',
+        (n) => '<div class="fig"><span class="fig-label">Fig. 1.</span>'.repeat(n / 54),
+      ],
+      [
+        'image holders nested in one figure',
+        (n) =>
+          `<div class="fig">${'<div class="fig-inline-img"><img data-src="a.gif">'.repeat(n / 50)}</div>`,
+      ],
+      [
+        'reference lists nested in reference entries',
+        (n) =>
+          '<div class="ref-list"><ol class="cit-list"><li><span class="ref-label">1.</span>'.repeat(
+            n / 80,
+          ),
+      ],
+      [
+        'display formulas nested in display formulas',
+        (n) => `${'<span class="disp-formula">'.repeat(n / 28)}<img data-src="a.gif">`,
+      ],
+      [
+        'inline formulas nested in inline formulas',
+        (n) => `${'<span class="inline-formula">'.repeat(n / 30)}<img data-src="a.gif">`,
+      ],
+      [
+        'inline formulas throughout one paragraph',
+        (n) =>
+          `<p>${'Text <span class="inline-formula"><img data-src="a.gif"></span> '.repeat(n / 66)}</p>`,
+      ],
+      [
+        'display formulas throughout one paragraph',
+        (n) => `<p>${`Text. ${formula}`.repeat(n / 90)}</p>`,
+      ],
+      [
+        'unclosed paragraphs, each holding a display formula',
+        (n) => `<p>Text. ${formula}`.repeat(n / 93),
+      ],
+      [
+        'a display formula after one long line ending in a break',
+        (n) => `<p>${'§1 x'.repeat(n / 4)}\ny${formula}</p>`,
+      ],
+      [
+        'a display formula before breaks throughout',
+        (n) => `<p>${formula}${'  \r\n'.repeat(n / 4)}</p>`,
+      ],
+      [
+        'citation anchors nested in citation anchors',
+        (n) => '<a class="xref-bibr" href="#ref-1">1'.repeat(n / 34),
+      ],
+      [
+        'image holders with no image nested in one figure',
+        (n) => `<div class="fig">${'<div class="fig-inline-img">'.repeat(n / 28)}</div>`,
+      ],
+      [
+        'reference link-out blocks nested in one another',
+        (n) => `<div class="ref-list">${'<div class="cit-extra">'.repeat(n / 23)}</div>`,
+      ],
+      [
+        'tables nested in tables',
+        (n) =>
+          '<div class="table"><a class="table-expand-popup" href="/T1.expansion.html">View popup</a><span class="table-label">Table 1.</span>'.repeat(
+            n / 117,
+          ),
+      ],
+      [
+        'a table label on one long line ending in a break',
+        (n) => table(`${'§1 x'.repeat(n / 4)}\ny`),
+      ],
+      ['a table label of breaks throughout', (n) => table('  \r\n'.repeat(n / 4))],
+      [
+        'many consecutive reference entries',
+        (n) =>
+          refList(
+            Array.from(
+              { length: n / 40 },
+              (_, i) => `<li><span class="ref-label">${i + 1}.</span>Entry.</li>`,
+            ).join(''),
+          ),
+      ],
+    ];
+
+    it.each(SHAPES)('stays linear in page size on %s', async (_shape, build) => {
+      mockExtract.mockResolvedValue({ content: 'Article body.' });
+      const cpuMs: number[] = [];
+      for (let size = 5_000; size <= 320_000; size *= 2) {
+        const html = page(build(size));
+        // The least of three runs, so one run slowed by a collection or a
+        // loaded machine does not read as growth.
+        let best = Number.POSITIVE_INFINITY;
+        for (let run = 0; run < 3; run++) {
+          mockFetch.mockResolvedValue(makeHtmlResponse(html));
+          const before = process.threadCpuUsage();
+          const result = await service.fetchFullText(
+            'biorxiv',
+            DOI,
+            '1',
+            startCallDeadline(),
+            tenantlessCtx(),
+          );
+          const used = process.threadCpuUsage(before);
+          expect(result.kind).toBe('article');
+          best = Math.min(best, (used.user + used.system) / 1000);
+        }
+        cpuMs.push(best);
+        expect(best).toBeLessThan(2_000);
+      }
+      expect(cpuMs).toHaveLength(7);
+      expect((cpuMs.at(-1) ?? 0) / Math.max(cpuMs[0] ?? 0, 0.05)).toBeLessThan(256);
     });
   });
 
