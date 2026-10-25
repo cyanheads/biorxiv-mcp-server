@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-10-25
+
+biorxiv_get_fulltext keeps short sections headed with a navigation word and renders lists nested in reference entries inline. A 429 with Retry-After 0 or a past date backs off like one with no header, and caller text echoed into notices is Markdown-escaped.
+
 ## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-23
 
 biorxiv_get_published_version resolves a journal article's DOI to its preprint, biorxiv_list_published_versions filters by publisher DOI prefix, and biorxiv_get_fulltext renders figures, references, and formulas once. Only the latest revision carries an abstract, and record server is lowercase.

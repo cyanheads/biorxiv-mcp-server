@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-10-23 17:28:59
+Generated on: 2026-10-25 00:38:03
 
 ```text
 biorxiv-mcp-server/
@@ -177,10 +177,12 @@ biorxiv-mcp-server/
 │   │       ├── biorxiv-336701v1.html
 │   │       ├── biorxiv-596311v1.html
 │   │       ├── biorxiv-627082v3.html
+│   │       ├── biorxiv-736286v2.html
 │   │       ├── biorxiv-736350v1.html
 │   │       ├── medrxiv-20062463v1.html
 │   │       ├── medrxiv-26361261v1.html
-│   │       └── medrxiv-26361515v1.html
+│   │       ├── medrxiv-26361515v1.html
+│   │       └── medrxiv-26365491v1.html
 │   ├── helpers/
 │   │   ├── call-budget.ts
 │   │   ├── highwire-fixtures.ts
