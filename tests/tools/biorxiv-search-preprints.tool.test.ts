@@ -1480,6 +1480,67 @@ describe('biorxivSearchPreprintsTool', () => {
     });
   });
 
+  // ── Caller text in the trailer ──────────────────────────────────────────────
+
+  describe('caller text echoed into the trailer and the empty-result notice', () => {
+    /** Caller values that parse as Markdown: emphasis, a link, a line-leading list marker. */
+    const MARKDOWN = { query: '*x* [a](b)', author: '- O*Neil', cursor_mark: 'AoE*x[y]' };
+    /** Plain caller values, a live cursor shape among them. */
+    const PLAIN = { query: 'crispr cas9', author: 'Smith J', cursor_mark: 'AoIIP+4XBX0oNTc1MTIz' };
+
+    async function call(args: Record<string, unknown>) {
+      const result = await runToolContract(
+        biorxivSearchPreprintsTool,
+        { server: 'biorxiv', limit: 10, ...args } as never,
+        { context: { errors: biorxivSearchPreprintsTool.errors } },
+      );
+      const lines = result.content
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('\n')
+        .split('\n');
+      return { structured: result.structuredContent as Record<string, unknown>, lines };
+    }
+
+    it.each([
+      [
+        'escapes the query, author, and cursor_mark in the queryEcho line',
+        MARKDOWN,
+        'Query: \\*x\\* \\[a\\](b) · author=\\- O\\*Neil · server=biorxiv · cursor=AoE\\*x\\[y\\] · limit=10',
+      ],
+      [
+        'renders plain query, author, and cursor_mark values unchanged',
+        PLAIN,
+        'Query: crispr cas9 · author=Smith J · server=biorxiv · cursor=AoIIP+4XBX0oNTc1MTIz · limit=10',
+      ],
+    ])('%s, while queryEcho keeps them raw', async (_label, args, line) => {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(1, [EPMC_RESULT]));
+      const { structured, lines } = await call(args);
+
+      expect(lines).toContain(line);
+      expect(structured.queryEcho).toMatchObject(args);
+    });
+
+    it.each([
+      [
+        'escapes the query and author in the notice for a search that matched nothing',
+        MARKDOWN.query,
+        MARKDOWN.author,
+        '> No preprints matched "\\*x\\* \\[a\\](b)" and author "\\- O\\*Neil". Try broader search terms, a different author spelling, or a wider date range.',
+      ],
+      [
+        'renders a plain query and author in that notice unchanged',
+        PLAIN.query,
+        PLAIN.author,
+        '> No preprints matched "crispr cas9" and author "Smith J". Try broader search terms, a different author spelling, or a wider date range.',
+      ],
+    ])('%s', async (_label, query, author, line) => {
+      mockEpmcSearch.mockResolvedValue(epmcSearchResult(0, []));
+      const { lines } = await call({ query, author });
+
+      expect(lines).toContain(line);
+    });
+  });
+
   // ── One budget across the chain ─────────────────────────────────────────────
 
   describe('call budget', () => {

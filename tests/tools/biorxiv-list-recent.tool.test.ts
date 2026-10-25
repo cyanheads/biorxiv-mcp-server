@@ -1136,4 +1136,60 @@ describe('biorxivListRecentTool', () => {
       expect(text).toContain(`**Published DOI:** ${IDENTIFIERS.publishedDoi}\n`);
     });
   });
+
+  // ── Caller category in notices ──────────────────────────────────────────────
+
+  describe('the caller category echoed into a notice', () => {
+    /**
+     * A category the validator accepts (it drops `_` and the spaces around the
+     * name) that renders as emphasis unescaped.
+     */
+    const EMPHASIZED = '_Pathology_';
+
+    async function lines(args: Record<string, unknown>) {
+      const result = await runToolContract(
+        biorxivListRecentTool,
+        { start_date: '2026-09-01', end_date: '2026-09-02', ...args } as never,
+        { context: { errors: biorxivListRecentTool.errors } },
+      );
+      return result.content
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('\n')
+        .split('\n');
+    }
+
+    it.each([
+      [EMPHASIZED, '"\\_Pathology\\_"'],
+      ['Pathology', '"Pathology"'],
+    ])(
+      'renders the ignored category %s as %s in the ignored-filter notice',
+      async (category, quoted) => {
+        mockGetListing.mockImplementation((server: string) =>
+          Promise.resolve(
+            server === 'biorxiv'
+              ? { preprints: [], pagination: { cursor: 0, total: 0 }, categoryIgnored: true }
+              : { ...LISTING_RESULT, preprints: [{ ...PREPRINT, server: 'medrxiv' }] },
+          ),
+        );
+
+        expect(await lines({ server: 'both', category })).toContain(
+          `> bioRxiv ignored the category filter ${quoted} and returned its unfiltered listing, so its records were left out — only the filtered results are shown.`,
+        );
+      },
+    );
+
+    it.each([
+      [EMPHASIZED, '"\\_Pathology\\_"'],
+      ['Pathology', '"Pathology"'],
+    ])(
+      'renders the category %s as %s in the no-results filter description',
+      async (category, quoted) => {
+        mockGetListing.mockResolvedValue({ preprints: [], pagination: { cursor: 0, total: 0 } });
+
+        expect(await lines({ server: 'biorxiv', category })).toContain(
+          `> No preprints found for dates 2026-09-01–2026-09-02, category ${quoted}, server "biorxiv". Try widening the date range or removing the category filter.`,
+        );
+      },
+    );
+  });
 });

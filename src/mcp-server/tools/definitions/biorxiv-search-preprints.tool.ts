@@ -45,6 +45,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
@@ -323,7 +324,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
   // content[] trailer rendering for structured enrichment fields. Scalar/notice kinds
   // (totalCount, notice) render automatically. queryEcho is a structured object that
-  // needs a render function to produce a single compact line.
+  // needs a render function to produce a single compact line. A render result is
+  // live Markdown, so the caller-supplied values in it are escaped here.
   enrichmentTrailer: {
     queryEcho: {
       render: (echo: {
@@ -336,12 +338,12 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         cursor_mark?: string;
       }) => {
         const parts = [
-          ...(echo.query ? [`Query: ${echo.query}`] : []),
-          ...(echo.author ? [`author=${echo.author}`] : []),
+          ...(echo.query ? [`Query: ${escapeMarkdownInline(echo.query)}`] : []),
+          ...(echo.author ? [`author=${escapeMarkdownInline(echo.author)}`] : []),
           `server=${echo.server}`,
           ...(echo.date_from ? [`from=${echo.date_from}`] : []),
           ...(echo.date_to ? [`to=${echo.date_to}`] : []),
-          ...(echo.cursor_mark ? [`cursor=${echo.cursor_mark}`] : []),
+          ...(echo.cursor_mark ? [`cursor=${escapeMarkdownInline(echo.cursor_mark)}`] : []),
           `limit=${echo.limit}`,
         ];
         return parts.join(' · ');
@@ -493,8 +495,8 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       const pastEnd = !!cursor && cursor !== '*' && hitCount > 0;
       const criteria =
         [
-          ...(input.query ? [`"${input.query}"`] : []),
-          ...(input.author ? [`author "${input.author}"`] : []),
+          ...(input.query ? [`"${escapeMarkdownInline(input.query)}"`] : []),
+          ...(input.author ? [`author "${escapeMarkdownInline(input.author)}"`] : []),
         ].join(' and ') || 'the given criteria';
       ctx.enrich.notice(
         pastEnd

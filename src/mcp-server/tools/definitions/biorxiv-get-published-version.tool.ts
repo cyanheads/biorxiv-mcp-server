@@ -36,6 +36,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer } from '@/services/biorxiv/types.js';
 import {
@@ -321,7 +322,7 @@ export const biorxivGetPublishedVersionTool = tool('biorxiv_get_published_versio
     // date come from the crosswalk alone, so they stay absent — never inferred.
     ctx.enrich.notice(
       byJournal?.status === 'rejected'
-        ? `The crosswalk lookup by journal DOI ${publishedDoi} failed (${errorMessage(byJournal.reason)}), so publishedDoi comes from the preprint's own record and the journal name and publication date are absent. Retry to fill them in.`
+        ? `The crosswalk lookup by journal DOI ${publishedDoi} failed (${escapeMarkdownInline(errorMessage(byJournal.reason))}), so publishedDoi comes from the preprint's own record and the journal name and publication date are absent. Retry to fill them in.`
         : `The crosswalk holds no record for ${doi} under its preprint DOI or its journal DOI ${publishedDoi}, so publishedDoi comes from the preprint's own record and the journal name and publication date — which only the crosswalk supplies — are absent. Resolve ${publishedDoi} at doi.org for the journal details.`,
     );
     const first = revisions[0];

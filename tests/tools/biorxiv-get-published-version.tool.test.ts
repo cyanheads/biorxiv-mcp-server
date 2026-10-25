@@ -624,6 +624,39 @@ describe('biorxivGetPublishedVersionTool', () => {
     });
   });
 
+  // ── Upstream error text in the notice ───────────────────────────────────────
+
+  describe('the upstream error echoed into the journal-DOI lookup notice', () => {
+    const DOI = '10.1101/2024.01.15.575123';
+
+    it.each([
+      ['- upstream *busy* [retry](later)', '\\- upstream \\*busy\\* \\[retry\\](later)'],
+      ['fetch failed', 'fetch failed'],
+    ])('renders the error %j as %j inside the notice', async (message, rendered) => {
+      mockGetPublishedVersion.mockResolvedValue(undefined);
+      mockGetDetails.mockImplementation((_doi: string, server: string) =>
+        Promise.resolve(
+          server === 'biorxiv'
+            ? [{ doi: DOI, version: '1', publishedJournalDoi: PUBLISHED.publishedDoi }]
+            : [],
+        ),
+      );
+      mockGetPublishedVersionByJournalDoi.mockRejectedValue(new Error(message));
+      const result = await runToolContract(biorxivGetPublishedVersionTool, { doi: DOI } as never, {
+        context: { errors: biorxivGetPublishedVersionTool.errors },
+      });
+      const lines = result.content
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('\n')
+        .split('\n');
+
+      expect(result.isError).toBeFalsy();
+      expect(lines).toContain(
+        `> The crosswalk lookup by journal DOI ${PUBLISHED.publishedDoi} failed (${rendered}), so publishedDoi comes from the preprint's own record and the journal name and publication date are absent. Retry to fill them in.`,
+      );
+    });
+  });
+
   // ── One budget across the chain ─────────────────────────────────────────────
 
   describe('call budget', () => {

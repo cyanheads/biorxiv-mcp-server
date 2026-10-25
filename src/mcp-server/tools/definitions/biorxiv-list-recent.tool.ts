@@ -31,6 +31,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision, ServerParam } from '@/services/biorxiv/types.js';
 import {
@@ -561,10 +562,11 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
 
       // An ignored filter answered, so it is not in failed[] and a retry will not
       // change it — but its absent pagination entry needs the same explanation.
-      if (ignored.length > 0) {
+      // Only a sent category can be ignored, so `category` is set whenever ignored[] is not empty.
+      if (ignored.length > 0 && category) {
         const labels = serverLabels(ignored);
         notices.push(
-          `${labels} ignored the category filter "${category}" and returned its unfiltered listing, so its records were left out — only the filtered results are shown.`,
+          `${labels} ignored the category filter "${escapeMarkdownInline(category)}" and returned its unfiltered listing, so its records were left out — only the filtered results are shown.`,
         );
       }
 
@@ -590,7 +592,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       } else {
         const filterDesc = [
           `dates ${input.start_date}–${input.end_date}`,
-          category ? `category "${category}"` : null,
+          category ? `category "${escapeMarkdownInline(category)}"` : null,
           funder ? `funder ${funder}` : null,
           target !== 'both' ? `server "${target}"` : null,
         ]
