@@ -924,6 +924,93 @@ describe('retryWithinBudget', () => {
     expect(err).toBe(cancelled);
     expect(elapsedMs).toBe(5_000);
   });
+
+  describe('pacing against an origin that answers every attempt with a 429 at once', () => {
+    /**
+     * Runs a ladder whose every attempt rejects with a 429 carrying `retryAfter`
+     * (`'past'` stands for an HTTP-date a minute ago), with `budgetMs` of the
+     * call left. Reports when each attempt started, in ms after the first, and
+     * what the ladder rejected with.
+     */
+    const pace = async (retryAfter: string | undefined, budgetMs: number = CALL_BUDGET_MS) => {
+      const started = Date.now();
+      const header = retryAfter === 'past' ? new Date(started - 60_000).toUTCString() : retryAfter;
+      const limited = http429(header);
+      const startedAt: number[] = [];
+      const { call } = ladder((started + budgetMs) as CallDeadline, [
+        () => {
+          startedAt.push(Date.now() - started);
+          return Promise.reject(limited);
+        },
+      ]);
+      const { err } = await settle(call);
+      return { startedAt, err, limited };
+    };
+    /** The exhausted error four header-less 429s end in. */
+    const exhausted = {
+      code: JsonRpcErrorCode.RateLimited,
+      message: 'Status: 429 (failed after 4 attempts)',
+      data: { status: 429, retryAttempts: 4, operation: 'Service.op' },
+    };
+
+    it.each([
+      ['no Retry-After', undefined],
+      ['Retry-After: 0', '0'],
+      ['an HTTP-date already past', 'past'],
+    ])(
+      'backs off exponentially on a 429 with %s, then exhausts the ladder',
+      async (_label, retryAfter) => {
+        const { startedAt, err } = await pace(retryAfter);
+
+        // baseDelayMs 1 s, no jitter: waits of 1, 2, and 4 s.
+        expect(startedAt).toEqual([0, 1_000, 3_000, 7_000]);
+        expect(err).toBeInstanceOf(McpError);
+        expect(err).toMatchObject({ code: exhausted.code, message: exhausted.message });
+        expect(err.data).toEqual(exhausted.data);
+      },
+    );
+
+    it('waits a positive Retry-After within the cap and the budget, in place of the backoff', async () => {
+      const { startedAt, err } = await pace('2');
+
+      expect(startedAt).toEqual([0, 2_000, 4_000, 6_000]);
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        message: 'Status: 429 (failed after 4 attempts)',
+        data: { status: 429, retryAfter: '2', retryAttempts: 4 },
+      });
+    });
+
+    it.each([
+      ['longer than the budget leaves', '5', 3_000],
+      ['longer than the 30 s cap', '66', CALL_BUDGET_MS],
+    ])(
+      'rejects after one request with a Retry-After %s, the 429 untouched',
+      async (_label, retryAfter, budgetMs) => {
+        const { startedAt, err, limited } = await pace(retryAfter, budgetMs);
+
+        expect(startedAt).toEqual([0]);
+        expect(err).toBe(limited);
+        expect(err.data).toMatchObject({ retryAfter });
+      },
+    );
+
+    it.each([
+      ['no Retry-After', undefined],
+      ['Retry-After: 0', '0'],
+      ['an HTTP-date already past', 'past'],
+    ])(
+      'rejects with the 429 itself, never an expiry, when the backoff after a 429 with %s outlasts the budget',
+      async (_label, retryAfter) => {
+        // 1.2 s left: the 1 s backoff fits, the 2 s one after the second attempt does not.
+        const { startedAt, err, limited } = await pace(retryAfter, 1_200);
+
+        expect(startedAt).toEqual([0, 1_000]);
+        expect(err).toBe(limited);
+        expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      },
+    );
+  });
 });
 
 describe('findRateLimit', () => {

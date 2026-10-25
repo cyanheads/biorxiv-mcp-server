@@ -2,7 +2,7 @@
 
 **Server:** biorxiv-mcp-server
 **Version:** 0.4.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.16`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
 **Zod:** ^4.6.7
@@ -400,7 +400,7 @@ import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js
 - [ ] `BIORXIV_MAILTO` included in outbound User-Agent header when set (optional env var)
 - [ ] DOI input normalized and validated with `normalizeDoi()` before calling API
 - [ ] Two-server fan-out uses `Promise.allSettled`, or `firstHit()` for a single-DOI lookup one server's answer settles; partial failures reported per-DOI in `failed[]`. A caller cancellation is rethrown, never reported as a failed leg: `ctx.signal.throwIfAborted()` after every fan-out, and before a degraded or cached result is returned
-- [ ] Every upstream ladder takes the call's remaining deadline: the handler calls `startCallDeadline()` once and passes it to every service call; the service runs each ladder through `retryWithinBudget(attempt, { deadline, operation, … })` — `withRetry` on what is left of the budget, keeping an origin's last 429 as the ladder's answer when the budget runs out — and passes the attempt `signal` to `fetchWithTimeout` and `Math.min(perAttemptMs, remainingMs)` as its timeout. A required step's expiry fails with the tool's declared retryable reason, never a bare `Timeout`
+- [ ] Every upstream ladder takes the call's remaining deadline: the handler calls `startCallDeadline()` once and passes it to every service call; the service runs each ladder through `retryWithinBudget(attempt, { deadline, operation, … })` — `withRetry` on what is left of the budget, keeping an origin's last 429 as the ladder's answer when the budget runs out, and pacing a 429 whose `Retry-After` names no usable wait (`0`, a past date) like a header-less one — and passes the attempt `signal` to `fetchWithTimeout` and `Math.min(perAttemptMs, remainingMs)` as its timeout. A required step's expiry fails with the tool's declared retryable reason, never a bare `Timeout`
 - [ ] `biorxiv_list_recent` and `biorxiv_list_published_versions` with `server="both"` surface per-server pagination state, not a merged cursor
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`

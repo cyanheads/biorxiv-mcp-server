@@ -24,12 +24,16 @@ import {
   BIORXIV_336701,
   BIORXIV_596311,
   BIORXIV_627082,
+  BIORXIV_736286,
   BIORXIV_736350,
+  EDITOR_LIST,
   HIGHWIRE_FIXTURES,
   type HighwireFixture,
   MEDRXIV_20062463,
   MEDRXIV_26361261,
   MEDRXIV_26361515,
+  MEDRXIV_26365491,
+  withEditorList,
 } from '../../helpers/highwire-fixtures.js';
 
 const mockFetch = vi.fn();
@@ -277,7 +281,7 @@ describe('BiorxivFullTextService', () => {
     if (result.kind === 'article') expect(result.title).toBeUndefined();
   });
 
-  it('caches under the v4 key generation, never reading a v1, v2, or v3 entry back', async () => {
+  it('caches under the v5 key generation, never reading a v1, v2, v3, or v4 entry back', async () => {
     mockFetch.mockResolvedValue(makeHtmlResponse(ARTICLE_HTML));
     mockExtract.mockResolvedValue({ content: 'Fresh extraction.' });
     const ctx = tenantCtx();
@@ -288,17 +292,20 @@ describe('BiorxivFullTextService', () => {
     };
     await ctx.state.set(`fulltext/v1/biorxiv/${DOI}/1`, stale);
     await ctx.state.set(`fulltext/v2/biorxiv/${DOI}/1`, stale);
-    // A v3 entry has the current shape but Markdown rendered before figures and
-    // reference numbers were reshaped.
-    await ctx.state.set(`fulltext/v3/biorxiv/${DOI}/1`, {
-      markdown: 'Stale body from an older build.',
-      sourceUrl: `https://www.biorxiv.org/content/${DOI}v1.full`,
-    });
+    // v3 and v4 entries have the current shape but Markdown rendered before
+    // figures and reference numbers were reshaped (v3), or before short sections
+    // headed with a navigation word and nested reference lists were kept (v4).
+    for (const generation of ['v3', 'v4']) {
+      await ctx.state.set(`fulltext/${generation}/biorxiv/${DOI}/1`, {
+        markdown: 'Stale body from an older build.',
+        sourceUrl: `https://www.biorxiv.org/content/${DOI}v1.full`,
+      });
+    }
 
     const result = await service.fetchFullText('biorxiv', DOI, '1', startCallDeadline(), ctx);
     expect(result.kind === 'article' && result.markdown).toBe('Fresh extraction.');
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(await ctx.state.get(`fulltext/v4/biorxiv/${DOI}/1`)).toMatchObject({
+    expect(await ctx.state.get(`fulltext/v5/biorxiv/${DOI}/1`)).toMatchObject({
       markdown: 'Fresh extraction.',
     });
   });
@@ -321,12 +328,15 @@ describe('BiorxivFullTextService', () => {
       return result;
     }
 
+    /** The real extractor, for a test that extracts a page the service did not hand it. */
+    let realExtractor: typeof import('@cyanheads/mcp-ts-core/utils')['htmlExtractor'];
+
     beforeEach(async () => {
-      const { htmlExtractor } = await vi.importActual<
+      ({ htmlExtractor: realExtractor } = await vi.importActual<
         typeof import('@cyanheads/mcp-ts-core/utils')
-      >('@cyanheads/mcp-ts-core/utils');
+      >('@cyanheads/mcp-ts-core/utils'));
       mockExtract.mockImplementation((html: string, options: object) =>
-        htmlExtractor.extract(html, options),
+        realExtractor.extract(html, options),
       );
     });
 
@@ -620,10 +630,12 @@ describe('BiorxivFullTextService', () => {
       expect(markdown).not.toMatch(/Download figure|Open in new tab/);
     });
 
-    it('leaves inline HTML escapes in body text as the page writes them', async () => {
+    // The extractor re-serializes kept HTML, writing the page's `&lt;` as `&#60;`.
+    it('keeps an escaped `<` in inline HTML escaped', async () => {
       const { markdown } = await extract(BIORXIV_336701);
-      expect(markdown).toContain('(n = 6<sub>&lt;50x</sub>, n = 1<sub>relative</sub>');
-      expect(markdown).toContain('(n = 16<sub>&lt;50x</sub>, n = 4<sub>relatives</sub>');
+      expect(markdown).toContain('(n = 6<sub>&#60;50x</sub>, n = 1<sub>relative</sub>');
+      expect(markdown).toContain('(n = 16<sub>&#60;50x</sub>, n = 4<sub>relatives</sub>');
+      expect(markdown).not.toContain('<sub><50x');
     });
 
     // The pages whose `.cit-extra` blocks hold link-outs to drop. medRxiv 26361515
@@ -709,6 +721,271 @@ describe('BiorxivFullTextService', () => {
       expect(result).not.toHaveProperty('omittedTables');
     });
 
+    it('hands a page with no .fulltext-view container to the extractor byte for byte', async () => {
+      const html =
+        '<!DOCTYPE html><html><head><title>Plain page</title></head><body><article><div class="section"><h2>Related work</h2><p>Macrophages drive limb regeneration in axolotls, and their depletion blocks blastema formation entirely.</p></div><div class="ref-list"><ol class="cit-list"><li><span class="ref-label">1.</span><div class="cit-metadata"><ol><li>A. Rich, and</li><li>N. Davidson</li></ol>Adam, G. Reduction of dimensionality.</div></li></ol></div></article></body></html>';
+      await extract({ ...BIORXIV_596311, html });
+      expect(mockExtract.mock.calls[0]?.[0]).toBe(html);
+    });
+
+    // ── Blocks Defuddle's low-score removal reads as navigation ──
+
+    /** A page whose article container holds `body`. */
+    const articlePage = (body: string) =>
+      `<!DOCTYPE html><html><head><title>Synthetic | bioRxiv</title></head><body><div class="article fulltext-view">${body}</div></body></html>`;
+    const PROSE =
+      'Body text long enough to read as an article paragraph, citing earlier work and adding more words so the page clears every length threshold the extractor applies.';
+
+    /**
+     * Section 3.2 of {@link MEDRXIV_26365491} as Markdown blocks under `heading`,
+     * through the heading after it, with each paragraph read off the page.
+     */
+    function section32Blocks(heading: string): string[] {
+      const { document } = parseHTML(MEDRXIV_26365491.html);
+      const text = (id: string) =>
+        document.getElementById(id)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      const [figure] = MEDRXIV_26365491.figures;
+      return [
+        `### ${heading}`,
+        text('p-33'),
+        `![${figure?.alt}](${figure?.src})`,
+        'Figure 3:',
+        text('p-34'),
+        text('p-35'),
+        '### 3.3 Fitting to synthetic target trajectories',
+      ];
+    }
+
+    it('keeps a short section whose heading holds a navigation word, with its figure and caption', async () => {
+      const heading = '3.2 Effect of suppressing the vaccination-related input';
+      // What the low-score removal tests: a block under 200 words under a heading
+      // holding one of its navigation words (`related`).
+      const section = parseHTML(MEDRXIV_26365491.html).document.getElementById('sec-7');
+      expect(section?.textContent?.trim().split(/\s+/).length).toBeLessThan(200);
+      const { markdown } = await extract(MEDRXIV_26365491);
+      const blocks = markdown.split('\n\n');
+      const at = blocks.indexOf(`### ${heading}`);
+      expect(blocks.slice(at, at + 7)).toEqual(section32Blocks(heading));
+      expect(blocks[at - 2]).toBe('### 3.1 Reproduction of the reference epidemic trajectory');
+      expect(markdown).not.toContain('role=');
+    });
+
+    it.each(['Related work', 'Sex-related differences', 'Immune responses to vaccination'])(
+      'keeps a subsection under 200 words whole under the heading %s',
+      async (heading) => {
+        const html = MEDRXIV_26365491.html.replace(
+          '<h3>3.2 Effect of suppressing the vaccination-related input</h3>',
+          `<h3>${heading}</h3>`,
+        );
+        expect(html).not.toBe(MEDRXIV_26365491.html);
+        const blocks = (await extract({ ...MEDRXIV_26365491, html })).markdown.split('\n\n');
+        const at = blocks.indexOf(`### ${heading}`);
+        expect(blocks.slice(at, at + 7)).toEqual(section32Blocks(heading));
+      },
+    );
+
+    it('keeps a short section whole when only a subsection heading holds the navigation word', async () => {
+      const html = articlePage(
+        `<div class="section" id="sec-1"><h2>Introduction</h2><p>${PROSE}</p><p>${PROSE}</p></div><div class="section" id="sec-2"><h2>Background</h2><div class="subsection" id="sec-3"><h3>Related work</h3><p>Earlier studies measured regeneration in two species and found the same timing in both.</p></div><div class="subsection" id="sec-4"><h3>Aims</h3><p>We test whether macrophage depletion delays blastema formation in axolotls.</p></div></div>`,
+      );
+      const blocks = (await extract({ ...BIORXIV_596311, html })).markdown.split('\n\n');
+      expect(blocks.slice(blocks.indexOf('## Background'))).toEqual([
+        '## Background',
+        '### Related work',
+        'Earlier studies measured regeneration in two species and found the same timing in both.',
+        '### Aims',
+        'We test whether macrophage depletion delays blastema formation in axolotls.',
+      ]);
+    });
+
+    it('keeps a short figure caption that holds a navigation word', async () => {
+      const html = articlePage(
+        `<div class="section" id="sec-1"><h2>Results</h2><p>${PROSE}</p><div id="F1" class="fig pos-float type-figure odd"><div class="highwire-figure"><div class="fig-inline-img-wrapper"><div class="fig-inline-img"><img data-src="https://www.biorxiv.org/F1.medium.gif" alt="Share of cases by region"></div></div></div><div class="fig-caption"><span class="fig-label">Figure 1.</span> <p id="p-4" class="first-child">Share of cases by region</p></div></div><p>${PROSE}</p></div>`,
+      );
+      const blocks = (await extract({ ...BIORXIV_596311, html })).markdown.split('\n\n');
+      const at = blocks.indexOf('![Figure 1](https://www.biorxiv.org/F1.medium.gif)');
+      expect(blocks.slice(at, at + 4)).toEqual([
+        '![Figure 1](https://www.biorxiv.org/F1.medium.gif)',
+        'Figure 1.',
+        'Share of cases by region',
+        PROSE,
+      ]);
+    });
+
+    // The scorer skips table cells, and a marked block there would stay a
+    // `<div>` in a table the extractor writes as HTML.
+    it('leaves the blocks in a table cell unmarked, so a table written as HTML keeps its paragraphs', async () => {
+      const html = articlePage(
+        `<div class="section" id="sec-1"><h2>Results</h2><p>${PROSE}</p><div class="table"><table><tr><th rowspan="2">Group</th><th>A</th></tr><tr><td><div class="cell-note">Value one, noted.</div></td></tr><tr><td colspan="2"><div>Spanning cell text.</div></td></tr></table></div></div>`,
+      );
+      const { markdown } = await extract({ ...BIORXIV_596311, html });
+      expect(markdown.split('\n\n')).toContain(
+        '<table><tbody><tr><th rowspan="2">Group</th><th>A</th></tr><tr><td><p>Value one, noted.</p></td></tr><tr><td colspan="2"><p>Spanning cell text.</p></td></tr></tbody></table>',
+      );
+      expect(markdown).not.toContain('role=');
+    });
+
+    // The scorer does reach a block in a table caption, but a marked block there
+    // would stay a `<div>` in a table the extractor writes as HTML.
+    it('leaves the blocks in a table caption unmarked, so a table written as HTML keeps its paragraphs', async () => {
+      const html = articlePage(
+        `<div class="section" id="sec-1"><h2>Results</h2><p>${PROSE}</p><div class="table"><table><caption><div class="caption-note">Counts by group, noted.</div></caption><tr><th rowspan="2">Group</th><th>A</th></tr><tr><td>Value one</td></tr></table></div></div>`,
+      );
+      const { markdown } = await extract({ ...BIORXIV_596311, html });
+      expect(markdown).toContain('<table><caption><p>Counts by group, noted.</p></caption>');
+      expect(markdown).not.toContain('role=');
+    });
+
+    // On these pages the low-score removal takes nothing from the container, so
+    // the content marker must change no byte of the Markdown.
+    it.each(
+      [...HIGHWIRE_FIXTURES.filter((f) => f !== MEDRXIV_26365491), BIORXIV_336701].map(
+        (f) => [f.sourceUrl, f] as const,
+      ),
+    )('renders %s exactly as it does without the content marker', async (_url, fixture) => {
+      const { markdown } = await extract(fixture);
+      const [reshaped, options] = mockExtract.mock.calls[0] as [string, object];
+      expect(reshaped).toContain(' role="article"');
+      const unmarked = await realExtractor.extract(
+        reshaped.replaceAll(' role="article"', ''),
+        options,
+      );
+      expect(markdown).toBe(unmarked.content.trim());
+      expect(markdown).not.toContain('role=');
+    });
+
+    describe('a list nested in a reference entry', () => {
+      const ENTRY_2 =
+        'G. G. Ice, D. G. Neary, P. W. Adams, Effects of Wildfire on Soils and Watershed Processes. J. For. 102, 16–20 (2004).';
+      const ENTRY_55 =
+        'Brown, J. F. et al. Lessons learned implementing an operational continuous United States national land change monitoring capability: The Land Change Monitoring, Assessment, and Projection (LCMAP) approach. Remote Sens. Environ. 238, 111356 (2020).';
+
+      /** The Markdown lines of `fixture` that differ from those of {@link BIORXIV_627082}, which has as many. */
+      async function changedLines(fixture: HighwireFixture): Promise<string[]> {
+        const base = (await extract(BIORXIV_627082)).markdown.split('\n');
+        const lines = (await extract(fixture)).markdown.split('\n');
+        expect(lines).toHaveLength(base.length);
+        return lines.filter((line, i) => line !== base[i]);
+      }
+
+      it.each([
+        ['mid-list', '2.', `2. A. Rich, and N. Davidson ${ENTRY_2}`],
+        [
+          'in the last entry, within 500 characters of the end of the article text',
+          '55.',
+          `55. A. Rich, and N. Davidson ${ENTRY_55}`,
+        ],
+      ])('sets the editors inline in page order, %s', async (_where, label, line) => {
+        expect(await changedLines(withEditorList(BIORXIV_627082, label))).toEqual([line]);
+      });
+
+      it('sets a list inside the citation text where it stands', async () => {
+        const html = BIORXIV_627082.html.replace(
+          'Effects of Wildfire on Soils and Watershed Processes</span>.',
+          `Effects of Wildfire on Soils and Watershed Processes</span>. In:${EDITOR_LIST}(eds.)`,
+        );
+        expect(html).not.toBe(BIORXIV_627082.html);
+        expect(await changedLines({ ...BIORXIV_627082, html })).toEqual([
+          '2. G. G. Ice, D. G. Neary, P. W. Adams, Effects of Wildfire on Soils and Watershed Processes. In: A. Rich, and N. Davidson (eds.) J. For. 102, 16–20 (2004).',
+        ]);
+      });
+
+      it('sets a list nested a level deeper inline, every item in page order', async () => {
+        const nested =
+          '<ul><li>A. Rich,<ol><li>N. Davidson, and</li><li>B. Pullman</li></ol></li><li><em>C. Ford</em></li></ul>';
+        expect(await changedLines(withEditorList(BIORXIV_627082, '2.', nested))).toEqual([
+          `2. A. Rich, N. Davidson, and B. Pullman *C. Ford* ${ENTRY_2}`,
+        ]);
+      });
+
+      // Highwire repeats an edited volume's editors in an `ol.duplicate` ahead of
+      // the citation that already names them.
+      describe('marked duplicate', () => {
+        const REF_7_CITATION =
+          'Adam, G., and M. Delbrück, 1968. Reduction of dimensionality in biological diffusion processes. In A. Rich, and N. Davidson, editors, Structural Chemistry and Molecular Biology, W. H. Freeman, San Francisco, 198–215.';
+        const DUPLICATE_LIST = EDITOR_LIST.replace('cit-ed-list', 'duplicate');
+        /** The editors' list items as the real page prints them. */
+        const RICH_ITEM =
+          '<li><span class="cit-ed"> <span class="cit-name-given-names">A.</span> <span class="cit-name-surname">Rich</span></span>, and </li>';
+        const DAVIDSON_ITEM =
+          '<li><span class="cit-ed"> <span class="cit-name-given-names">N.</span> <span class="cit-name-surname">Davidson</span></span></li>';
+
+        /** The Markdown line of reference 7 on {@link BIORXIV_736286} with `html`, and the line after it. */
+        async function ref7(html = BIORXIV_736286.html): Promise<string[]> {
+          const lines = (await extract({ ...BIORXIV_736286, html })).markdown.split('\n');
+          const at = lines.findIndex((line) => line.startsWith('7. '));
+          return lines.slice(at, at + 2);
+        }
+
+        /** {@link BIORXIV_736286} with `from` replaced once by `to`. */
+        function edited(from: string, to: string): string {
+          expect(BIORXIV_736286.html.split(from)).toHaveLength(2);
+          return BIORXIV_736286.html.replace(from, to);
+        }
+
+        it('drops the editors of reference 7 on the real page, which its citation names, leaving one line that opens with the authors', async () => {
+          const { markdown } = await extract(BIORXIV_736286);
+          const [line, next] = await ref7();
+          expect(line).toBe(`7. ${REF_7_CITATION}`);
+          expect(next).toMatch(/^8\. Heller, K\. J\., and V\. Braun, 1979\. /);
+          expect(markdown.split('A. Rich')).toHaveLength(2);
+          expect(markdown.split('N. Davidson')).toHaveLength(2);
+        });
+
+        it('drops it when the citation separates the names differently from the list items', async () => {
+          const html = edited(
+            '<span class="cit-name-surname">Rich</span></span>, and <span class="cit-ed">',
+            '<span class="cit-name-surname">Rich</span></span> &amp; <span class="cit-ed">',
+          );
+          expect((await ref7(html))[0]).toBe(
+            `7. ${REF_7_CITATION.replace('A. Rich, and N.', 'A. Rich & N.')}`,
+          );
+        });
+
+        it.each([
+          [
+            'one of its names is absent from the rest of the entry',
+            DAVIDSON_ITEM,
+            DAVIDSON_ITEM.replace('Davidson', 'Davis'),
+            `7. A. Rich, and N. Davis ${REF_7_CITATION}`,
+          ],
+          [
+            'the rest of the entry gives its names in another order',
+            `${RICH_ITEM}${DAVIDSON_ITEM}`,
+            `${DAVIDSON_ITEM}${RICH_ITEM}`,
+            `7. N. Davidson A. Rich, and ${REF_7_CITATION}`,
+          ],
+          [
+            'a name is only the start of a longer one in the rest of the entry',
+            DAVIDSON_ITEM,
+            DAVIDSON_ITEM.replace('Davidson', 'David'),
+            `7. A. Rich, and N. David ${REF_7_CITATION}`,
+          ],
+          [
+            'it holds an element other than a list item',
+            DAVIDSON_ITEM,
+            `${DAVIDSON_ITEM}<span class="cit-ed">X. Extra</span>`,
+            `7. A. Rich, and N. Davidson X. Extra ${REF_7_CITATION}`,
+          ],
+          [
+            'it holds text outside its list items',
+            '<ol class="duplicate">',
+            '<ol class="duplicate">Eds. Q. Quill: ',
+            `7. Eds. Q. Quill: A. Rich, and N. Davidson ${REF_7_CITATION}`,
+          ],
+        ])('sets it inline, losing no text, when %s', async (_case, from, to, line) => {
+          expect((await ref7(edited(from, to)))[0]).toBe(line);
+        });
+
+        it('sets it inline when only another list nested in the entry names the same people', async () => {
+          const twice = withEditorList(BIORXIV_627082, '2.', DUPLICATE_LIST + DUPLICATE_LIST);
+          expect(await changedLines(twice)).toEqual([
+            `2. A. Rich, and N. Davidson A. Rich, and N. Davidson ${ENTRY_2}`,
+          ]);
+        });
+      });
+    });
+
     it('serves the omitted tables back from the cache with the article', async () => {
       const ctx = tenantCtx();
       const first = await extract(MEDRXIV_20062463, ctx);
@@ -727,7 +1004,10 @@ describe('BiorxivFullTextService', () => {
    * ending in a break and as breaks throughout, a numeric label that never
    * closes, a paragraph of many formulas, and every element a pass queries the
    * subtree of — citation anchors, inline and display formulas, figures and their image holders,
-   * reference lists and their link-out blocks, tables — nested in one another.
+   * reference lists and their link-out blocks, tables, lists in reference
+   * entries, and the block elements and table cells the content marker walks —
+   * nested in one another; and the item names of a duplicate list searched for
+   * in its entry, past fragments of longer names.
    * Thread CPU time, never wall clock; the extractor is stubbed so only the page
    * pass is measured.
    */
@@ -839,6 +1119,68 @@ describe('BiorxivFullTextService', () => {
               { length: n / 40 },
               (_, i) => `<li><span class="ref-label">${i + 1}.</span>Entry.</li>`,
             ).join(''),
+          ),
+      ],
+      [
+        'many items of one list in a reference entry',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span><ol>${'<li>A. Editor, and</li>'.repeat(n / 22)}</ol>Entry.</li>`,
+          ),
+      ],
+      [
+        'a duplicate list item and its entry on one long line ending in a break',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span><ol class="duplicate"><li>${'§1 x'.repeat(n / 8)}\ny</li></ol>${'§1 x'.repeat(n / 8)}\nz</li>`,
+          ),
+      ],
+      [
+        'a duplicate list item and its entry of breaks throughout',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span><ol class="duplicate"><li>${'  \r\n'.repeat(n / 8)}</li></ol>${'  \r\n'.repeat(n / 8)}</li>`,
+          ),
+      ],
+      [
+        'a duplicate list item of separators throughout',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span><ol class="duplicate"><li>A.${', and'.repeat(n / 5)}</li></ol>A. Editor.</li>`,
+          ),
+      ],
+      [
+        'many items of a duplicate list, each named late in a long entry',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span><ol class="duplicate">${'<li>A. Editor, and</li>'.repeat(n / 44)}</ol>${'x '.repeat(n / 4)}${'A. Editor, and '.repeat(n / 30)}</li>`,
+          ),
+      ],
+      [
+        'many items of a duplicate list, each named past fragments of a longer name',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span><ol class="duplicate">${'<li>A. Editor, and</li>'.repeat(n / 44)}</ol>${'A. Editors '.repeat(n / 22)}${'A. Editor, and '.repeat(n / 30)}</li>`,
+          ),
+      ],
+      // The nested shapes below run about as deep as those above: linkedom's own
+      // parse slows superlinearly on far deeper nesting, before any pass runs.
+      [
+        'lists nested in lists in one reference entry',
+        (n) =>
+          refList(
+            `<li><span class="ref-label">1.</span>${'<ol><li>A. Editor, with an affiliation line long enough to keep nesting shallow, and'.repeat(n / 87)}`,
+          ),
+      ],
+      [
+        'sections headed with a navigation word nested in one another',
+        (n) => '<div class="section"><h3>Related work</h3><p>Text.</p>'.repeat(n / 52),
+      ],
+      [
+        'block elements nested in table cells',
+        (n) =>
+          '<table><tr><td><div class="cell">Cell text, noted here for the record in this table.'.repeat(
+            n / 240,
           ),
       ],
     ];
@@ -1189,6 +1531,29 @@ describe('BiorxivFullTextService', () => {
         expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
         expect(err.data?.reason).toBeUndefined();
         expect(elapsedMs).toBe(10_000);
+      });
+
+      it('backs off on a 429 with Retry-After: 0 as on one with no header, never re-sending at once', async () => {
+        const startedAt: number[] = [];
+        mockFetch.mockImplementation(() => {
+          startedAt.push(Date.now());
+          return Promise.reject(httpError(429, '0'));
+        });
+        const { value } = await settle(fetchPage(tenantCtx(), startCallDeadline()));
+
+        // 500 ms base, ±25% jitter: waits of 375–625, 750–1250, 1500–2500 ms.
+        const gaps = startedAt.slice(1).map((t, i) => t - (startedAt[i] as number));
+        expect(gaps).toHaveLength(3);
+        for (const [i, gap] of gaps.entries()) {
+          expect(gap).toBeGreaterThanOrEqual(375 * 2 ** i);
+          expect(gap).toBeLessThanOrEqual(625 * 2 ** i);
+        }
+        expect(value).toEqual({
+          kind: 'unavailable',
+          reason: 'rate_limited',
+          detail: 'The full-text origin is rate-limiting this host (HTTP 429).',
+          sourceUrl: `https://www.biorxiv.org/content/${DOI}v1.full`,
+        });
       });
 
       it('returns rate_limited at once on a Retry-After longer than the budget leaves', async () => {

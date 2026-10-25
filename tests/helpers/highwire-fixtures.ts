@@ -8,7 +8,9 @@
  * in `title` and `alt`, `div.ref-list` entries with `span.ref-label`,
  * `div.cit-metadata`, and `.cit-extra` link-outs, the `div.table` caption +
  * `table-expand-popup` block that stands in for a table's cells, and
- * `span.disp-formula` images set inside paragraphs. Each fixture lists what
+ * `span.disp-formula` images set inside paragraphs, a short subsection headed
+ * with a word Defuddle reads as navigation, and a reference entry that repeats
+ * its editors in an `ol.duplicate` list. Each fixture lists what
  * extraction must keep, so a test can assert every reference, label, figure,
  * and formula rather than a sample.
  * @module tests/helpers/highwire-fixtures
@@ -309,8 +311,44 @@ export const MEDRXIV_26361261: HighwireFixture = {
 };
 
 /**
+ * medRxiv 10.64898/2026.10.13.26365491 v1 — a Results section whose subsection
+ * `3.2 Effect of suppressing the vaccination-related input` runs under 200 words
+ * with a figure, between two trimmed subsections, and references labelled `[1].`.
+ */
+export const MEDRXIV_26365491: HighwireFixture = {
+  server: 'medrxiv',
+  doi: '10.64898/2026.10.13.26365491',
+  version: '1',
+  sourceUrl: 'https://www.medrxiv.org/content/10.64898/2026.10.13.26365491v1.full',
+  html: load('medrxiv-26365491v1.html'),
+  formulas: [],
+  figures: [
+    {
+      alt: 'Figure 3',
+      src: 'https://www.medrxiv.org/content/medrxiv/early/2026/10/14/2026.10.13.26365491/F3.medium.gif',
+      caption: 'after suppression of the vaccination-related input (solid line).',
+    },
+  ],
+  labels: [
+    'shown in Table 1 (which',
+    'presented in Figure 2.',
+    'Figure 3 shows',
+    'listed in Table 1. Despite',
+    'Figure 4 shows',
+    'FDH (Figure 4(a))',
+  ],
+  tables: [],
+  referenceDois: ['10.1038/s41598-023-44942-6'],
+  referenceMarkers: ['1.', '2.'],
+  referenceTitles: [
+    'Mathematical Models in Epidemiology',
+    'Evaluating the COVID-19 vaccination program in Japan, 2021 using the counterfactual reproduction number',
+  ],
+};
+
+/**
  * bioRxiv 10.1101/336701 v1 — one paragraph whose subscripts carry an escaped
- * `<` (`<sub>&lt;50x</sub>`), which must reach the Markdown as written.
+ * `<` (`<sub>&lt;50x</sub>`), which must reach the Markdown still escaped.
  */
 export const BIORXIV_336701: HighwireFixture = {
   server: 'biorxiv',
@@ -325,6 +363,32 @@ export const BIORXIV_336701: HighwireFixture = {
   referenceDois: [],
   referenceMarkers: [],
   referenceTitles: [],
+};
+
+/**
+ * bioRxiv 10.64898/2026.07.03.736286 v2 — references labelled 6–8, where entry 7
+ * names its editors twice: in an `ol.duplicate` ahead of the citation, and in the
+ * citation itself (`In A. Rich, and N. Davidson, editors`). Kept out of
+ * {@link HIGHWIRE_FIXTURES}: extraction drops that duplicate list, so entry 7's
+ * whole `div.cit-metadata` text does not reach the Markdown.
+ */
+export const BIORXIV_736286: HighwireFixture = {
+  server: 'biorxiv',
+  doi: '10.64898/2026.07.03.736286',
+  version: '2',
+  sourceUrl: 'https://www.biorxiv.org/content/10.64898/2026.07.03.736286v2.full',
+  html: load('biorxiv-736286v2.html'),
+  formulas: [],
+  figures: [],
+  labels: ['(1–3)', '(4–6)', '(7–9)', '(7)', '(10–14)', '(15)', '(10–12, 16)'],
+  tables: [],
+  referenceDois: ['10.1007/s12080-007-0001-1'],
+  referenceMarkers: ['6.', '7.', '8.'],
+  referenceTitles: [
+    'Alternative stable states in host–phage dynamics',
+    'Reduction of dimensionality in biological diffusion processes',
+    'Accelerated Adsorption of Bacteriophage T5 to Escherichia coli F Resulting from Reversible Tail Fiber–Lipopolysaccharide Binding',
+  ],
 };
 
 /**
@@ -348,6 +412,31 @@ export function authorYearVariant(): HighwireFixture & { authorYearLabels: strin
 }
 
 /**
+ * An edited volume's two editors as a list nested in a reference entry, in
+ * Highwire's citation markup. Synthetic, modeled on the reference entries of
+ * these fixtures; {@link withEditorList} sets it ahead of the citation.
+ */
+export const EDITOR_LIST =
+  '<ol class="cit-ed-list"><li><span class="cit-ed"><span class="cit-name-given-names">A.</span> <span class="cit-name-surname">Rich</span></span>, and</li><li><span class="cit-ed"><span class="cit-name-given-names">N.</span> <span class="cit-name-surname">Davidson</span></span></li></ol>';
+
+/**
+ * `fixture` with `list` opening the `div.cit-metadata` of the reference entry
+ * labelled `label` (as printed, `55.`). Throws when the page has no such entry.
+ */
+export function withEditorList(
+  fixture: HighwireFixture,
+  label: string,
+  list = EDITOR_LIST,
+): HighwireFixture {
+  const entry = fixture.html.indexOf(`<span class="ref-label">${label}</span>`);
+  const open = '<div class="cit-metadata">';
+  const at = entry < 0 ? -1 : fixture.html.indexOf(open, entry);
+  if (at < 0) throw new Error(`No reference entry labelled ${label} in ${fixture.sourceUrl}`);
+  const cut = at + open.length;
+  return { ...fixture, html: fixture.html.slice(0, cut) + list + fixture.html.slice(cut) };
+}
+
+/**
  * Every fixture page with figures or references, for assertions that hold on
  * all of them. {@link BIORXIV_336701} stays out: its body escapes are the case
  * the figure-entity assertion must not reach.
@@ -360,4 +449,5 @@ export const HIGHWIRE_FIXTURES = [
   BIORXIV_736350,
   MEDRXIV_26361515,
   MEDRXIV_26361261,
+  MEDRXIV_26365491,
 ];

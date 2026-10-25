@@ -875,6 +875,33 @@ describe('EuropePmcService', () => {
         },
       );
 
+      // Wiring only: retryWithinBudget's own tests table every unusable Retry-After
+      // shape, and both calls run on it, so one call proves the origin's 429 reaches
+      // the ladder in the shape it reads.
+      it('backs off on a 429 with Retry-After: 0 as on one with no header, never re-sending at once', async () => {
+        const startedAt: number[] = [];
+        mockFetch.mockImplementation(() => {
+          startedAt.push(Date.now());
+          return Promise.reject(httpError(429, '0'));
+        });
+        const { err } = await settle(EPMC_CALLS.search(service, createMockContext()));
+
+        // 300 ms base, ±25% jitter: waits of 225–375, 450–750, 900–1500 ms.
+        const gaps = startedAt.slice(1).map((t, i) => t - (startedAt[i] as number));
+        expect(gaps).toHaveLength(3);
+        for (const [i, gap] of gaps.entries()) {
+          expect(gap).toBeGreaterThanOrEqual(225 * 2 ** i);
+          expect(gap).toBeLessThanOrEqual(375 * 2 ** i);
+        }
+        expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+        expect(err.message).toBe('EuropePMC is rate-limiting this host (HTTP 429).');
+        expect(err.data).toEqual({
+          reason: 'rate_limited',
+          retryable: true,
+          recovery: expect.any(Object),
+        });
+      });
+
       it.each(Object.entries(EPMC_CALLS))(
         '%s keeps a 429 the budget ran out after as rate_limited, never an expiry',
         async (_name, call) => {

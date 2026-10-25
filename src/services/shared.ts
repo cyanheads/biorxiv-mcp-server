@@ -4,9 +4,11 @@
  * upstream-text normalization, the Markdown escaper every `format()` applies
  * to upstream text, `Retry-After` parsing and rate-limit rejection lookup
  * shared by every fetch path, the per-tool-call time budget every upstream
- * request draws on (with the retry ladder that runs inside it and keeps an
- * origin's 429 as its answer when the budget runs out), the per-server DOI fan-out that settles on the server holding the DOI, and the
- * server version string used in User-Agent headers across all services.
+ * request draws on (with the retry ladder that runs inside it, backs off on a
+ * 429 whose `Retry-After` names no usable wait, and keeps an origin's 429 as
+ * its answer when the budget runs out), the per-server DOI fan-out that settles
+ * on the server holding the DOI, and the server version string used in
+ * User-Agent headers across all services.
  * @module services/shared
  */
 
@@ -441,8 +443,11 @@ function changesRendering(char: string, text: string, index: number): boolean {
  * assembled text (the formatter's own `**Label:**` markup must survive), and
  * never to `structuredContent`, identifiers an agent copies back into a call
  * (DOIs, `jatsxmlUrl`, `sourceUrl`), or extractor-produced Markdown such as the
- * `biorxiv_get_fulltext` `content`. Local because `@cyanheads/mcp-ts-core`
- * exports an HTML escaper only.
+ * `biorxiv_get_fulltext` `content`. Kept local rather than the framework's
+ * `escapeMarkdownInline` because that one escapes more by design — every `[`,
+ * `]`, `|`, and `~`, entity-shaped `&` runs, edge whitespace — so it would add
+ * backslashes to the abstracts and titles every tool renders where none
+ * changes how they render.
  */
 export function escapeMarkdown(text: string): string {
   return text
@@ -458,10 +463,11 @@ export function escapeMarkdown(text: string): string {
  * Reads a `Retry-After` header value as a wait in whole seconds. RFC 9110 §10.2.3
  * allows either delta-seconds or an HTTP-date; the date form is converted to a
  * wait from now. Returns undefined for an absent, malformed, or unparseable
- * value, and for a wait of zero or less (`0`, an HTTP-date already past): by the
- * time a 429 surfaces, `withRetry` has re-sent the request without waiting, so
- * a zero wait is no usable wait. Callers then fall back to generic wording
- * rather than telling an agent to wait 0 seconds and walk back into the limiter.
+ * value, and for a wait of zero or less (`0`, an HTTP-date already past): a
+ * zero wait is no usable wait. Callers then fall back to generic wording
+ * rather than telling an agent to wait 0 seconds and walk back into the
+ * limiter, and `retryWithinBudget` keeps such a header from `withRetry`, which
+ * would re-send at once.
  *
  * Shared by every fetch path — the JSON API, the full-text article origin, and
  * EuropePMC each surface the same header and must read it identically.
@@ -582,13 +588,31 @@ function isHttp429(err: unknown): err is McpError {
 }
 
 /**
+ * The 429 as `withRetry` should see it: without a `Retry-After` that
+ * {@link parseRetryAfterSeconds} reads as no usable wait (`0`, an HTTP-date
+ * already past). `withRetry` would take that header as a zero wait and re-send
+ * at once, into the limiter that just refused; without it the attempt backs off
+ * exponentially, as on a 429 that named no wait. The copy carries the origin's
+ * error as its `cause`.
+ */
+function withoutUnusableRetryAfter(err: McpError): McpError {
+  const { retryAfter, ...data } = err.data as Record<string, unknown>;
+  if (retryAfter === undefined || parseRetryAfterSeconds(retryAfter) !== undefined) return err;
+  return new McpError(err.code, err.message, data, { cause: err });
+}
+
+/**
  * Runs one retry ladder on what is left of a call's budget: `withRetry` with
  * {@link ladderBudgetMs} as its `deadlineMs`, so a spent budget fails before
- * any request. The ladder remembers the last HTTP 429 an attempt received.
- * When the budget then runs out — in the backoff after it, or by cutting a
- * later attempt short — `withRetry` rejects with a `Timeout`
+ * any request. A 429 whose `Retry-After` names no usable wait reaches
+ * `withRetry` without the header, so the ladder paces it with the exponential
+ * backoff a header-less 429 takes rather than re-sending at once.
+ *
+ * The ladder remembers the last HTTP 429 an attempt received. When the budget
+ * then runs out — in the backoff after it, or by cutting a later attempt
+ * short — `withRetry` rejects with a `Timeout`
  * (`reason: 'retry_deadline_exceeded'`) whose `cause` is only the last
- * attempt; the ladder rejects with the 429 instead, `Retry-After` and all,
+ * attempt; the ladder rejects with the 429 instead, as the origin sent it,
  * since it is still the origin's answer and the one the services classify.
  * Every other failure is rejected as `withRetry` threw it.
  */
@@ -607,8 +631,9 @@ export async function retryWithinBudget<T>(
         try {
           return await attempt(a);
         } catch (err) {
-          if (isHttp429(err)) lastRateLimit = err;
-          throw err;
+          if (!isHttp429(err)) throw err;
+          lastRateLimit = err;
+          throw withoutUnusableRetryAfter(err);
         }
       },
       { ...retryOptions, deadlineMs: ladderBudgetMs(deadline, options.operation) },
