@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "biorxiv-mcp-server",
+  "version": "0.4.3",
+  "description": "Search and retrieve bioRxiv and medRxiv preprints — by DOI, date interval, or keyword — via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/biorxiv-mcp-server#readme",
+  "repository": "git+https://github.com/cyanheads/biorxiv-mcp-server.git",
+  "license": "Apache-2.0",
+  "keywords": [
+    "biorxiv",
+    "medrxiv",
+    "preprint",
+    "biomedical",
+    "life-sciences",
+    "research",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent",
+    "europepmc",
+    "doi"
+  ]
+}
