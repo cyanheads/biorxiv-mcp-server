@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
+
+Publishes the biorxiv-guide Agent Skill over MCP as skill://biorxiv-guide/SKILL.md and moves to mcp-ts-core 0.13.18, with MCP SDK 2.4 and the fix for the per-request HTTP memory leak in 0.13.16.
+
 ## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-10-25
 
 biorxiv_get_fulltext keeps short sections headed with a navigation word and renders lists nested in reference entries inline. A 429 with Retry-After 0 or a past date backs off like one with no header, and caller text echoed into notices is Markdown-escaped.
