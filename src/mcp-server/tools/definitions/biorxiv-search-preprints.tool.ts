@@ -161,7 +161,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       server: z
         .enum(['biorxiv', 'medrxiv', 'both'])
         .default('both')
-        .describe('Server scope for enrichment. "both" checks all matching DOIs on both servers.'),
+        .describe(
+          'Server scope for the search and its enrichment: "biorxiv" or "medrxiv" returns only that server\'s preprints; "both" searches both and checks each matching DOI on both servers.',
+        ),
       date_from: blankAsUnset(
         z
           .string()
