@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/biorxiv-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/biorxiv-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/biorxiv-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -123,112 +123,32 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://biorxiv.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "biorxiv-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://biorxiv.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http biorxiv-mcp-server https://biorxiv.caseyjhand.com/mcp
 ```
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "biorxiv-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/biorxiv-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "BIORXIV_MAILTO": "your@email.com"
-      }
-    }
-  }
-}
+```sh
+claude mcp add biorxiv-mcp-server -- npx -y @cyanheads/biorxiv-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "biorxiv-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/biorxiv-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "BIORXIV_MAILTO": "your@email.com"
-      }
+      "args": ["-y", "@cyanheads/biorxiv-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "biorxiv-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "-e", "BIORXIV_MAILTO=your@email.com", "ghcr.io/cyanheads/biorxiv-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 BIORXIV_MAILTO=your@email.com bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/biorxiv-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd biorxiv-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# optionally set BIORXIV_MAILTO for polite API access
-```
+A contact email in `BIORXIV_MAILTO` (`-e BIORXIV_MAILTO=you@example.com`, or an `env` entry) identifies your requests in the `User-Agent` header, as the Cold Spring Harbor Lab API guidelines ask. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -256,6 +176,16 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/biorxiv-mcp-server.git
+  cd biorxiv-mcp-server && bun install
+  cp .env.example .env   # optionally set BIORXIV_MAILTO
+  ```
+
 - **Build and run:**
 
   ```sh
@@ -279,11 +209,10 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ### Docker
 
 ```sh
-docker build -t biorxiv-mcp-server .
-docker run --rm -e BIORXIV_MAILTO=your@email.com -p 3010:3010 biorxiv-mcp-server
+docker run --rm -e BIORXIV_MAILTO=your@email.com -p 3010:3010 ghcr.io/cyanheads/biorxiv-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/biorxiv-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/biorxiv-mcp-server`; the server listens at `http://localhost:3010/mcp`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/biorxiv-mcp-server:latest"]`. To build locally, `docker build -t biorxiv-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
