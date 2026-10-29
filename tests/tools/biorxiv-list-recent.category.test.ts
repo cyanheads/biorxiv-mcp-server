@@ -30,9 +30,12 @@ type Server = 'biorxiv' | 'medrxiv';
 /**
  * What one server answers: `category` is the echo the API puts in
  * `messages[0].category` — the applied filter, or `"all"` when it applied none.
+ * `newPapers` is `messages[0].count_new_papers`, sent as the live string when set.
  * `status` answers with that HTTP status instead of a listing.
  */
-type Leg = { category: string; records?: number; total?: number } | { status: number };
+type Leg =
+  | { category: string; records?: number; total?: number; newPapers?: string }
+  | { status: number };
 
 const http = createFetchMock();
 
@@ -54,6 +57,7 @@ function answer(legs: Partial<Record<Server, Leg>>): void {
             category: echoed,
             cursor: 0,
             count: records,
+            ...(leg.newPapers !== undefined && { count_new_papers: leg.newPapers }),
             total: String(leg.total ?? records),
           },
         ],
@@ -227,6 +231,38 @@ describe('biorxiv_list_recent — category filtering against the live listing en
     expect(out.preprints).toHaveLength(4);
     expect(out.categoryNote).toBeUndefined();
     expect(out.notice).toBeUndefined();
+  });
+
+  it('reports each server its own new-preprint count for a shared category', async () => {
+    answer({
+      biorxiv: { category: 'pathology', total: 400, newPapers: '312' },
+      medrxiv: { category: 'pathology', total: 250, newPapers: '201' },
+    });
+    const result = await run({ server: 'both', category: 'Pathology' });
+
+    expect(structured(result).pagination).toEqual({
+      biorxiv: { cursor: 0, total: 400, newPreprints: 312, nextCursor: 30 },
+      medrxiv: { cursor: 0, total: 250, newPreprints: 201, nextCursor: 30 },
+    });
+    const lines = text(result).split('\n');
+    expect(lines).toContain(
+      '**bioRxiv:** page offset 0, total 400, 312 new preprints — next cursor: 30',
+    );
+    expect(lines).toContain(
+      '**medRxiv:** page offset 0, total 250, 201 new preprints — next cursor: 30',
+    );
+  });
+
+  it('reads the new-preprint count of a server-exclusive category (live medRxiv epidemiology)', async () => {
+    answer({ medrxiv: { category: 'epidemiology', records: 30, total: 46, newPapers: '42' } });
+    const result = await run({ server: 'both', category: 'Epidemiology' });
+
+    expect(structured(result).pagination).toEqual({
+      medrxiv: { cursor: 0, total: 46, newPreprints: 42, nextCursor: 30 },
+    });
+    expect(text(result).split('\n')).toContain(
+      '**medRxiv:** page offset 0, total 46, 42 new preprints — next cursor: 30',
+    );
   });
 
   // ── Ignored-filter guard (#45) ──────────────────────────────────────────────

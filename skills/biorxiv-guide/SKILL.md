@@ -4,7 +4,7 @@ description: Search syntax, identifier origins, and counting gates for the biorx
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -26,10 +26,9 @@ No citation counts and no journal-article content beyond the crosswalk record. P
 
 ### Keyword search (`biorxiv_search_preprints`)
 
-`query` is EuropePMC query syntax, passed through and joined to the server's own clauses with `AND`.
+`query` is EuropePMC query syntax, passed through as written inside one pair of parentheses, then joined to the server's author, date, and server clauses with `AND`.
 
-- **Wrap every `OR` in parentheses.** The server appends `AND <date and server clauses>`, and in EuropePMC's parser an unparenthesized `OR` before an `AND` stops constraining the match: `transformer OR CRISPR` returns exactly the hits for `CRISPR` alone, while `(transformer OR CRISPR)` returns both sets. The same applies to any `OR` inside a larger query.
-- **Spell out synonyms yourself.** Synonym expansion is off, so `"heart attack"` misses the far larger set written `"myocardial infarction"`. Search `("heart attack" OR "myocardial infarction")`.
+- **Spell out synonyms yourself.** Synonym expansion is off, so `"heart attack"` misses the far larger set written `"myocardial infarction"`. Search `"heart attack" OR "myocardial infarction"`.
 - **Scope by field when precision matters.** A bare term or phrase matches more than the title and abstract. `TITLE_ABS:"…"`, `TITLE:"…"`, `ABSTRACT:"…"`, `AUTH:"…"`, and `AFF:"…"` all work inside `query`; `TITLE_ABS:"base editing"` and `TITLE:"base editing"` each match fewer records than the bare phrase.
 - **Author names.** `author` becomes `AUTH:"…"`. A full name and `Surname Initial` match the same records (`Jennifer Doudna`, `Doudna J`); adding a middle initial (`Doudna JA`) drops records indexed without it. The surname alone is broadest. Confirm identity from co-authors and institution before attributing a list to one person.
 - **`server` scopes the search itself**, not only enrichment: `"medrxiv"` returns medRxiv preprints only.
@@ -37,7 +36,7 @@ No citation counts and no journal-article content beyond the crosswalk record. P
 
 ### Posting-date listing (`biorxiv_list_recent`)
 
-- **Rows are revisions, and `total` counts them.** A revised preprint reappears on the day its new version posts, under its old DOI and `version` 2, 3, …. bioRxiv's 2026-10-01..07 listing held 1,460 rows, of which 1,092 were new preprints. To count or list new preprints, keep `version` `"1"` rows.
+- **Rows are revisions, and `total` counts them.** A revised preprint reappears on the day its new version posts, under its old DOI and `version` 2, 3, …. bioRxiv's 2026-10-01..07 listing held 1,460 rows, of which 1,092 were new preprints. To count new preprints, read each server's `newPreprints` from the first page, which carries the whole listing's count for those filters; to list them, keep `version` `"1"` rows.
 - **It has no keyword filter.** At 30 rows a page, one bioRxiv week runs to dozens of pages. For a topic within a window, search with `date_from` / `date_to` and filter enriched results on `category` locally; reserve the listing for a complete category census or for the last day or two that EuropePMC has not indexed yet.
 - **A funder filter is not a funder's output.** It reaches only records api.biorxiv.org linked to that ROR ID: NIH (`01cwqze88`) returned 9 rows for that same week, all of them revisions. Report what it returns as "preprints bioRxiv links to this funder", never as everything the funder supported.
 
@@ -50,9 +49,9 @@ No citation counts and no journal-article content beyond the crosswalk record. P
 
 ## Workflows
 
-**New preprints on a topic in a period.** `biorxiv_search_preprints` with a parenthesized, field-scoped query and `date_from` / `date_to`, `include_abstract: false` and `limit: 100` for triage, passing each `nextCursorMark` back as `cursor_mark`. Narrow to a field by the `category` on enriched results (EuropePMC-fallback results carry none). Read abstracts for the shortlist with `biorxiv_get_preprint` (10 DOIs a call). For the last day or two, add a `biorxiv_list_recent` pass with `category`.
+**New preprints on a topic in a period.** `biorxiv_search_preprints` with a field-scoped query and `date_from` / `date_to`, `include_abstract: false` and `limit: 100` for triage, passing each `nextCursorMark` back as `cursor_mark`. Narrow to a field by the `category` on enriched results (EuropePMC-fallback results carry none). Read abstracts for the shortlist with `biorxiv_get_preprint` (10 DOIs a call). For the last day or two, add a `biorxiv_list_recent` pass with `category`.
 
-**Everything a category posted in a window.** `biorxiv_list_recent` with `category`, each server advanced at its own `nextCursor` until none is returned; keep `version` `"1"` rows for new preprints.
+**Everything a category posted in a window.** `biorxiv_list_recent` with `category`, each server advanced at its own `nextCursor` until none is returned; keep `version` `"1"` rows for new preprints, whose number each server's `newPreprints` gives on the first page.
 
 **Find a person's preprints.** `author` (surname plus initial, then surname alone if the list looks short) with `server` when the field is clear; add a topic `query` to separate namesakes.
 

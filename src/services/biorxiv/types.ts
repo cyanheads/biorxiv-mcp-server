@@ -136,6 +136,14 @@ export interface PreprintRevision {
 /** Pagination metadata for a single server */
 export interface ServerPaginationState {
   cursor: number;
+  /**
+   * Upstream `count_new_papers`: the preprints whose first version posted in the
+   * interval, for the applied filters — the same on every cursor page. Absent
+   * when the page carries no readable count (an empty interval, a cursor past
+   * the last page), never defaulted to 0.
+   */
+  newPreprints?: number;
+  /** Rows in the interval — one per revision posted in it, not one per preprint */
   total: number;
 }
 

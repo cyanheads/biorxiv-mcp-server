@@ -58,6 +58,11 @@ function firstCalledUrl(): string {
   return url;
 }
 
+/** The `query` parameter of the first EuropePMC request, decoded. */
+function sentQuery(): string | null {
+  return new URL(firstCalledUrl()).searchParams.get('query');
+}
+
 function makeResponse(body: unknown): Response {
   return {
     text: () => Promise.resolve(JSON.stringify(body)),
@@ -385,8 +390,9 @@ describe('EuropePmcService', () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'CRISPR', author: 'Jennifer Doudna' }, startCallDeadline(), ctx);
-    const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
-    expect(decoded).toContain('CRISPR AND AUTH:"Jennifer Doudna"');
+    expect(sentQuery()).toBe(
+      '(CRISPR) AND AUTH:"Jennifer Doudna" AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)',
+    );
   });
 
   it('supports an author-only search when query is omitted', async () => {
@@ -405,6 +411,120 @@ describe('EuropePmcService', () => {
     await service.search({ author: 'Sm"ith' }, startCallDeadline(), ctx);
     const decoded = decodeURIComponent(firstCalledUrl()).replace(/\+/g, ' ');
     expect(decoded).toContain('AUTH:"Smith"');
+  });
+
+  // ── Built query ───────────────────────────────────────────────────────────────
+
+  describe('built query', () => {
+    beforeEach(() => {
+      mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
+    });
+
+    /**
+     * EuropePMC makes bare `OR` operands optional once required `AND` clauses
+     * sit beside them, so the caller's query is grouped before any clause is
+     * joined to it: `transformer OR CRISPR AND PUBLISHER:bioRxiv` matches the
+     * `CRISPR` set alone.
+     */
+    it.each<[string, Parameters<EuropePmcService['search']>[0], string]>([
+      [
+        'an OR query on one server',
+        { query: 'transformer OR CRISPR', server: 'biorxiv' },
+        '(transformer OR CRISPR) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'an OR query on medRxiv',
+        { query: 'transformer OR CRISPR', server: 'medrxiv' },
+        '(transformer OR CRISPR) AND PUBLISHER:medRxiv',
+      ],
+      [
+        'an OR query on both servers',
+        { query: 'transformer OR CRISPR', server: 'both' },
+        '(transformer OR CRISPR) AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)',
+      ],
+      [
+        'an OR query with server omitted',
+        { query: 'transformer OR CRISPR' },
+        '(transformer OR CRISPR) AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)',
+      ],
+      [
+        'a lowercase or',
+        { query: 'transformer or CRISPR', server: 'biorxiv' },
+        '(transformer or CRISPR) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'an OR query beside a NOT',
+        { query: 'transformer OR CRISPR NOT plant', server: 'biorxiv' },
+        '(transformer OR CRISPR NOT plant) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a query with author and dates',
+        {
+          query: 'transformer OR CRISPR',
+          author: 'Doudna J',
+          dateFrom: '2024-01-01',
+          dateTo: '2024-06-30',
+          server: 'biorxiv',
+        },
+        '(transformer OR CRISPR) AND AUTH:"Doudna J" AND FIRST_PDATE:[2024-01-01 TO 2024-06-30] AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a query the caller already grouped',
+        { query: '(a OR b)', server: 'biorxiv' },
+        '((a OR b)) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a query with surrounding whitespace',
+        { query: '  transformer OR CRISPR \n', server: 'biorxiv' },
+        '(transformer OR CRISPR) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a leading NOT',
+        { query: 'NOT plant', server: 'biorxiv' },
+        '(NOT plant) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a field-scoped phrase',
+        { query: 'TITLE:"base editing"', server: 'biorxiv' },
+        '(TITLE:"base editing") AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'unbalanced parentheses',
+        { query: '(a OR b', server: 'biorxiv' },
+        '((a OR b) AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a stray closing parenthesis',
+        { query: 'a)', server: 'biorxiv' },
+        '(a)) AND PUBLISHER:bioRxiv',
+      ],
+      ['a trailing backslash', { query: 'a\\', server: 'biorxiv' }, '(a\\) AND PUBLISHER:bioRxiv'],
+      ['an unclosed quote', { query: '"a b', server: 'biorxiv' }, '("a b) AND PUBLISHER:bioRxiv'],
+    ])('groups %s before joining clauses', async (_label, options, expected) => {
+      await service.search(options, startCallDeadline(), createMockContext());
+      expect(sentQuery()).toBe(expected);
+    });
+
+    it.each<[string, Parameters<EuropePmcService['search']>[0], string]>([
+      [
+        'an author-only call',
+        { author: 'Doudna J', server: 'biorxiv' },
+        'AUTH:"Doudna J" AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'a whitespace-only query beside an author',
+        { query: '   ', author: 'Doudna J', server: 'biorxiv' },
+        'AUTH:"Doudna J" AND PUBLISHER:bioRxiv',
+      ],
+      [
+        'an author-only call with dates',
+        { author: 'Doudna J', dateFrom: '2024-01-01', server: 'both' },
+        'AUTH:"Doudna J" AND FIRST_PDATE:[2024-01-01 TO 9999-12-31] AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)',
+      ],
+    ])('adds no parentheses for %s', async (_label, options, expected) => {
+      await service.search(options, startCallDeadline(), createMockContext());
+      expect(sentQuery()).toBe(expected);
+    });
   });
 
   // ── Cursor pagination ─────────────────────────────────────────────────────────

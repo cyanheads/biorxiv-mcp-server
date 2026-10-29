@@ -58,7 +58,8 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 ### `biorxiv_list_recent` <sub>tool</sub>
 
 - Takes a `start_date`/`end_date` interval, `server` (default `both`), and optional `category` (a value from `biorxiv_list_categories`) and bioRxiv-only `funder` (a ROR ID) filters; a filter that cannot be applied raises `invalid_category` or `invalid_funder`
-- Pages of 30 advance with an integer `cursor`, tracked per server (`{ biorxiv: { cursor, total }, medrxiv: { cursor, total } }`); a cursor past the last page is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
+- Pages of 30 advance with an integer `cursor`, tracked per server (`{ biorxiv: { cursor, total, newPreprints }, medrxiv: { cursor, total, newPreprints } }`); a cursor past the last page is marked `exhausted: true`, and a server that did not answer is named in `failed[]`
+- Rows are revisions: `total` counts every version posted in the interval, while `newPreprints` counts the preprints whose first version posted in it, as the API reports it (absent when the API sends no count)
 - Abstracts are omitted by default; `include_abstract: true` adds them. Each is the preprint's latest-revision abstract, even on a row for an earlier revision
 
 ---

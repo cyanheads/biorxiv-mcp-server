@@ -33,7 +33,13 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
-import type { BiorxivServer, PreprintRevision, ServerParam } from '@/services/biorxiv/types.js';
+import type {
+  BiorxivServer,
+  ListingResult,
+  PreprintRevision,
+  ServerPaginationState,
+  ServerParam,
+} from '@/services/biorxiv/types.js';
 import {
   describeWait,
   escapeMarkdown,
@@ -177,7 +183,18 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         biorxiv: z
           .object({
             cursor: z.number().describe('Current cursor (offset used for this page).'),
-            total: z.number().describe('Total preprints available on bioRxiv for these filters.'),
+            total: z
+              .number()
+              .describe(
+                'Rows bioRxiv lists in the interval for these filters — one per revision posted in it, so a preprint revised in the interval counts once per version. For the number of new preprints, read newPreprints.',
+              ),
+            newPreprints: z
+              .number()
+              .int()
+              .optional()
+              .describe(
+                'Preprints whose first version posted on bioRxiv in the interval, for these filters — the rows with version "1" across every page of the listing, as bioRxiv counts them. Absent when bioRxiv reports no count, as on an exhausted entry; never a 0 standing in for an unknown count.',
+              ),
             nextCursor: z.number().optional().describe('Cursor value for the next page, if any.'),
             exhausted: z
               .boolean()
@@ -191,7 +208,18 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
         medrxiv: z
           .object({
             cursor: z.number().describe('Current cursor (offset used for this page).'),
-            total: z.number().describe('Total preprints available on medRxiv for these filters.'),
+            total: z
+              .number()
+              .describe(
+                'Rows medRxiv lists in the interval for these filters — one per revision posted in it, so a preprint revised in the interval counts once per version. For the number of new preprints, read newPreprints.',
+              ),
+            newPreprints: z
+              .number()
+              .int()
+              .optional()
+              .describe(
+                'Preprints whose first version posted on medRxiv in the interval, for these filters — the rows with version "1" across every page of the listing, as medRxiv counts them. Absent when medRxiv reports no count, as on an exhausted entry; never a 0 standing in for an unknown count.',
+              ),
             nextCursor: z.number().optional().describe('Cursor value for the next page, if any.'),
             exhausted: z
               .boolean()
@@ -338,9 +366,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
     const filters = { category, funder };
     const deadline = startCallDeadline();
 
-    type PaginationEntry = {
-      cursor: number;
-      total: number;
+    type PaginationEntry = ServerPaginationState & {
       nextCursor?: number;
       exhausted?: boolean;
     };
@@ -390,10 +416,7 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       );
     }
 
-    function toPaginationEntry(r: {
-      pagination: { cursor: number; total: number };
-      preprints: PreprintRevision[];
-    }): PaginationEntry {
+    function toPaginationEntry(r: ListingResult): PaginationEntry {
       const nextCursor =
         r.pagination.cursor + r.preprints.length < r.pagination.total
           ? r.pagination.cursor + 30
@@ -621,6 +644,8 @@ export const biorxivListRecentTool = tool('biorxiv_list_recent', {
       const p = result.pagination[server];
       if (!p) continue;
       let line = `**${SERVER_LABEL[server]}:** page offset ${p.cursor}, total ${p.total}`;
+      if (p.newPreprints !== undefined)
+        line += `, ${p.newPreprints} new preprint${p.newPreprints === 1 ? '' : 's'}`;
       if (p.nextCursor !== undefined) line += ` — next cursor: ${p.nextCursor}`;
       else if (!p.exhausted) line += ' (last page)';
       if (p.exhausted)

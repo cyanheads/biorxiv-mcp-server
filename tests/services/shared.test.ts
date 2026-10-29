@@ -627,6 +627,98 @@ describe('escapeMarkdown', () => {
   ])('leaves text that renders literally unchanged: %j', (raw) => {
     expect(escapeMarkdown(raw)).toBe(raw);
   });
+
+  // An ATX heading drops a `#` run that ends its line after a space or tab as
+  // its closing sequence, and every title sits in a heading in some tool.
+  it.each([
+    ['abc #', 'abc \\#'],
+    ['abc ##', 'abc #\\#'],
+    ['abc\t#', 'abc\t\\#'],
+    ['abc #  ', 'abc \\#  '],
+    ['abc #\t', 'abc \\#\t'],
+    ['Cohort study of patient #', 'Cohort study of patient \\#'],
+    ['ends with ### and more ###', 'ends with ### and more ##\\#'],
+    ['abc # x #', 'abc # x \\#'],
+    ['# #', '\\# \\#'],
+    ['first #\nsecond #', 'first \\#\nsecond \\#'],
+    ['first #\r\nsecond', 'first \\#\r\nsecond'],
+    ['first #\rsecond', 'first \\#\rsecond'],
+    ['A*T to G*C ##', 'A\\*T to G\\*C #\\#'],
+    ['#######', '######\\#'],
+    ['####### ', '######\\# '],
+  ])('escapes the last # of a closing run in %j', (raw, expected) => {
+    expect(escapeMarkdown(raw)).toBe(expected);
+  });
+
+  it.each([
+    ['#', '\\#'],
+    ['##', '\\##'],
+    ['#  ', '\\#  '],
+    ['  #', '  \\#'],
+    ['first line\n##', 'first line\n\\##'],
+    ['a \\#', 'a \\\\#'],
+  ])(
+    'keeps the line-initial or backslash escape of %j without a second backslash',
+    (raw, expected) => {
+      expect(escapeMarkdown(raw)).toBe(expected);
+    },
+  );
+
+  it.each(['abc#', 'C# and F# interop', 'a # b', 'Issue #4', 'abc #x', 'abc # \u00a0'])(
+    'leaves a # run that cannot close a heading raw: %j',
+    (raw) => {
+      expect(escapeMarkdown(raw)).toBe(raw);
+    },
+  );
+
+  describe('runs in linear time', () => {
+    /** Thread CPU microseconds one call takes, the least of three runs. */
+    function cpuMicros(text: string): number {
+      let best = Number.POSITIVE_INFINITY;
+      for (let run = 0; run < 3; run++) {
+        const start = process.threadCpuUsage();
+        escapeMarkdown(text);
+        const spent = process.threadCpuUsage(start);
+        best = Math.min(best, spent.user + spent.system);
+      }
+      return best;
+    }
+
+    /** `head`, then the unit repeated to `chars` characters, then the tail. */
+    const build = (unit: string, chars: number, tail = '', head = '') =>
+      head + unit.repeat(Math.ceil(chars / unit.length)) + tail;
+
+    // Each size's bound is checked before the next runs, so a quadratic scan
+    // fails at its first oversized step rather than at 320k.
+    it.each([
+      ['a long digit run', '1', ''],
+      ['a long # run no space precedes', '#', '', 'x'],
+      ['a long # run a space precedes, then text', '#', 'x', ' '],
+      ['space-preceded # runs throughout', ' #', ''],
+      ['space-preceded # runs, no line end', ' # ', 'x'],
+      ['a long space and tab run before a #', ' \t', '#x'],
+      ['a long line ending in a real break', '§1 #', '\ny'],
+      ['real breaks throughout', '  \r\n', ''],
+      ['closing runs before breaks throughout', ' # \r\n', ''],
+      ['[ with no link closer after it', '[', ''],
+      ['[ with one link closer at the very end', '[', '](x)'],
+      ['a line-initial [ on every line', '[\n', ''],
+      ['[ with breaks throughout', '[  \r\n', ''],
+      ['< before a letter with no > after it', '<a', ''],
+      ['< before a letter with breaks throughout', '<a  \r\n', ''],
+    ])('%s: 5k → 320k characters', (_shape, unit, tail, head = '') => {
+      const timings: number[] = [];
+      for (let chars = 5_000; chars <= 320_000; chars *= 2) {
+        const micros = cpuMicros(build(unit, chars, tail, head));
+        expect(micros).toBeLessThan(250_000);
+        timings.push(micros);
+      }
+      const first = Math.max(timings[0] ?? 1, 1);
+      const last = timings.at(-1) ?? 0;
+      // Escaping scales linearly with input size.
+      expect(last / first).toBeLessThan(256);
+    });
+  });
 });
 
 describe('normalizeRorId', () => {

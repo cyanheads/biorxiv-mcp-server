@@ -745,6 +745,154 @@ describe('BiorxivApiService', () => {
       expect(result.preprints.map((p) => p.server)).toEqual(['medrxiv', 'medrxiv']);
     });
 
+    describe('new-preprint count', () => {
+      const listing = (server: 'biorxiv' | 'medrxiv', cursor: number, filters = {}) =>
+        service.getListing(
+          server,
+          '2026-10-01',
+          '2026-10-07',
+          cursor,
+          filters,
+          startCallDeadline(),
+          createMockContext(),
+        );
+
+      // Live envelopes (2026-10-29), keyed by the filters each listing applied.
+      it.each<
+        [
+          string,
+          'biorxiv' | 'medrxiv',
+          { category?: string; funder?: string },
+          Record<string, unknown>,
+          { cursor: number; total: number; newPreprints: number },
+        ]
+      >([
+        [
+          'an unfiltered bioRxiv week',
+          'biorxiv',
+          {},
+          {
+            status: 'ok',
+            category: 'all',
+            cursor: 0,
+            count: 30,
+            count_new_papers: '1092',
+            total: '1460',
+          },
+          { cursor: 0, total: 1460, newPreprints: 1092 },
+        ],
+        [
+          'a bioRxiv category',
+          'biorxiv',
+          { category: 'neuroscience' },
+          {
+            status: 'ok',
+            category: 'neuroscience',
+            cursor: 0,
+            count: 30,
+            count_new_papers: '175',
+            total: '248',
+          },
+          { cursor: 0, total: 248, newPreprints: 175 },
+        ],
+        [
+          'an unfiltered medRxiv day',
+          'medrxiv',
+          {},
+          {
+            status: 'ok',
+            category: 'all',
+            cursor: 0,
+            count: 30,
+            count_new_papers: '99',
+            total: '118',
+          },
+          { cursor: 0, total: 118, newPreprints: 99 },
+        ],
+        [
+          'a medRxiv category',
+          'medrxiv',
+          { category: 'epidemiology' },
+          {
+            status: 'ok',
+            category: 'epidemiology',
+            cursor: 0,
+            count: 30,
+            count_new_papers: '42',
+            total: '46',
+          },
+          { cursor: 0, total: 46, newPreprints: 42 },
+        ],
+        [
+          'a funder whose rows are all revisions ("0")',
+          'biorxiv',
+          { funder: '01cwqze88' },
+          { status: 'ok', category: 'all', cursor: 0, count: 9, count_new_papers: '0', total: '9' },
+          { cursor: 0, total: 9, newPreprints: 0 },
+        ],
+        [
+          'a category and funder together',
+          'biorxiv',
+          { category: 'neuroscience', funder: '01cwqze88' },
+          {
+            status: 'ok',
+            category: 'neuroscience',
+            cursor: 0,
+            count: 13,
+            count_new_papers: '0',
+            total: '13',
+          },
+          { cursor: 0, total: 13, newPreprints: 0 },
+        ],
+      ])('reads count_new_papers on %s', async (_label, server, filters, message, pagination) => {
+        mockFetch.mockResolvedValue(makeResponse({ messages: [message], collection: [] }));
+        expect((await listing(server, 0, filters)).pagination).toEqual(pagination);
+      });
+
+      it('reads the same count on a later cursor page', async () => {
+        // Live shape: every cursor page of a window repeats the window's count.
+        mockFetch.mockResolvedValue(
+          makeResponse({
+            messages: [
+              { status: 'ok', cursor: '90', count: 28, count_new_papers: '99', total: '118' },
+            ],
+            collection: [],
+          }),
+        );
+        expect((await listing('medrxiv', 90)).pagination).toEqual({
+          cursor: 90,
+          total: 118,
+          newPreprints: 99,
+        });
+      });
+
+      it('reads a numeric count as given', async () => {
+        mockFetch.mockResolvedValue(
+          makeResponse({ messages: [{ total: 30, count_new_papers: 21 }], collection: [] }),
+        );
+        expect((await listing('biorxiv', 0)).pagination).toEqual({
+          cursor: 0,
+          total: 30,
+          newPreprints: 21,
+        });
+      });
+
+      it.each<[string, unknown]>([
+        ['an envelope without the field', { total: '118', cursor: 0 }],
+        ['a non-numeric count', { total: '118', cursor: 0, count_new_papers: 'NA' }],
+        ['an empty-string count', { total: '118', cursor: 0, count_new_papers: '' }],
+      ])('omits newPreprints for %s, never defaulting it to 0', async (_label, message) => {
+        mockFetch.mockResolvedValue(makeResponse({ messages: [message], collection: [] }));
+        expect((await listing('biorxiv', 0)).pagination).toEqual({ cursor: 0, total: 118 });
+      });
+
+      it('omits newPreprints past the last page, where upstream sends neither count', async () => {
+        // Live shape for an empty interval and for a cursor past the last page.
+        mockFetch.mockResolvedValue(makeResponse({ messages: [{ status: 'no posts found' }] }));
+        expect((await listing('medrxiv', 300)).pagination).toEqual({ cursor: 300, total: 0 });
+      });
+    });
+
     it('throws serviceUnavailable when API returns HTML error page', async () => {
       mockFetch.mockResolvedValue(makeHtmlResponse());
       const ctx = createMockContext();

@@ -391,6 +391,14 @@ function isSpaceOrEdge(char: string): boolean {
   return char === '' || /\s/.test(char);
 }
 
+/** The last index in a text of each closer a `changesRendering` check looks ahead for, -1 if absent. */
+interface Closers {
+  /** The last `>`, which raw HTML or an autolink opened by `<` needs. */
+  readonly angle: number;
+  /** The last `](` or `][`, which a link opened by `[` needs. */
+  readonly link: number;
+}
+
 /**
  * Whether one inline metacharacter at `index` can change how CommonMark or GFM
  * (markdown-it, marked) render `text`. `\`, `` ` ``, and `*` always can (`*`
@@ -404,8 +412,12 @@ function isSpaceOrEdge(char: string): boolean {
  *   raw HTML or an autolink (`<COMP id>`, `IL-1<beta>`; `p<0.05` and `x<y` stay);
  * - `[` — before a later `](` or `][`, which an inline or reference link needs,
  *   or opening a line that a `]:` definition could follow.
+ *
+ * "Later" is read from `closers`, found once per text, so each check is
+ * constant time apart from the rest-of-line scan for `]:`, which only the one
+ * `[` that can open a line reaches.
  */
-function changesRendering(char: string, text: string, index: number): boolean {
+function changesRendering(char: string, text: string, index: number, closers: Closers): boolean {
   const prev = text.charAt(index - 1);
   const next = text.charAt(index + 1);
   switch (char) {
@@ -414,12 +426,18 @@ function changesRendering(char: string, text: string, index: number): boolean {
     case '~':
       return !(isSpaceOrEdge(prev) && isSpaceOrEdge(next));
     case '<':
-      return /[A-Za-z/!?]/.test(next) && text.includes('>', index + 1);
+      return /[A-Za-z/!?]/.test(next) && closers.angle > index;
     case '[': {
-      const rest = text.slice(index + 1);
-      if (rest.includes('](') || rest.includes('][')) return true;
-      const lineStart = /(?:^|\n)[ \t]{0,3}$/.test(text.slice(0, index));
-      return lineStart && /^[^\n]*\]:/.test(rest);
+      if (closers.link > index) return true;
+      /**
+       * The four characters before `[` hold the longest line-start prefix (`\n`
+       * and three blanks); four with no `\n` are too many blanks, so `^` matches
+       * in the window only where the window begins the text.
+       */
+      const lineStart = /(?:^|\n)[ \t]{0,3}$/.test(text.slice(Math.max(0, index - 4), index));
+      if (!lineStart) return false;
+      const lineEnd = text.indexOf('\n', index + 1);
+      return text.slice(index + 1, lineEnd === -1 ? text.length : lineEnd).includes(']:');
     }
     default:
       return true;
@@ -434,7 +452,11 @@ function changesRendering(char: string, text: string, index: number): boolean {
  * line-initial `#` run that opens a heading (a space, tab, or line end follows
  * it — `#441914366` does not), or a list marker (`-`, `+`, `1.`, `1)`) — an
  * abstract is interpolated at the start of a line in some tools, and a joined
- * field (`awards`) starts with its first value. Agents read `content[]` as
+ * field (`awards`) starts with its first value. Last, the final `#` of a run
+ * that a space or tab (or the value's start) precedes and only spaces or tabs
+ * follow to the line end (`abc #` → `abc \#`, a seven-`#` value → `######\#`),
+ * which an ATX heading would drop as its closing
+ * sequence — every title is a heading in some tool. Agents read `content[]` as
  * text and copy spans out of it, so an escape that changes nothing
  * (`p\<0.05`, `cc\_by`) is noise.
  * An apostrophe, a mid-line `#`, or a signed `-0.42` already renders as itself.
@@ -447,16 +469,29 @@ function changesRendering(char: string, text: string, index: number): boolean {
  * `escapeMarkdownInline` because that one escapes more by design — every `[`,
  * `]`, `|`, and `~`, entity-shaped `&` runs, edge whitespace — so it would add
  * backslashes to the abstracts and titles every tool renders where none
- * changes how they render.
+ * changes how they render. The closing-`#` rule is the one it shares.
  */
 export function escapeMarkdown(text: string): string {
+  /**
+   * The closing-`#` step runs after the line-initial escapes, so a run they
+   * already escaped (`\#`, `\##`) has a backslash, not a space, before it and
+   * gains no second one. Its one-character lookbehind anchors each match at a
+   * run's first `#`; a lookbehind spanning `[ \t]#*` would rescan the run from
+   * every `#` in it, quadratic on a long run. The closers are found once here,
+   * not per metacharacter, which keeps the pass linear.
+   */
+  const closers: Closers = {
+    angle: text.lastIndexOf('>'),
+    link: Math.max(text.lastIndexOf(']('), text.lastIndexOf('][')),
+  };
   return text
     .replace(/[\\`*_~[<]/g, (char: string, index: number) =>
-      changesRendering(char, text, index) ? `\\${char}` : char,
+      changesRendering(char, text, index, closers) ? `\\${char}` : char,
     )
     .replace(/^([ \t]{0,3})(>|#{1,6}(?=[ \t]|$))/gm, '$1\\$2')
     .replace(/^([ \t]{0,3})([-+])(?=[ \t]|$)/gm, '$1\\$2')
-    .replace(/^([ \t]{0,3}\d{1,9})([.)])(?=[ \t]|$)/gm, '$1\\$2');
+    .replace(/^([ \t]{0,3}\d{1,9})([.)])(?=[ \t]|$)/gm, '$1\\$2')
+    .replace(/(?<=^|[ \t])(#*)#(?=[ \t]*(?:[\r\n]|$))/g, '$1\\#');
 }
 
 /**

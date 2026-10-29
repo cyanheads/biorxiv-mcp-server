@@ -364,6 +364,9 @@ describe('EuropePmcService — empty-body responses', () => {
         (call) => new URL(call?.request.url ?? ''),
       );
       expect(firstPageRequest?.searchParams.get('pageSize')).toBe('1');
+      expect(cursorRequest?.searchParams.get('query')).toBe(
+        '(crispr) AND AUTH:"Doudna" AND PUBLISHER:bioRxiv',
+      );
       expect(firstPageRequest?.searchParams.get('query')).toBe(
         cursorRequest?.searchParams.get('query'),
       );

@@ -886,6 +886,156 @@ describe('biorxivListRecentTool', () => {
     expect(text).toContain('bioRxiv');
   });
 
+  // ── newPreprints ────────────────────────────────────────────────────────────
+
+  describe('newPreprints', () => {
+    const rows = (server: 'biorxiv' | 'medrxiv', n: number): PreprintRevision[] =>
+      Array.from({ length: n }, (_, i) => ({
+        doi: `10.1101/2026.10.01.${server === 'biorxiv' ? '7' : '2'}${String(i).padStart(5, '0')}`,
+        server,
+      }));
+
+    async function call(args: Record<string, unknown>) {
+      const result = await runToolContract(
+        biorxivListRecentTool,
+        { start_date: '2026-10-01', end_date: '2026-10-07', ...args } as never,
+        { context: { errors: biorxivListRecentTool.errors } },
+      );
+      const structured = result.structuredContent as {
+        pagination: Record<string, unknown>;
+        failed: unknown[];
+        notice?: string;
+      };
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      return { result, structured, lines: text.split('\n') };
+    }
+
+    it('carries each server its own count under server="both", never summed', async () => {
+      mockGetListing.mockImplementation((server: 'biorxiv' | 'medrxiv') =>
+        Promise.resolve(
+          server === 'biorxiv'
+            ? {
+                preprints: rows('biorxiv', 30),
+                pagination: { cursor: 0, total: 1460, newPreprints: 1092 },
+              }
+            : {
+                preprints: rows('medrxiv', 30),
+                pagination: { cursor: 0, total: 118, newPreprints: 99 },
+              },
+        ),
+      );
+      const { result, structured, lines } = await call({ server: 'both' });
+      expect(result.isError).toBeFalsy();
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 0, total: 1460, newPreprints: 1092, nextCursor: 30 },
+        medrxiv: { cursor: 0, total: 118, newPreprints: 99, nextCursor: 30 },
+      });
+      expect(lines).toContain(
+        '**bioRxiv:** page offset 0, total 1460, 1092 new preprints — next cursor: 30',
+      );
+      expect(lines).toContain(
+        '**medRxiv:** page offset 0, total 118, 99 new preprints — next cursor: 30',
+      );
+      expect(lines.join('\n')).not.toContain('1191');
+    });
+
+    it('reports a count of 0 rather than dropping it', async () => {
+      mockGetListing.mockResolvedValue({
+        preprints: rows('biorxiv', 9),
+        pagination: { cursor: 0, total: 9, newPreprints: 0 },
+      });
+      const { structured, lines } = await call({ server: 'biorxiv' });
+      expect(structured.pagination).toEqual({ biorxiv: { cursor: 0, total: 9, newPreprints: 0 } });
+      expect(lines).toContain('**bioRxiv:** page offset 0, total 9, 0 new preprints (last page)');
+    });
+
+    it('names a single new preprint in the singular', async () => {
+      mockGetListing.mockResolvedValue({
+        preprints: rows('medrxiv', 2),
+        pagination: { cursor: 0, total: 2, newPreprints: 1 },
+      });
+      const { lines } = await call({ server: 'medrxiv' });
+      expect(lines).toContain('**medRxiv:** page offset 0, total 2, 1 new preprint (last page)');
+    });
+
+    it('omits the field and the phrase when upstream reports no count', async () => {
+      mockGetListing.mockResolvedValue({
+        preprints: rows('biorxiv', 1),
+        pagination: { cursor: 0, total: 1 },
+      });
+      const { structured, lines } = await call({ server: 'biorxiv' });
+      expect(structured.pagination).toEqual({ biorxiv: { cursor: 0, total: 1 } });
+      expect(lines).toContain('**bioRxiv:** page offset 0, total 1 (last page)');
+    });
+
+    it('leaves an exhausted entry without a count beside a server that has one', async () => {
+      mockGetListing.mockImplementation((server: 'biorxiv' | 'medrxiv') =>
+        Promise.resolve(
+          server === 'biorxiv'
+            ? {
+                preprints: rows('biorxiv', 1),
+                pagination: { cursor: 30, total: 31, newPreprints: 20 },
+              }
+            : { preprints: [], pagination: { cursor: 30, total: 0 } },
+        ),
+      );
+      const { structured, lines } = await call({ server: 'both', cursor: 30 });
+      expect(structured.pagination).toEqual({
+        biorxiv: { cursor: 30, total: 31, newPreprints: 20 },
+        medrxiv: { cursor: 30, total: 0, exhausted: true },
+      });
+      expect(lines).toContain(
+        '**bioRxiv:** page offset 30, total 31, 20 new preprints (last page)',
+      );
+      expect(lines).toContain(
+        '**medRxiv:** page offset 30, total 0 — cursor exhausted: past the last available page, no records at this offset (the total shown is an out-of-range artifact, not the interval total)',
+      );
+      expect(structured.notice).toMatch(/Cursor 30 is past the last available page on medRxiv/);
+    });
+
+    it('keeps the surviving server its count when the other fails', async () => {
+      mockGetListing.mockImplementation((server: 'biorxiv' | 'medrxiv') =>
+        server === 'biorxiv'
+          ? Promise.reject(new Error('bioRxiv down'))
+          : Promise.resolve({
+              preprints: rows('medrxiv', 2),
+              pagination: { cursor: 0, total: 2, newPreprints: 2 },
+            }),
+      );
+      const { structured, lines } = await call({ server: 'both' });
+      expect(structured.failed).toEqual([{ server: 'biorxiv', error: 'bioRxiv down' }]);
+      expect(structured.pagination).toEqual({ medrxiv: { cursor: 0, total: 2, newPreprints: 2 } });
+      expect(lines).toContain('**medRxiv:** page offset 0, total 2, 2 new preprints (last page)');
+      expect(lines).toContain(
+        '**bioRxiv:** server did not answer — no records from it are included (bioRxiv down)',
+      );
+    });
+
+    it('leaves an empty window at cursor 0 without a count', async () => {
+      mockGetListing.mockResolvedValue({ preprints: [], pagination: { cursor: 0, total: 0 } });
+      const { structured, lines } = await call({ server: 'medrxiv' });
+      expect(structured.pagination).toEqual({ medrxiv: { cursor: 0, total: 0 } });
+      expect(lines).toContain('**medRxiv:** page offset 0, total 0 (last page)');
+    });
+
+    it('declares the field as an optional integer on both server entries', () => {
+      const output = (entry: Record<string, unknown>) => ({
+        preprints: [],
+        pagination: { biorxiv: entry, medrxiv: entry },
+        failed: [],
+      });
+      expect(
+        biorxivListRecentTool.output.parse(output({ cursor: 0, total: 9, newPreprints: 0 })),
+      ).toEqual(output({ cursor: 0, total: 9, newPreprints: 0 }));
+      expect(() =>
+        biorxivListRecentTool.output.parse(output({ cursor: 0, total: 9, newPreprints: 1.5 })),
+      ).toThrow();
+      expect(() =>
+        biorxivListRecentTool.output.parse(output({ cursor: 0, total: 9 })),
+      ).not.toThrow();
+    });
+  });
+
   // ── include_abstract ────────────────────────────────────────────────────────
 
   describe('include_abstract', () => {

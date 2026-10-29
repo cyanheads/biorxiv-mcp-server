@@ -422,7 +422,9 @@ export class BiorxivApiService {
    * `filters.category` is sent in the API's spelling whatever form the caller
    * used; `filters.funder` is sent as given, and must already be a bare ROR ID
    * (`normalizeRorId`). Both are sent when both are set.
-   * Returns listing result with pagination state, flagged `categoryIgnored` when
+   * Returns listing result with pagination state — `total` counts revision rows,
+   * `newPreprints` the preprints first posted in the interval when upstream
+   * reports a count — flagged `categoryIgnored` when
    * a category was sent but the API answered with its unfiltered listing, and
    * `funderNotFound` when the API holds no funder record for the ROR ID.
    * Throws a retryable `rate_limited` error when the origin returns HTTP 429.
@@ -471,11 +473,12 @@ export class BiorxivApiService {
           // Each row keeps its abstract — its preprint's latest-revision abstract,
           // since no row says whether a later revision exists.
           const preprints = (data.collection ?? []).map((raw) => normalizeRevision(raw, server));
+          const newPreprints = parseCount(msg?.count_new_papers);
           const categoryIgnored = !!category && msg?.category === UNFILTERED_ECHO;
           const funderNotFound = !!funder && msg?.status === FUNDER_NOT_FOUND;
           return {
             preprints,
-            pagination: { cursor, total },
+            pagination: { cursor, total, ...(newPreprints !== undefined && { newPreprints }) },
             ...(categoryIgnored && { categoryIgnored }),
             ...(funderNotFound && { funderNotFound }),
           };

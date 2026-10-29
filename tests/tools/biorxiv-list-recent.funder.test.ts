@@ -55,14 +55,24 @@ const NSF_RECORD = {
  */
 type Leg = { messages: Record<string, unknown>; records?: number };
 
+// NSF's 2026-08 pages count no new preprints: every row it links is a revision.
 const LIVE = {
-  nsf: { status: 'ok', category: 'all', funder: NSF_ECHO, cursor: 0, count: 12, total: '12' },
+  nsf: {
+    status: 'ok',
+    category: 'all',
+    funder: NSF_ECHO,
+    cursor: 0,
+    count: 12,
+    count_new_papers: '0',
+    total: '12',
+  },
   nsfNeuro: {
     status: 'ok',
     category: 'neuroscience',
     funder: NSF_ECHO,
     cursor: 0,
     count: 4,
+    count_new_papers: '0',
     total: '4',
   },
   // The funder applied, the category did not: the funder's unfiltered-by-category page.
@@ -72,6 +82,7 @@ const LIVE = {
     funder: NSF_ECHO,
     cursor: 0,
     count: 12,
+    count_new_papers: '0',
     total: '12',
   },
   notFound: { status: 'funder value not found' },
@@ -129,7 +140,9 @@ function text(result: Awaited<ReturnType<typeof run>>): string {
 function structured(result: Awaited<ReturnType<typeof run>>) {
   return result.structuredContent as {
     preprints: { doi: string; awards?: string[]; funder?: unknown }[];
-    pagination: Partial<Record<Server, { cursor: number; total: number; exhausted?: boolean }>>;
+    pagination: Partial<
+      Record<Server, { cursor: number; total: number; newPreprints?: number; exhausted?: boolean }>
+    >;
     failed: { server: Server }[];
     notice?: string;
     categoryNote?: string;
@@ -177,12 +190,19 @@ describe('biorxiv_list_recent — funder filter against the live listing envelop
     const result = await run({ server: 'biorxiv', funder: NSF });
 
     const out = structured(result);
-    expect(out.pagination.biorxiv).toMatchObject({ cursor: 0, total: 12 });
+    expect(out.pagination.biorxiv).toEqual({
+      cursor: 0,
+      total: 12,
+      newPreprints: 0,
+      nextCursor: 30,
+    });
     expect(out.preprints[0]?.awards).toEqual(['IOS2402645']);
     expect(out.preprints[0]).not.toHaveProperty('funder');
     expect(out.notice).toBeUndefined();
     const rendered = text(result);
-    expect(rendered).toContain('**bioRxiv:** page offset 0, total 12');
+    expect(rendered.split('\n')).toContain(
+      '**bioRxiv:** page offset 0, total 12, 0 new preprints — next cursor: 30',
+    );
     expect(rendered).toMatch(/^\*\*Awards:\*\* IOS2402645$/m);
     expect(rendered).not.toContain('Mitsubishi');
     expect(JSON.stringify(result.structuredContent)).not.toContain('Mitsubishi');
@@ -276,7 +296,11 @@ describe('biorxiv_list_recent — funder filter against the live listing envelop
 
     expect(result.isError).toBeFalsy();
     expect(sent()).toEqual({ biorxiv: { category: 'neuroscience', funder: NSF } });
-    expect(structured(result).pagination.biorxiv?.total).toBe(4);
+    expect(structured(result).pagination.biorxiv).toEqual({
+      cursor: 0,
+      total: 4,
+      newPreprints: 0,
+    });
     expect(structured(result).preprints).toHaveLength(4);
   });
 
@@ -362,7 +386,8 @@ describe('biorxiv_list_recent — funder filter against the live listing envelop
 
     expect(result.isError).toBeFalsy();
     const out = structured(result);
-    expect(out.pagination.biorxiv).toMatchObject({ cursor: 30, exhausted: true });
+    // Upstream sends neither total nor count past the last page, so no count is shown.
+    expect(out.pagination.biorxiv).toEqual({ cursor: 30, total: 0, exhausted: true });
     expect(out.notice).toMatch(/Cursor 30 is past the last available page/);
   });
 });

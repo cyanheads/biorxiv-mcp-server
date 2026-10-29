@@ -176,7 +176,11 @@ export interface SearchOptions {
   dateTo?: string | undefined;
   /** Maximum number of results to return (capped at 100) */
   limit?: number | undefined;
-  /** Free-text keyword query. Optional when `author` is supplied. */
+  /**
+   * EuropePMC query syntax, trimmed and parenthesized before the author, date,
+   * and server clauses are joined to it with `AND`. Optional when `author` is
+   * supplied.
+   */
   query?: string | undefined;
   /** Server filter: 'biorxiv' | 'medrxiv' | 'both' */
   server?: string | undefined;
@@ -218,11 +222,16 @@ export class EuropePmcService {
   ): Promise<EuropePmcSearchResult> {
     const limit = Math.min(options.limit ?? 25, 100);
 
-    // Base terms: the free-text keyword query and/or an AUTH: author clause.
-    // At least one is guaranteed non-empty by the tool's input refinement.
+    /**
+     * Base terms: the free-text keyword query and/or an AUTH: author clause.
+     * At least one is guaranteed non-empty by the tool's input refinement.
+     * The query is grouped because EuropePMC makes bare `OR` operands optional
+     * once required `AND` clauses sit beside them: `a OR b AND PUBLISHER:bioRxiv`
+     * matches the `b` set alone. It is wrapped as given, never parsed or checked.
+     */
     const terms: string[] = [];
     const keyword = options.query?.trim();
-    if (keyword) terms.push(keyword);
+    if (keyword) terms.push(`(${keyword})`);
     const author = options.author?.trim();
     if (author) {
       // Strip embedded double-quotes so a stray quote can't break the AUTH phrase.

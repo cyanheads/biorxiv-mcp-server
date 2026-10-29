@@ -7,7 +7,8 @@
 
 /** Upstream free-text fields, exactly as `structuredContent` must carry them. */
 export const UPSTREAM = {
-  title: 'CYP2C19 *2/*35 carriers and F_{e} forces',
+  // The closing ` ##` run is one an ATX heading would drop as its closing sequence.
+  title: 'CYP2C19 *2/*35 carriers and F_{e} forces in cohort ##',
   abstract:
     '1. Adenine base editors enable efficient A*T to G*C conversion (p<0.05) under dim (~10 lux) and bright (~1500 lux) light, [IQR 3559-8950](P=0.01), via /api/stereoisomers/<COMP id> and `ggrain`.',
   authors: 'O`Toole, P.; Mu_ller, M.',
@@ -28,7 +29,7 @@ export const UPSTREAM = {
  * intraword `_` and the `<` before a digit stay raw.
  */
 export const ESCAPED = {
-  title: 'CYP2C19 \\*2/\\*35 carriers and F\\_{e} forces',
+  title: 'CYP2C19 \\*2/\\*35 carriers and F\\_{e} forces in cohort #\\#',
   abstract:
     '1\\. Adenine base editors enable efficient A\\*T to G\\*C conversion (p<0.05) under dim (\\~10 lux) and bright (\\~1500 lux) light, \\[IQR 3559-8950](P=0.01), via /api/stereoisomers/\\<COMP id> and \\`ggrain\\`.',
   authors: 'O\\`Toole, P.; Mu_ller, M.',
