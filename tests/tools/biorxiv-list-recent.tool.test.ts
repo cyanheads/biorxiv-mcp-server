@@ -1018,10 +1018,11 @@ describe('biorxivListRecentTool', () => {
       expect(lines).toContain('**medRxiv:** page offset 0, total 0 (last page)');
     });
 
-    it('declares the field as an optional integer on both server entries', () => {
+    // One entry per parse, so a schema that rejects 1.5 on one server cannot pass for the other.
+    it.each(['biorxiv', 'medrxiv'])('declares the field as an optional integer on %s', (server) => {
       const output = (entry: Record<string, unknown>) => ({
         preprints: [],
-        pagination: { biorxiv: entry, medrxiv: entry },
+        pagination: { [server]: entry },
         failed: [],
       });
       expect(
