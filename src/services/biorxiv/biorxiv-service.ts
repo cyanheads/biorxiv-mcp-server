@@ -463,13 +463,8 @@ export class BiorxivApiService {
           }
           const data = JSON.parse(text) as RawDetailsResponse;
           const msg = data.messages?.[0];
-          const rawTotal = msg?.total;
-          const total =
-            typeof rawTotal === 'number'
-              ? rawTotal
-              : typeof rawTotal === 'string'
-                ? parseInt(rawTotal, 10) || 0
-                : 0;
+          // An empty interval or a cursor past the last page sends no total.
+          const total = parseCount(msg?.total) ?? 0;
           // Each row keeps its abstract — its preprint's latest-revision abstract,
           // since no row says whether a later revision exists.
           const preprints = (data.collection ?? []).map((raw) => normalizeRevision(raw, server));
