@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-11-21 · ⚠️ Breaking
+
+Search handles citation-form author names and final pages, and DOI lookups suggest recovery after a confirmed miss.
+
 ## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-10-29
 
 biorxiv_search_preprints groups the caller's query before joining its own clauses, so an unparenthesized OR filters again; biorxiv_list_recent reports each server's new-preprint count; titles ending in ' #' keep the '#' in content[] headings.
