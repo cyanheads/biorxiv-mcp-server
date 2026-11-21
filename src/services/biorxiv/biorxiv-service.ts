@@ -141,9 +141,8 @@ const CATEGORIES: CategoryTaxonomy = {
  * A category in the API's own spelling: lowercase, with `/` and `_` read as a
  * space (`HIV/AIDS` → `hiv aids`). This is the only form the listing endpoint
  * filters on — a slash, raw or percent-encoded, makes it ignore the filter —
- * and the form every record's `category` field carries, so it doubles as the
- * key input is matched on: `Cell Biology`, `cell biology`, and `CELL_BIOLOGY`
- * name the same category. `-` is read as a space too, so the websites'
+ * and it doubles as the key input is matched on: `Cell Biology`, `cell biology`,
+ * and `CELL_BIOLOGY` name the same category. `-` is read as a space too, so the websites'
  * collection slugs (`cell-biology`, `hiv-aids`) match; no category name
  * contains a hyphen of its own.
  */
@@ -266,7 +265,8 @@ function normalizeRevision(
   if (raw.version) rev.version = raw.version;
   if (raw.type) rev.type = raw.type;
   if (raw.license) rev.license = raw.license;
-  if (raw.category) rev.category = raw.category;
+  const category = raw.category?.trim().toLowerCase();
+  if (category) rev.category = category;
   if (raw.jatsxml) rev.jatsxmlUrl = raw.jatsxml;
   const abstract = withAbstract ? normalizeUpstreamText(raw.abstract) : undefined;
   if (abstract) rev.abstract = abstract;
@@ -308,7 +308,8 @@ function normalizePublished(record: RawPublishedRecord): PublishedVersion | unde
   const preprintTitle = normalizeUpstreamText(record.preprint_title);
   if (preprintTitle) pv.preprintTitle = preprintTitle;
   if (record.preprint_authors) pv.preprintAuthors = record.preprint_authors;
-  if (record.preprint_category) pv.preprintCategory = record.preprint_category;
+  const category = record.preprint_category?.trim().toLowerCase();
+  if (category) pv.preprintCategory = category;
   if (record.preprint_date) pv.preprintDate = record.preprint_date;
   const preprintAbstract = normalizeUpstreamText(record.preprint_abstract);
   if (preprintAbstract) pv.preprintAbstract = preprintAbstract;

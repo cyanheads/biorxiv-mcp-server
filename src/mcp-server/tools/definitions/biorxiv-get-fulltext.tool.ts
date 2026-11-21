@@ -40,11 +40,11 @@ import { getBiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-f
 import {
   CALL_BUDGET_MS,
   describeWait,
+  detailsNotFoundHint,
   escapeMarkdown,
   findRateLimit,
   firstHit,
   normalizeDoi,
-  notFoundHint,
   remainingBudgetMs,
   startCallDeadline,
 } from '@/services/shared.js';
@@ -363,7 +363,8 @@ export const biorxivGetFulltextTool = tool('biorxiv_get_fulltext', {
         doi,
         servers,
         recovery: {
-          hint: notFoundHint(
+          hint: detailsNotFoundHint(
+            doi,
             servers,
             'Check the DOI, or find the correct one with biorxiv_search_preprints.',
           ),

@@ -161,7 +161,10 @@ describe('EuropePmcService — empty-body responses', () => {
     const result = await settle(
       service.search({ query: 'xyzzy' }, startCallDeadline(), createMockContext()),
     );
-    expect(result).toEqual({ status: 'fulfilled', value: { hitCount: 0, results: [] } });
+    expect(result).toEqual({
+      status: 'fulfilled',
+      value: { hitCount: 0, results: [], rowCount: 0 },
+    });
     expect(http.calls).toHaveLength(1);
   });
 
@@ -180,7 +183,7 @@ describe('EuropePmcService — empty-body responses', () => {
   it('retries a single empty body on a first-page request and returns the real page', async () => {
     answerWith(EMPTY_BODY, POPULATED_BODY);
     const result = await settle(
-      service.search({ query: 'CRISPR' }, startCallDeadline(), createMockContext()),
+      service.search({ query: 'CRISPR', limit: 1 }, startCallDeadline(), createMockContext()),
     );
     expect(result).toMatchObject({
       status: 'fulfilled',

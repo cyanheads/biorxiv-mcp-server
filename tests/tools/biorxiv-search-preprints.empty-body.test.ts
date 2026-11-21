@@ -36,6 +36,7 @@ const REVISION: PreprintRevision = {
   version: '1',
   category: 'Developmental Biology',
   server: 'biorxiv',
+  abstract: 'An abstract for the linked record.',
 };
 
 vi.mock('@/services/biorxiv/biorxiv-service.js', () => ({
@@ -134,6 +135,203 @@ describe('biorxiv_search_preprints — EuropePMC empty-body responses', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    'Jennifer Doudna',
+    "O'Neill M",
+    'St. John T',
+    'Research Group, Inc.',
+    'Genome Consortium, Europe',
+    'Doudna Jennifer A.',
+    'Doudna, Jennifer A.',
+    'de la Cruz J.',
+  ])('preserves an exact author filter on a cursor page: %s', async (author) => {
+    answerWith({ hitCount: 0, resultList: { result: [] } });
+    const result = await run({ author, cursor_mark: 'existing' });
+    expect(http.calls).toHaveLength(1);
+    const params = new URL(http.calls[0]!.request.url).searchParams;
+    expect(params.get('query')).toContain(`AUTH:"${author}"`);
+    expect(params.get('cursorMark')).toBe('existing');
+    expect(result.structuredContent).toMatchObject({ queryEcho: { author } });
+  });
+
+  it.each([
+    ['Bucher, G.', 'Bucher G'],
+    ['Doudna, J.A.', 'Doudna JA'],
+    ['Doudna, J. A.', 'Doudna JA'],
+    ['Doudna, Jennifer', 'Doudna Jennifer'],
+    ["O'Neill, M.", "O'Neill M"],
+    ['St. John, T.', 'St. John T'],
+    ['de la Cruz, J.', 'de la Cruz J'],
+    ['Doudna J.', 'Doudna J'],
+    ['García-López, Á.', 'García-López Á'],
+  ])(
+    'sends the citation-form author %s as %s on first and later pages',
+    async (author, expected) => {
+      answerWith({ hitCount: 0, resultList: { result: [] } });
+      for (const cursor_mark of ['*', 'existing']) {
+        const result = await run({ author, cursor_mark });
+        expect(result.structuredContent).toMatchObject({ queryEcho: { author: expected } });
+        expect(text(result)).toContain(`author=${expected}`);
+      }
+      expect(http.calls.map((call) => new URL(call.request.url).searchParams.get('query'))).toEqual(
+        [
+          `AUTH:"${expected}" AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)`,
+          `AUTH:"${expected}" AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)`,
+        ],
+      );
+      expect(sentPages()).toEqual(['*', 'existing']);
+    },
+  );
+
+  it('ends a cursor walk after a short raw page, preserving a full no-DOI page', async () => {
+    const noDoi = { title: 'Unlinked record' };
+    const row = POPULATED_BODY.resultList.result[0];
+    answerWith(
+      { hitCount: 3, nextCursorMark: 'second', resultList: { result: [noDoi, noDoi] } },
+      { hitCount: 3, nextCursorMark: 'extra', resultList: { result: [row] } },
+    );
+    const first = await run({ query: 'axolotl', limit: 2 });
+    expect(first.structuredContent).toMatchObject({
+      preprints: [],
+      nextCursorMark: 'second',
+      notice: expect.stringContaining('none had a DOI'),
+    });
+    expect(text(first)).toContain('second');
+    expect(text(first)).not.toContain('all 3 matches were on earlier pages');
+    const second = await run({ query: 'axolotl', limit: 2, cursor_mark: 'second' });
+    expect(second.structuredContent).toMatchObject({
+      preprints: [expect.objectContaining({ doi: row?.doi })],
+    });
+    expect(second.structuredContent).not.toHaveProperty('nextCursorMark');
+    expect(text(second)).not.toContain('extra');
+    expect(sentPages()).toEqual(['*', 'second']);
+  });
+
+  it('keeps the past-end notice when a full final page carried a cursor', async () => {
+    answerWith(
+      { ...POPULATED_BODY, hitCount: 1, nextCursorMark: 'final' },
+      { hitCount: 1, resultList: { result: [] } },
+    );
+    const full = await run({ query: 'axolotl', limit: 1 });
+    expect(full.structuredContent).toHaveProperty('nextCursorMark', 'final');
+    const end = await run({ query: 'axolotl', limit: 1, cursor_mark: 'final' });
+    expect(end.structuredContent).toHaveProperty(
+      'notice',
+      expect.stringContaining('all 1 matches'),
+    );
+    expect(text(end)).toContain('all 1 matches');
+  });
+
+  it.each([99, 100])(
+    'checks %i raw rows against the effective cap when limit exceeds 100',
+    async (rowCount) => {
+      answerWith({
+        hitCount: 300,
+        nextCursorMark: 'next',
+        resultList: {
+          result: Array.from({ length: rowCount }, () => ({ title: 'Unlinked record' })),
+        },
+      });
+      const result = await run({ query: 'axolotl', limit: 250, cursor_mark: 'current' });
+      expect(result.structuredContent).toMatchObject({ queryEcho: { limit: 100 }, preprints: [] });
+      const pageSize = new URL(http.calls[0]!.request.url).searchParams.get('pageSize');
+      expect(pageSize).toBe('100');
+      if (rowCount === 100) {
+        expect(result.structuredContent).toHaveProperty('nextCursorMark', 'next');
+        expect(text(result)).toContain('Pass nextCursorMark as cursor_mark');
+      } else {
+        expect(result.structuredContent).not.toHaveProperty('nextCursorMark');
+        expect(text(result)).not.toContain('Pass nextCursorMark as cursor_mark');
+      }
+      expect(text(result)).not.toContain('were on earlier pages');
+    },
+  );
+
+  it('uses 10 as the omitted limit while retaining abstracts, and passes through 25 explicitly', async () => {
+    answerWith(POPULATED_BODY);
+    for (const limit of [undefined, 25]) {
+      const result = await run({ query: 'axolotl', ...(limit && { limit }) });
+      expect(result.structuredContent).toMatchObject({
+        queryEcho: { limit: limit ?? 10 },
+        preprints: [expect.objectContaining({ abstract: REVISION.abstract })],
+      });
+      expect(text(result)).toContain(`limit=${limit ?? 10}`);
+      expect(text(result)).toContain('An abstract for the linked record.');
+    }
+    expect(
+      http.calls.map((call) => new URL(call.request.url).searchParams.get('pageSize')),
+    ).toEqual(['10', '25']);
+  });
+
+  it('adds a syntax hint only for a reported zero-hit response', async () => {
+    const emptyList = { result: [] };
+    answerWith(
+      { hitCount: 0, resultList: emptyList },
+      { resultList: emptyList },
+      { hitCount: 2, resultList: { result: [{ title: 'Unlinked record' }] } },
+      { hitCount: 0, resultList: emptyList },
+    );
+    const malformed = 'axolotl OR';
+    const hinted = await run({ query: malformed });
+    expect(hinted.structuredContent).toHaveProperty(
+      'notice',
+      expect.stringContaining('Try axolotl'),
+    );
+    expect(text(hinted)).toContain('The OR operator');
+    expect(text(hinted)).toContain('Try axolotl');
+    expect(text(hinted)).not.toContain('Try broader search terms');
+    const derived = await run({ query: malformed });
+    expect(text(derived)).toContain('Try broader search terms');
+    const noDoi = await run({ query: malformed });
+    expect(text(noDoi)).not.toMatch(/operator|operand/i);
+    const valid = await run({ query: 'NOT axolotl' });
+    expect(valid.structuredContent).toHaveProperty(
+      'notice',
+      expect.stringContaining('Try broader search terms'),
+    );
+    expect(text(valid)).toContain('Try broader search terms');
+    expect(http.calls).toHaveLength(4);
+  });
+
+  it.each([
+    ['TITLE:*fruit', String.raw`TITLE:\*fruit`],
+    [String.raw`fruit\)`, String.raw`fruit\\)`],
+  ])('keeps the advised repair copyable for %s', async (repair, markdownRepair) => {
+    const query = `${repair} OR`;
+    answerWith({ hitCount: 0, resultList: { result: [] } });
+    const result = await run({ query });
+
+    const diagnosis = 'The OR operator needs a search operand.';
+    expect(result.structuredContent).toHaveProperty(
+      'notice',
+      `No preprints matched "${query}". ${diagnosis} Try ${repair}`,
+    );
+    expect(text(result)).toContain(
+      `\n> No preprints matched "${markdownRepair} OR". ${diagnosis} Try ${markdownRepair}`,
+    );
+    expect(new URL(http.calls[0]!.request.url).searchParams.get('query')).toBe(
+      `(${query}) AND (PUBLISHER:bioRxiv OR PUBLISHER:medRxiv)`,
+    );
+  });
+
+  it('keeps every line of a multiline repair inside the notice', async () => {
+    const query = 'TITLE:"fruit\nfly';
+    answerWith({ hitCount: 0, resultList: { result: [] } });
+    const result = await run({ query });
+
+    expect(result.structuredContent).toHaveProperty(
+      'notice',
+      'No preprints matched "TITLE:"fruit\nfly". The quoted phrase is missing its closing quote. Try TITLE:"fruit\nfly"',
+    );
+    expect(text(result)).toContain(
+      [
+        '> No preprints matched "TITLE:"fruit\\',
+        '> fly". The quoted phrase is missing its closing quote. Try TITLE:"fruit\\',
+        '> fly"',
+      ].join('\n'),
+    );
+  });
+
   it('retries one empty body transparently — both surfaces carry the real results (#47)', async () => {
     answerWith(EMPTY_BODY, POPULATED_BODY);
     const result = await run({ query: 'axolotl limb regeneration macrophage', limit: 3 });
@@ -151,7 +349,8 @@ describe('biorxiv_search_preprints — EuropePMC empty-body responses', () => {
 
   it('raises search_unavailable when the first-page empty body persists (#47)', async () => {
     answerWith(EMPTY_BODY);
-    const result = await run({ query: 'axolotl limb regeneration macrophage' });
+    const result = await run({ query: 'axolotl OR' });
+    expect(text(result)).not.toContain('The OR operator');
 
     expect(result.isError).toBe(true);
     const error = errorOf(result);

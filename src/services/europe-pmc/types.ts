@@ -32,6 +32,12 @@ export interface RawEuropePmcSearchResponse {
 
 // ─── Domain types ────────────────────────────────────────────────────────────
 
+/** Default number of ranked rows requested per page. */
+export const DEFAULT_SEARCH_LIMIT = 10;
+
+/** Ranked rows one call reads, bounding enrichment and abstract lookups. */
+export const MAX_SEARCH_LIMIT = 100;
+
 /**
  * A preprint search result from EuropePMC, used for enrichment. Carries no
  * abstract: the ranked search uses the `lite` result type, and abstracts come
@@ -46,13 +52,13 @@ export interface EuropePmcResult {
 
 /** Return value from EuropePmcService.search() — carries the upstream grand total alongside results */
 export interface EuropePmcSearchResult {
-  /** EuropePMC hitCount — total matching preprints regardless of the page size requested */
-  hitCount: number;
-  /**
-   * Opaque cursor for the next page of ranked results. EuropePMC omits this
-   * field entirely on the final page (REST v6.6 termination semantics), so its
-   * absence — not a repeated value — signals that no further pages remain.
-   */
+  /** The author sent in the AUTH clause, when present. */
+  author?: string;
+  /** Total matches reported by EuropePMC, if supplied. */
+  hitCount?: number;
+  /** Opaque upstream cursor, retained on full pages that supply one. */
   nextCursorMark?: string;
   results: EuropePmcResult[];
+  /** Number of upstream rows on the page before DOI filtering. */
+  rowCount: number;
 }

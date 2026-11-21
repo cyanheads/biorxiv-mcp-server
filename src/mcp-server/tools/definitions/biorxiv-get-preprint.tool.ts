@@ -27,6 +27,7 @@ import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
 import {
   describeWait,
+  detailsNotFoundHint,
   escapeMarkdown,
   findRateLimit,
   firstHit,
@@ -223,7 +224,7 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       code: JsonRpcErrorCode.NotFound,
       when: 'Every DOI looked up resolves to empty collections on all requested servers, with every server answering, and no DOI was left in unprocessed.',
       recovery:
-        'Verify the DOI exists on bioRxiv or medRxiv. Supported prefixes: 10.1101/ and 10.64898/.',
+        'Verify a preprint DOI or retry with server="both" after a single-server lookup. If this is a journal article DOI, try biorxiv_get_published_version.',
     },
     {
       reason: 'invalid_doi_format',
@@ -323,12 +324,14 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
         };
       }
 
+      const missing =
+        input.server === 'both'
+          ? 'Not found on bioRxiv or medRxiv.'
+          : `Not found on ${input.server}.`;
+      const hint = detailsNotFoundHint(doi, servers, '');
       return {
         doi,
-        error:
-          input.server === 'both'
-            ? 'Not found on bioRxiv or medRxiv.'
-            : `Not found on ${input.server}.`,
+        error: hint ? `${missing} ${hint}` : missing,
         reason: 'not_found',
         retryable: false,
       };
@@ -409,9 +412,17 @@ export const biorxivGetPreprintTool = tool('biorxiv_get_preprint', {
       const dois = (reason: FailureReason) =>
         failed.flatMap((f) => (f.reason === reason ? [f.doi] : []));
       const invalid = dois('invalid_doi_format');
+      const missing = dois('not_found');
+      const advice = Map.groupBy(missing, (doi) =>
+        detailsNotFoundHint(doi, servers, 'Verify the DOI exists on bioRxiv or medRxiv.'),
+      );
+      const recovery = [...advice]
+        .map(([hint, group]) => (advice.size === 1 ? hint : `For ${group.join(', ')} — ${hint}`))
+        .join(' ');
       throw ctx.fail(
         'doi_not_found',
-        `None of the requested DOIs were found: ${dois('not_found').join(', ')}${invalid.length > 0 ? `. Invalid DOI format: ${echoEntries(invalid)}` : ''}`,
+        `None of the requested DOIs were found: ${missing.join(', ')}${invalid.length > 0 ? `. Invalid DOI format: ${echoEntries(invalid)}` : ''}`,
+        { recovery: { hint: recovery } },
       );
     }
 

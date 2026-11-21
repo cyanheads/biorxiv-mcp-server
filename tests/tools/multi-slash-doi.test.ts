@@ -15,19 +15,25 @@
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createFetchMock, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createInMemoryStorage,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { biorxivGetFulltextTool } from '@/mcp-server/tools/definitions/biorxiv-get-fulltext.tool.js';
 import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
 import { biorxivGetPublishedVersionTool } from '@/mcp-server/tools/definitions/biorxiv-get-published-version.tool.js';
 import { biorxivSearchPreprintsTool } from '@/mcp-server/tools/definitions/biorxiv-search-preprints.tool.js';
 import { initBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
+import { initBiorxivFullTextService } from '@/services/biorxiv-fulltext/biorxiv-fulltext-service.js';
 import { initEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: () => ({
     apiBaseUrl: 'https://api.biorxiv.org',
     europePmcBaseUrl: 'https://www.ebi.ac.uk/europepmc/webservices/rest',
+    biorxivWebBaseUrl: 'https://www.biorxiv.org',
   }),
 }));
 
@@ -110,7 +116,15 @@ function answer(routes: Record<string, unknown>): void {
         },
       }),
   });
-  http.route({ match: () => true, respond: () => new Response('Not Found', { status: 404 }) });
+  http.route({
+    match: () => true,
+    respond: (request) => {
+      const status = routes[new URL(request.url).pathname];
+      return typeof status === 'number'
+        ? new Response('Article origin rejected the request.', { status })
+        : new Response('Not Found', { status: 404 });
+    },
+  });
 }
 
 const paths = () => http.calls.map(({ request }) => new URL(request.url).pathname);
@@ -131,20 +145,42 @@ async function run<T extends Parameters<typeof runToolContract>[0]>(
   return { result, text, structured };
 }
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  http.reset();
+  http.install();
+  initBiorxivApiService({} as AppConfig, {} as StorageService);
+  initEuropePmcService({} as AppConfig, {} as StorageService);
+});
+
+afterEach(() => {
+  http.restore();
+  vi.useRealTimers();
+});
+
+it('biorxiv_get_fulltext: reports the article origin status without its response body', async () => {
+  initBiorxivFullTextService({} as AppConfig, createInMemoryStorage());
+  const article = `/content/${HELD}v1.full`;
+  answer({ ...LIVE, [article]: 400 });
+
+  const { result, text, structured } = await run(biorxivGetFulltextTool, {
+    doi: HELD,
+    server: 'biorxiv',
+  });
+
+  expect(paths()).toEqual([`/details/biorxiv/${HELD}/0/json`, article]);
+  expect(result.isError).toBe(true);
+  expect(structured.error).toMatchObject({
+    code: JsonRpcErrorCode.InvalidParams,
+    data: { status: 400, statusCode: 400 },
+  });
+  expect(text).toContain('Status: 400');
+  expect(text).not.toContain('Article origin rejected the request.');
+  expect(structured.error?.data).not.toHaveProperty('body');
+  expect(structured.error?.data).not.toHaveProperty('responseBody');
+});
+
 describe('a DOI with a second slash reads as absent, never as an outage', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    http.reset();
-    http.install();
-    initBiorxivApiService({} as AppConfig, {} as StorageService);
-    initEuropePmcService({} as AppConfig, {} as StorageService);
-  });
-
-  afterEach(() => {
-    http.restore();
-    vi.useRealTimers();
-  });
-
   it('biorxiv_get_preprint: alone in the call it raises doi_not_found, not retryable', async () => {
     answer(LIVE);
     const { result, text, structured } = await run(biorxivGetPreprintTool, { dois: [MULTI] });

@@ -522,6 +522,26 @@ describe('biorxivGetFulltextTool', () => {
     },
   );
 
+  it.each(['both', 'biorxiv'] as const)(
+    'offers conditional unfamiliar-prefix recovery on server=%s',
+    async (server) => {
+      const doi = '10.1002/dvdy.102';
+      mockGetDetails.mockResolvedValue([]);
+      const result = await runToolContract(biorxivGetFulltextTool, { doi, server });
+      const hint = envelopeHint(result);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'doi_not_found' } },
+      });
+      expect(hint).toContain('If this is a journal article DOI, try biorxiv_get_published_version');
+      expect(hint.includes('If this is a preprint DOI, retry with server="both"')).toBe(
+        server === 'biorxiv',
+      );
+      expect(result.content[0]).toMatchObject({ text: expect.stringContaining(hint) });
+      expect(mockGetDetails).toHaveBeenCalledTimes(server === 'both' ? 2 : 1);
+      expect(mockFetchFullText).not.toHaveBeenCalled();
+    },
+  );
+
   it('throws retryable upstream_unavailable when every lookup fails, not doi_not_found', async () => {
     mockGetDetails.mockRejectedValue(new Error('api.biorxiv.org unreachable'));
     const ctx = createMockContext({ errors: biorxivGetFulltextTool.errors });

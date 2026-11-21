@@ -212,7 +212,7 @@ describe('EuropePmcService', () => {
     expect(results).toHaveLength(0);
   });
 
-  it('falls back to results.length when hitCount is absent', async () => {
+  it('keeps an absent hitCount distinct from an upstream count', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
         resultList: {
@@ -226,8 +226,7 @@ describe('EuropePmcService', () => {
       startCallDeadline(),
       ctx,
     );
-    // No hitCount in response — falls back to results.length
-    expect(hitCount).toBe(1);
+    expect(hitCount).toBeUndefined();
     expect(results).toHaveLength(1);
   });
 
@@ -376,12 +375,12 @@ describe('EuropePmcService', () => {
     expect(calledUrl).toContain('pageSize=100');
   });
 
-  it('uses default pageSize of 25 when limit is omitted', async () => {
+  it('uses default pageSize of 10 when limit is omitted', async () => {
     mockFetch.mockResolvedValue(makeResponse({ hitCount: 0, resultList: { result: [] } }));
     const ctx = createMockContext();
     await service.search({ query: 'test' }, startCallDeadline(), ctx);
     const calledUrl = firstCalledUrl();
-    expect(calledUrl).toContain('pageSize=25');
+    expect(calledUrl).toContain('pageSize=10');
   });
 
   // ── Author filter ─────────────────────────────────────────────────────────────
@@ -545,7 +544,7 @@ describe('EuropePmcService', () => {
     expect(decodeURIComponent(calledUrl)).toContain('cursorMark=AoJ8y7Wd0S8');
   });
 
-  it('returns nextCursorMark when the upstream response includes one', async () => {
+  it('returns nextCursorMark when a full upstream page includes one', async () => {
     mockFetch.mockResolvedValue(
       makeResponse({
         hitCount: 500,
@@ -554,7 +553,7 @@ describe('EuropePmcService', () => {
       }),
     );
     const ctx = createMockContext();
-    const result = await service.search({ query: 'CRISPR' }, startCallDeadline(), ctx);
+    const result = await service.search({ query: 'CRISPR', limit: 1 }, startCallDeadline(), ctx);
     expect(result.nextCursorMark).toBe('AoJnextpage');
   });
 
@@ -1105,6 +1104,7 @@ describe('EuropePmcService', () => {
       const HEALTHY_RESULT: Record<keyof typeof EPMC_CALLS, unknown> = {
         search: {
           hitCount: 1,
+          rowCount: 1,
           results: [{ doi: '10.1101/2024.01.15.575123', title: 'Healthy origin' }],
         },
         getAbstracts: new Map([['10.1101/2024.01.15.575123', 'An abstract.']]),

@@ -8,9 +8,11 @@
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
+import { biorxivGetPreprintTool } from '@/mcp-server/tools/definitions/biorxiv-get-preprint.tool.js';
+import { biorxivListPublishedVersionsTool } from '@/mcp-server/tools/definitions/biorxiv-list-published-versions.tool.js';
+import { BiorxivApiService, initBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import {
   CALL_BUDGET_MS,
   type CallDeadline,
@@ -220,6 +222,46 @@ describe('BiorxivApiService', () => {
       expect(revisions[0]?.title).toBeUndefined();
       expect(revisions[0]?.abstract).toBeUndefined();
       expect(revisions[0]?.authors).toBeUndefined();
+      expect(revisions[0]).not.toHaveProperty('category');
+    });
+
+    it('normalizes record categories on every revision and renders the same category values', async () => {
+      const doi = '10.1101/049882';
+      initBiorxivApiService(MOCK_CONFIG, MOCK_STORAGE);
+      mockFetch.mockResolvedValue(
+        makeResponse({
+          collection: [
+            { doi, version: '1', category: 'Developmental /  Biology ' },
+            { doi, version: '2', category: 'developmental /  biology' },
+            { doi, version: '3', category: '  ' },
+          ],
+        }),
+      );
+      const result = await runToolContract(biorxivGetPreprintTool, {
+        dois: [doi],
+        server: 'biorxiv',
+      });
+      expect(result.structuredContent).toMatchObject({
+        preprints: [
+          {
+            revisions: [
+              { version: '1', category: 'developmental /  biology' },
+              { version: '2', category: 'developmental /  biology' },
+              { version: '3' },
+            ],
+          },
+        ],
+      });
+      const { preprints } = biorxivGetPreprintTool.output.parse(result.structuredContent);
+      expect(preprints[0]?.revisions[2]).not.toHaveProperty('category');
+      const text = result.content[0];
+      expect(
+        text?.type === 'text' &&
+          text.text.split('\n').filter((line) => line.startsWith('**Category:**')),
+      ).toEqual([
+        '**Category:** developmental /  biology',
+        '**Category:** developmental /  biology',
+      ]);
     });
 
     // Upstream funder names and ROR IDs are misattributed (the funder is replaced
@@ -962,7 +1004,7 @@ describe('BiorxivApiService', () => {
               preprint_doi: '10.1101/2024.01.15.575123',
               preprint_title: 'Test Title',
               preprint_authors: 'Smith J',
-              preprint_category: 'Neuroscience',
+              preprint_category: 'Neuroscience ',
               preprint_date: '2024-01-15',
               preprint_abstract: 'Abstract here.',
               preprint_author_corresponding: 'Smith J',
@@ -983,7 +1025,7 @@ describe('BiorxivApiService', () => {
       );
       expect(result?.preprintTitle).toBe('Test Title');
       expect(result?.preprintAuthors).toBe('Smith J');
-      expect(result?.preprintCategory).toBe('Neuroscience');
+      expect(result?.preprintCategory).toBe('neuroscience');
       expect(result?.preprintDate).toBe('2024-01-15');
       expect(result?.preprintAbstract).toBe('Abstract here.');
       expect(result?.preprintAuthorCorresponding).toBe('Smith J');
@@ -1368,6 +1410,34 @@ describe('BiorxivApiService', () => {
           createMockContext(),
         );
       const requestedUrl = () => (mockFetch.mock.calls[0] as string[])[0];
+
+      it('normalizes categories on a later publisher page without inventing blank categories', async () => {
+        initBiorxivApiService(MOCK_CONFIG, MOCK_STORAGE);
+        mockFetch.mockResolvedValue(
+          makeResponse({
+            messages: [{ status: 'ok', cursor: 100, count: 2, total: 102 }],
+            collection: [
+              { ...PUBLISHER_ELIFE_ROWS[0], preprint_category: '  Cell Biology ' },
+              { ...PUBLISHER_ELIFE_ROWS[1], preprint_category: '  ' },
+            ],
+          }),
+        );
+        const result = await runToolContract(biorxivListPublishedVersionsTool, {
+          start_date: '2026-10-01',
+          end_date: '2026-10-02',
+          publisher: '10.7554',
+          cursor: 100,
+        });
+        const { publications } = biorxivListPublishedVersionsTool.output.parse(
+          result.structuredContent,
+        );
+        expect(publications[0]?.preprintCategory).toBe('cell biology');
+        expect(publications[1]).not.toHaveProperty('preprintCategory');
+        expect(result.content[0]).toMatchObject({
+          text: expect.stringContaining('**Category:** cell biology'),
+        });
+        expect(requestedUrl()).toContain('/publisher/10.7554/2026-10-01/2026-10-02/100');
+      });
 
       it("requests bioRxiv's /publisher page and reads biorxiv_doi as the preprint DOI (live envelope)", async () => {
         mockFetch.mockResolvedValue(

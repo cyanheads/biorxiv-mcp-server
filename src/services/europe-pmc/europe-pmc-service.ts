@@ -37,10 +37,12 @@ import {
   retryWithinBudget,
   SERVER_VERSION,
 } from '@/services/shared.js';
-import type {
-  EuropePmcResult,
-  EuropePmcSearchResult,
-  RawEuropePmcSearchResponse,
+import {
+  DEFAULT_SEARCH_LIMIT,
+  type EuropePmcResult,
+  type EuropePmcSearchResult,
+  MAX_SEARCH_LIMIT,
+  type RawEuropePmcSearchResponse,
 } from './types.js';
 
 /**
@@ -165,8 +167,35 @@ function rethrowClassified(err: unknown): never {
   );
 }
 
+const punctuatedInitials = /^(?:\p{L}\.)+\p{L}?$/u;
+const fullGivenName = /^\p{L}[\p{L}\p{M}'’\u2010-\u2011-]+$/u;
+// The comma-and-dotted-initials form can delimit any surname. Other multiword
+// forms can be a group or include a full given name, so leave them intact.
+const singleSurname = /^\p{L}[\p{L}\p{M}.'’\u2010-\u2011-]*$/u;
+
+/** Normalize citation punctuation only in the given-name part of the AUTH phrase. */
+function normalizeAuthor(input: string): string {
+  // Embedded quotes would close the AUTH phrase.
+  const author = input.replace(/"/g, '').trim();
+  const comma = author.indexOf(',');
+  const separator = comma >= 0 ? comma : author.endsWith('.') ? author.search(/\s/u) : -1;
+  if (separator <= 0) return author;
+
+  const surname = author.slice(0, separator).trimEnd();
+  const givenNames = author.slice(separator + 1).trim();
+  const tokens = givenNames.split(/\s+/u);
+  const simpleSurname = singleSurname.test(surname);
+  if ((comma > 0 || simpleSurname) && tokens.every((token) => punctuatedInitials.test(token))) {
+    return `${surname} ${givenNames.replace(/[.\s]/gu, '')}`;
+  }
+  if (comma > 0 && simpleSurname && tokens.every((token) => fullGivenName.test(token))) {
+    return `${surname} ${givenNames}`;
+  }
+  return author;
+}
+
 export interface SearchOptions {
-  /** Optional author filter — ANDed into the query as an `AUTH:"…"` clause. */
+  /** Optional author filter, normalized from citation form before building the AUTH clause. */
   author?: string | undefined;
   /** Opaque EuropePMC cursor for the page to fetch. Defaults to '*' (first page). */
   cursorMark?: string | undefined;
@@ -220,7 +249,7 @@ export class EuropePmcService {
     deadline: CallDeadline,
     ctx: Context,
   ): Promise<EuropePmcSearchResult> {
-    const limit = Math.min(options.limit ?? 25, 100);
+    const limit = Math.min(options.limit ?? DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
 
     /**
      * Base terms: the free-text keyword query and/or an AUTH: author clause.
@@ -232,11 +261,8 @@ export class EuropePmcService {
     const terms: string[] = [];
     const keyword = options.query?.trim();
     if (keyword) terms.push(`(${keyword})`);
-    const author = options.author?.trim();
-    if (author) {
-      // Strip embedded double-quotes so a stray quote can't break the AUTH phrase.
-      terms.push(`AUTH:"${author.replace(/"/g, '')}"`);
-    }
+    const author = options.author && normalizeAuthor(options.author);
+    if (author) terms.push(`AUTH:"${author}"`);
     let q = terms.join(' AND ');
 
     // A blank bound is absent, never an open `[X TO ]` clause.
@@ -306,7 +332,8 @@ export class EuropePmcService {
               reason: EMPTY_BODY_REASON,
             });
           }
-          const results = (data.resultList.result ?? [])
+          const rows = data.resultList.result ?? [];
+          const results = rows
             .filter((raw): raw is typeof raw & { doi: string } => raw.doi != null)
             .map((raw): EuropePmcResult => {
               const title = normalizeUpstreamText(raw.title);
@@ -318,11 +345,13 @@ export class EuropePmcService {
               };
             });
           return {
-            hitCount: data.hitCount ?? results.length,
+            ...(author && { author }),
+            ...(data.hitCount !== undefined && { hitCount: data.hitCount }),
+            rowCount: rows.length,
             results,
-            // Absent on the last page (EuropePMC omits it) — omit here too so
-            // callers read "no field" as "no more pages".
-            ...(data.nextCursorMark && { nextCursorMark: data.nextCursorMark }),
+            // EuropePMC can return a cursor even after the last match on a short page.
+            ...(rows.length >= limit &&
+              data.nextCursorMark && { nextCursorMark: data.nextCursorMark }),
           };
         }),
         {

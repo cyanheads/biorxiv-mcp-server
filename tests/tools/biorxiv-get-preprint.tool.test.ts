@@ -133,6 +133,66 @@ describe('biorxivGetPreprintTool', () => {
     expect(result.failed).toHaveLength(1);
   });
 
+  it('keeps a hit and offers only conditional routes for an unfamiliar-prefix miss', async () => {
+    const doi = '10.99999/bibliographic-test';
+    mockGetDetails.mockResolvedValueOnce([REVISION]).mockResolvedValueOnce([]);
+    const result = await runToolContract(biorxivGetPreprintTool, {
+      dois: [REVISION.doi, doi],
+      server: 'biorxiv',
+    });
+    expect(mockGetDetails.mock.calls.map(([value, server]) => [value, server])).toEqual([
+      [REVISION.doi, 'biorxiv'],
+      [doi, 'biorxiv'],
+    ]);
+    const journal = 'If this is a journal article DOI, try biorxiv_get_published_version';
+    const retry = 'If this is a preprint DOI, retry with server="both"';
+    expect(result.structuredContent).toMatchObject({
+      preprints: [{ doi: REVISION.doi }],
+      failed: [
+        {
+          doi,
+          error: expect.stringContaining(journal),
+          reason: 'not_found',
+          retryable: false,
+        },
+      ],
+    });
+    expect(result.structuredContent).toMatchObject({
+      failed: [{ error: expect.stringContaining(retry) }],
+    });
+    expect(result.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining(journal),
+    });
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining(retry) });
+  });
+
+  it('gives scoped recovery for each all-miss batch subset and keeps invalid inputs separate', async () => {
+    const med = '10.1101/2020.03.04.20030395';
+    const other = '10.64898/2026.01.01.000001';
+    const journal = '10.1002/dvdy.102';
+    mockGetDetails.mockResolvedValue([]);
+    const result = await runToolContract(biorxivGetPreprintTool, {
+      dois: [med, journal, other, 'invalid'],
+      server: 'biorxiv',
+    });
+    const knownAdvice = `For ${med}, ${other} — Retry with server="both"`;
+    const journalAdvice = `For ${journal} — If this is a journal article DOI, try biorxiv_get_published_version`;
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        message: expect.stringContaining('Invalid DOI format: invalid'),
+        data: { reason: 'doi_not_found' },
+      },
+    });
+    expect(envelopeHint(result)).toContain(knownAdvice);
+    expect(envelopeHint(result)).toContain(journalAdvice);
+    expect(envelopeHint(result)).not.toContain('invalid');
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining(knownAdvice) });
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining(journalAdvice) });
+    expect(mockGetDetails).toHaveBeenCalledTimes(3);
+  });
+
   it('puts service-thrown errors into failed[] rather than aborting the batch', async () => {
     mockGetDetails.mockImplementation((doi: string) => {
       if (doi === '10.1101/2024.01.15.575123') return Promise.resolve([REVISION]);

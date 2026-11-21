@@ -57,7 +57,7 @@ function epmcSearchResult(
   results: EuropePmcResult[],
   nextCursorMark?: string,
 ): EuropePmcSearchResult {
-  return { hitCount, results, ...(nextCursorMark && { nextCursorMark }) };
+  return { hitCount, results, rowCount: results.length, ...(nextCursorMark && { nextCursorMark }) };
 }
 
 const REVISION: PreprintRevision = {
@@ -183,10 +183,10 @@ describe('biorxivSearchPreprintsTool', () => {
     expect(parse({ enriched: false })).not.toThrow();
   });
 
-  it('defaults server to "both" and limit to 25 when omitted', () => {
+  it('defaults server to "both" and limit to 10 when omitted', () => {
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'test' });
     expect(input.server).toBe('both');
-    expect(input.limit).toBe(25);
+    expect(input.limit).toBe(10);
   });
 
   // ── Author filter ─────────────────────────────────────────────────────────────
@@ -206,6 +206,7 @@ describe('biorxivSearchPreprintsTool', () => {
   });
 
   it('accepts an author-only search with no keyword query', async () => {
+    mockEpmcSearch.mockResolvedValue({ ...epmcSearchResult(1, [EPMC_RESULT]), author: 'Doudna J' });
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ author: 'Doudna J' });
     const result = await biorxivSearchPreprintsTool.handler(input, ctx);
@@ -221,6 +222,7 @@ describe('biorxivSearchPreprintsTool', () => {
   });
 
   it('echoes both query and author in queryEcho', async () => {
+    mockEpmcSearch.mockResolvedValue({ ...epmcSearchResult(1, [EPMC_RESULT]), author: 'Doudna J' });
     const ctx = createMockContext({ errors: biorxivSearchPreprintsTool.errors });
     const input = biorxivSearchPreprintsTool.input.parse({ query: 'CRISPR', author: 'Doudna J' });
     await biorxivSearchPreprintsTool.handler(input, ctx);
@@ -1513,7 +1515,10 @@ describe('biorxivSearchPreprintsTool', () => {
         'Query: crispr cas9 · author=Smith J · server=biorxiv · cursor=AoIIP+4XBX0oNTc1MTIz · limit=10',
       ],
     ])('%s, while queryEcho keeps them raw', async (_label, args, line) => {
-      mockEpmcSearch.mockResolvedValue(epmcSearchResult(1, [EPMC_RESULT]));
+      mockEpmcSearch.mockResolvedValue({
+        ...epmcSearchResult(1, [EPMC_RESULT]),
+        author: args.author,
+      });
       const { structured, lines } = await call(args);
 
       expect(lines).toContain(line);
@@ -1525,7 +1530,7 @@ describe('biorxivSearchPreprintsTool', () => {
         'escapes the query and author in the notice for a search that matched nothing',
         MARKDOWN.query,
         MARKDOWN.author,
-        '> No preprints matched "\\*x\\* \\[a\\](b)" and author "\\- O\\*Neil". Try broader search terms, a different author spelling, or a wider date range.',
+        '> No preprints matched "\\*x\\* \\[a\\](b)" and author "- O\\*Neil". Try broader search terms, a different author spelling, or a wider date range.',
       ],
       [
         'renders a plain query and author in that notice unchanged',
@@ -1534,9 +1539,12 @@ describe('biorxivSearchPreprintsTool', () => {
         '> No preprints matched "crispr cas9" and author "Smith J". Try broader search terms, a different author spelling, or a wider date range.',
       ],
     ])('%s', async (_label, query, author, line) => {
-      mockEpmcSearch.mockResolvedValue(epmcSearchResult(0, []));
-      const { lines } = await call({ query, author });
+      mockEpmcSearch.mockResolvedValue({ ...epmcSearchResult(0, []), author });
+      const { structured, lines } = await call({ query, author });
 
+      expect(structured.notice).toBe(
+        `No preprints matched "${query}" and author "${author}". Try broader search terms, a different author spelling, or a wider date range.`,
+      );
       expect(lines).toContain(line);
     });
   });

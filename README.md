@@ -52,6 +52,7 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 - Each preprint returns its full revision history in `revisions[]` — title, authors, category, license, `awards`, `jatsxmlUrl`, `publishedJournalDoi` once accepted, and the `server` it was found on (`biorxiv` or `medrxiv`, ready to pass back as `server`). Funder names are omitted because the upstream API misattributes them
 - The abstract sits on the latest revision only: the upstream API keeps one abstract per preprint. An earlier revision's own abstract is on its article page, through `biorxiv_get_fulltext` with `version`
 - A DOI that fails lands in `failed[]` with a `reason` (`not_found`, `invalid_doi_format`, `upstream_unavailable`, `rate_limited`) and a `retryable` flag; `not_found` only when every attempted server answered
+- After a confirmed miss, try `server: "both"` for a preprint DOI searched on only one server. If you have a journal article DOI outside the known preprint prefixes (`10.1101/`, `10.64898/`), try `biorxiv_get_published_version`
 
 ---
 
@@ -66,9 +67,12 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 
 ### `biorxiv_search_preprints` <sub>tool</sub>
 
-- Takes `query` and/or `author`, optional `date_from`/`date_to` and `server` (default `both`); up to 100 results per page (default 25; a larger `limit` returns 100 with a notice), paged with `cursor_mark`
+- Takes `query` and/or `author`, optional `date_from`/`date_to` and `server` (default `both`). It requests 10 rows by default and caps a valid `limit` above 100 with a notice
+- The `author` filter normalizes citation forms such as `Bucher, G.` to `Bucher G`, `Doudna, J. A.` to `Doudna JA`, and `Doudna, Jennifer` to `Doudna Jennifer`. `queryEcho.author` shows the spelling used for the search
+- Pass `nextCursorMark` back as `cursor_mark` with the same filters. A short upstream page has no continuation. A full upstream page may carry a cursor even if some rows had no DOI and were dropped
 - EuropePMC ranks the matches (it indexes new preprints within 1–2 days of posting) and the bioRxiv/medRxiv API enriches them with the same fields as `biorxiv_get_preprint`; a record left with EuropePMC metadata only carries `enriched: false` and an `enrichment_error` (`service_error`, `rate_limited`, `not_found`), with `partial_results` set
-- Abstracts are included by default; `include_abstract: false` drops them for a response about a third the size
+- Abstracts are included by default when available. Set `include_abstract: false` to omit them
+- When EuropePMC confirms no matches, the notice can point out a clear syntax defect in `query`, such as an unmatched parenthesis or a missing Boolean operand
 
 ---
 
@@ -94,6 +98,7 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 - Takes a DOI, `server` (default `both`), and an optional `version` (or a `vN` suffix; the two must agree, and a version the preprint lacks raises `version_not_found`); returns Markdown extracted from the rendered HTML article page, naming the answering `server`
 - Table cells are not on the page: each table keeps its caption, and `omittedTables` names it with the URL that serves its cells
 - Pages via `offset`/`limit` characters (default 20,000), reporting `totalChars`, `remainingChars`, `hasMore`, and `wordCount`; PDF-only preprints and blocked pages raise `fulltext_unavailable`, routing to `biorxiv_get_preprint`
+- A confirmed DOI miss gives the same next steps as `biorxiv_get_preprint`
 
 ---
 
@@ -101,6 +106,7 @@ bioRxiv and medRxiv preprints, metadata and full text. Search by keyword and aut
 
 - No API call — a static list of 25 bioRxiv and 51 medRxiv categories, limited to the ones the listing API filters on
 - Use it to pick a `category` for `biorxiv_list_recent`
+- Preprint and crosswalk records trim and lowercase `category` and `preprintCategory` values. Blank values are omitted
 
 ## Features
 
@@ -177,7 +183,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 

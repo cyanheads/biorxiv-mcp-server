@@ -49,7 +49,12 @@ import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getBiorxivApiService } from '@/services/biorxiv/biorxiv-service.js';
 import type { BiorxivServer, PreprintRevision } from '@/services/biorxiv/types.js';
 import { getEuropePmcService } from '@/services/europe-pmc/europe-pmc-service.js';
-import type { EuropePmcSearchResult } from '@/services/europe-pmc/types.js';
+import { querySyntaxHint } from '@/services/europe-pmc/query-syntax-hint.js';
+import {
+  DEFAULT_SEARCH_LIMIT,
+  type EuropePmcSearchResult,
+  MAX_SEARCH_LIMIT,
+} from '@/services/europe-pmc/types.js';
 import {
   BIORXIV_DOI_PREFIXES,
   describeWait,
@@ -59,9 +64,6 @@ import {
   isValidCalendarDate,
   startCallDeadline,
 } from '@/services/shared.js';
-
-/** Ranked results one call reads — the bound on its enrichment fan-out and abstract lookup. */
-const RESULTS_PER_CALL = 100;
 
 /** A blank from a form client is "unset", never a value to validate. */
 const blankAsUnset = <T extends z.ZodType>(schema: T) =>
@@ -137,8 +139,7 @@ function formatResult(p: EnrichedPreprint): string {
 
 export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
   title: 'Search Preprints by Keyword',
-  description:
-    'Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. Abstracts are included by default; include_abstract: false omits them from every result for a response about a third the size, and biorxiv_get_preprint returns the abstract for up to 10 DOIs per call. A EuropePMC rate limit (HTTP 429) fails the call with a retryable rate_limited error carrying the wait in seconds — a rate-limited metadata enrichment does not, and instead marks the affected record enrichment_error: "rate_limited".',
+  description: `Search preprints by keyword and/or author using EuropePMC for relevance ranking, then enrich matching DOIs with full bioRxiv/medRxiv metadata. Provide a keyword query, an author name, or both — author maps to an EuropePMC AUTH: field query and is ANDed with the keyword query. Covers both servers by default. EuropePMC indexes new preprints within 1–2 days of posting; for preprints posted within the last day, prefer biorxiv_list_recent. The default page requests ${DEFAULT_SEARCH_LIMIT} results with abstracts. Set include_abstract: false to omit them, or use biorxiv_get_preprint for abstracts for up to 10 DOIs per call. A EuropePMC rate limit (HTTP 429) fails the call with a retryable rate_limited error carrying the wait in seconds — a rate-limited metadata enrichment does not, and instead marks the affected record enrichment_error: "rate_limited".`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   // biorxiv_list_recent spells its date bounds start_date / end_date.
@@ -150,13 +151,13 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         .string()
         .optional()
         .describe(
-          'Keyword search query. Optional when author is provided — supply at least one of query or author.',
+          'Keyword search query in EuropePMC syntax. Optional when author is provided — supply at least one of query or author. A zero-hit response may include a hint for a syntax defect.',
         ),
       author: z
         .string()
         .optional()
         .describe(
-          'Author name to filter by, mapped to an EuropePMC AUTH:"…" field query and ANDed with the keyword query. Optional when query is provided (e.g. "Jennifer Doudna").',
+          'Author name to filter by, mapped to a EuropePMC AUTH:"…" field query and ANDed with the keyword query. Citation forms such as "Doudna, J. A." and "Doudna, Jennifer" are normalized. Plain forms such as "Jennifer Doudna" and "Doudna JA" are accepted. Optional when query is provided.',
         ),
       server: z
         .enum(['biorxiv', 'medrxiv', 'both'])
@@ -181,9 +182,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
         .int()
         .min(1)
         .max(1000)
-        .default(25)
+        .default(DEFAULT_SEARCH_LIMIT)
         .describe(
-          'Maximum results to return. Defaults to 25. Up to 100 per call: a larger value returns the first 100 and says so, and nextCursorMark continues the ranked list.',
+          `Maximum results to return. Defaults to ${DEFAULT_SEARCH_LIMIT}. Up to ${MAX_SEARCH_LIMIT} per call: a larger value requests ${MAX_SEARCH_LIMIT} and says so, and nextCursorMark continues the ranked list.`,
         ),
       include_abstract: z
         .boolean()
@@ -283,7 +284,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .string()
       .optional()
       .describe(
-        'Opaque token for the next page of ranked results. Present only when more results exist beyond this page; pass it back as cursor_mark. Absent on the last page.',
+        'Opaque token to continue the ranked list. Omitted on a short upstream page. A full page may carry a token even at the end; pass it back as cursor_mark.',
       ),
     queryEcho: z
       .object({
@@ -309,7 +310,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .string()
       .optional()
       .describe(
-        'Present when zero results are returned: on a cursor_mark page past the last match, says the list is exhausted; otherwise echoes the query and suggests how to broaden it. Also present when limit was above the 100-result cap per call, and when abstracts for results shown with EuropePMC metadata only could not be retrieved, which leaves those results without one.',
+        'Explains an empty page, including exhausted cursors, rows without DOIs, query syntax hints, or suggestions to broaden a search. Also covers limits above the per-call cap and abstracts unavailable for results shown with EuropePMC metadata only.',
       ),
     truncated: z
       .boolean()
@@ -324,11 +325,17 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       .describe('Results one call returns at most (100). Set with truncated.'),
   },
 
-  // content[] trailer rendering for structured enrichment fields. Scalar/notice kinds
-  // (totalCount, notice) render automatically. queryEcho is a structured object that
-  // needs a render function to produce a single compact line. A render result is
-  // live Markdown, so the caller-supplied values in it are escaped here.
+  // Keep query strings literal in structuredContent and escape at the Markdown boundary.
   enrichmentTrailer: {
+    notice: {
+      render: (notice) => {
+        if (notice === undefined) return '';
+        return escapeMarkdownInline(notice)
+          .split('\n')
+          .map((line) => (line === '' ? '>' : `> ${line}`))
+          .join('\n');
+      },
+    },
     queryEcho: {
       render: (echo: {
         query?: string;
@@ -421,7 +428,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     const biorxiv = getBiorxivApiService();
     // One budget for the search, enrichment, and abstract lookup, which run one after another.
     const deadline = startCallDeadline();
-    const limit = Math.min(input.limit, RESULTS_PER_CALL);
+    const limit = Math.min(input.limit, MAX_SEARCH_LIMIT);
 
     // Step 1: EuropePMC relevance search
     let epmcSearchResult: EuropePmcSearchResult;
@@ -474,13 +481,20 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
       });
     }
 
-    const { hitCount, results: epmcResults, nextCursorMark } = epmcSearchResult;
+    const {
+      author,
+      hitCount: upstreamHitCount,
+      results: epmcResults,
+      nextCursorMark,
+      rowCount,
+    } = epmcSearchResult;
+    const hitCount = upstreamHitCount ?? epmcResults.length;
     // The page token as the service sent it — blank reads as the first page.
     const cursor = input.cursor_mark?.trim();
 
     const queryEcho = {
       ...(input.query && { query: input.query }),
-      ...(input.author && { author: input.author }),
+      ...(author && { author }),
       server: input.server,
       ...(input.date_from && { date_from: input.date_from }),
       ...(input.date_to && { date_to: input.date_to }),
@@ -491,19 +505,27 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     if (epmcResults.length === 0) {
       ctx.enrich.total(hitCount);
       ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
-      // EuropePMC still hands out a nextCursorMark on the page holding the last
-      // match, so following it lands here: an empty page past the end of a query
-      // that does have matches. That is the end of the list, not a failed search.
+      if (rowCount > 0) {
+        ctx.enrich.notice(
+          `EuropePMC returned rows on this page, but none had a DOI.${nextCursorMark ? ' Pass nextCursorMark as cursor_mark to continue the ranked list.' : ''}`,
+        );
+        return { preprints: [], partial_results: false };
+      }
       const pastEnd = !!cursor && cursor !== '*' && hitCount > 0;
+      const syntaxHint =
+        upstreamHitCount === 0 && input.query ? querySyntaxHint(input.query) : undefined;
+      const guidance =
+        syntaxHint ??
+        `Try broader search terms${author ? ', a different author spelling,' : ''} or a wider date range.`;
       const criteria =
         [
-          ...(input.query ? [`"${escapeMarkdownInline(input.query)}"`] : []),
-          ...(input.author ? [`author "${escapeMarkdownInline(input.author)}"`] : []),
+          ...(input.query ? [`"${input.query}"`] : []),
+          ...(author ? [`author "${author}"`] : []),
         ].join(' and ') || 'the given criteria';
       ctx.enrich.notice(
         pastEnd
           ? `No results past this cursor_mark — all ${hitCount} matches were on earlier pages. Omit cursor_mark to start again from the first page.`
-          : `No preprints matched ${criteria}${input.date_from || input.date_to ? ` in the specified date range` : ''}. Try broader search terms${input.author ? ', a different author spelling,' : ''} or a wider date range.`,
+          : `No preprints matched ${criteria}${input.date_from || input.date_to ? ' in the specified date range' : ''}. ${guidance}`,
       );
       return {
         preprints: [],
@@ -512,8 +534,6 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     }
 
     // Step 2: Enrich each DOI via bioRxiv API in parallel
-    let hasPartial = false;
-
     const enriched = await Promise.all(
       epmcResults.map(async (epResult): Promise<EnrichedPreprint> => {
         const doi = epResult.doi;
@@ -562,7 +582,6 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
         const latest = revisions.at(-1);
         if (!latest) {
-          hasPartial = true;
           // A rate limit still degrades to EuropePMC metadata like every other
           // enrichment failure — it is only labelled apart, so the caller knows a
           // wait (not a different query) is what makes the retry succeed.
@@ -611,9 +630,9 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
     // ctx.enrich.notice is last-wins, so every qualification is collected here
     // and flushed as one string.
     const notices: string[] = [];
-    if (input.limit > RESULTS_PER_CALL) {
+    if (input.limit > MAX_SEARCH_LIMIT) {
       notices.push(
-        `A limit of ${input.limit} is above the ${RESULTS_PER_CALL}-result cap per call, so this page holds up to ${RESULTS_PER_CALL} results${nextCursorMark ? ' — pass nextCursorMark as cursor_mark to continue the ranked list' : ''}.`,
+        `A limit of ${input.limit} is above the ${MAX_SEARCH_LIMIT}-result cap per call, so this page holds up to ${MAX_SEARCH_LIMIT} results${nextCursorMark ? ' — pass nextCursorMark as cursor_mark to continue the ranked list' : ''}.`,
       );
     }
 
@@ -649,11 +668,11 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
     ctx.enrich.total(hitCount);
     ctx.enrich({ queryEcho, ...(nextCursorMark && { nextCursorMark }) });
-    if (input.limit > RESULTS_PER_CALL && enriched.length >= RESULTS_PER_CALL) {
+    if (input.limit > MAX_SEARCH_LIMIT && enriched.length >= MAX_SEARCH_LIMIT) {
       // truncated() writes the notice too, so it carries the composed string.
       ctx.enrich.truncated({
         shown: enriched.length,
-        cap: RESULTS_PER_CALL,
+        cap: MAX_SEARCH_LIMIT,
         guidance: notices.join(' '),
       });
     } else if (notices.length > 0) {
@@ -662,7 +681,7 @@ export const biorxivSearchPreprintsTool = tool('biorxiv_search_preprints', {
 
     return {
       preprints: enriched,
-      partial_results: hasPartial,
+      partial_results: fallback.length > 0,
     };
   },
 

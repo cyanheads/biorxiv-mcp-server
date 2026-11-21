@@ -4,7 +4,7 @@ description: Search syntax, identifier origins, and counting gates for the biorx
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
@@ -18,7 +18,7 @@ No citation counts and no journal-article content beyond the crosswalk record. P
 - **DOI prefix is an era, not a server.** `10.1101/` is the older prefix and `10.64898/` the newer; bioRxiv and medRxiv both issue both, and a preprint keeps its DOI through every revision (`10.1101/2025.11.24.690249` was revised as v2 under `10.1101/` long after new submissions moved to `10.64898/`). Leave `server` at `"both"` for DOI lookups; the response names the server that holds it.
 - **The date inside a DOI is the submission date, not the posting date.** `10.1101/2024.01.03.573434` was posted 2024-01-04; `10.1101/2025.05.22.653117` on 2025-05-27. Read `date` (or `preprintDate` on crosswalk rows) for when a preprint appeared. Older bioRxiv DOIs are plain serials with no date (`10.1101/049882`).
 - **Versions.** Each revision has its own title, authors, and date; `biorxiv_get_preprint` lists them. Only the latest revision carries an abstract — the API keeps one per preprint. An earlier revision's own abstract and text come from `biorxiv_get_fulltext` with `version`: `10.1101/049882` v1 opens with a different abstract than the one `biorxiv_get_preprint` returns.
-- **Category strings** come from `biorxiv_list_categories`, or from any record's `category` field, which is accepted as input as written.
+- **Category strings** come from `biorxiv_list_categories` or from a record's `category` or `preprintCategory` field. Record values are trimmed and lowercased. Blank values are omitted.
 - **Funder** is a ROR ID (`https://ror.org/<id>`), looked up by name at ror.org. A Crossref Funder Registry ID (`100000002`) is not one and is rejected before any request.
 - **Publisher** is the DOI prefix of a journal publisher, the part before the slash, taken from any article DOI of the journal you care about. It names the whole publisher, not one journal: `10.1038` returns rows from many Springer Nature journals at once (`s41467-`, `s41598-`, `s41593-`, and more DOI stems on one two-day page).
 
@@ -30,7 +30,9 @@ No citation counts and no journal-article content beyond the crosswalk record. P
 
 - **Spell out synonyms yourself.** Synonym expansion is off, so `"heart attack"` misses the far larger set written `"myocardial infarction"`. Search `"heart attack" OR "myocardial infarction"`.
 - **Scope by field when precision matters.** A bare term or phrase matches more than the title and abstract. `TITLE_ABS:"…"`, `TITLE:"…"`, `ABSTRACT:"…"`, `AUTH:"…"`, and `AFF:"…"` all work inside `query`; `TITLE_ABS:"base editing"` and `TITLE:"base editing"` each match fewer records than the bare phrase.
-- **Author names.** `author` becomes `AUTH:"…"`. A full name and `Surname Initial` match the same records (`Jennifer Doudna`, `Doudna J`); adding a middle initial (`Doudna JA`) drops records indexed without it. The surname alone is broadest. Confirm identity from co-authors and institution before attributing a list to one person.
+- **Author names.** `author` becomes `AUTH:"…"`. Citation forms such as `Bucher, G.`, `Doudna, J.A.`, and `Doudna, Jennifer` become `Bucher G`, `Doudna JA`, and `Doudna Jennifer`. Use `queryEcho.author` to see the spelling that selected the results. In a reported EuropePMC snapshot, `Doudna JA` matched fewer records than `Doudna J`. Start with surname and first initial and confirm identity from co-authors and institution.
+- **Search defaults and continuation.** Search requests 10 rows with abstracts when available. Follow `nextCursorMark` with the same filters, even when a page has few usable records. A short upstream page ends the walk.
+- **Query syntax hints.** When EuropePMC confirms zero matches, look for a notice naming a clear defect and how to repair it before broadening the search.
 - **`server` scopes the search itself**, not only enrichment: `"medrxiv"` returns medRxiv preprints only.
 - **The date window is first posting; the record shows the latest revision.** `date_from` / `date_to` filter on when v1 appeared, while each result's `date` and `version` are the latest revision's: a January 2024 window returned `10.1101/2024.01.29.577624` dated 2024-12-15, v2. Never re-filter search results on `date` to enforce the window.
 
@@ -55,7 +57,7 @@ No citation counts and no journal-article content beyond the crosswalk record. P
 
 **Find a person's preprints.** `author` (surname plus initial, then surname alone if the list looks short) with `server` when the field is clear; add a topic `query` to separate namesakes.
 
-**Has this preprint been published, and where?** `biorxiv_get_preprint` shows `publishedJournalDoi`; `biorxiv_get_published_version` adds the journal name and date. Holding the journal article instead, pass its DOI to `biorxiv_get_published_version` to find the preprint. A not-found answer is bioRxiv's record only, per the crosswalk gate.
+**Has this preprint been published, and where?** `biorxiv_get_preprint` shows `publishedJournalDoi`; `biorxiv_get_published_version` adds the journal name and date. If you have a journal article DOI, pass it to `biorxiv_get_published_version` to find the preprint. If a preprint DOI misses on one server, retry with `server: "both"`. A not-found answer reflects the crosswalk's coverage.
 
 **What a journal or publisher took up in a period.** `biorxiv_list_published_versions` filters on the journal's publication date, so the preprints can be years older.
 

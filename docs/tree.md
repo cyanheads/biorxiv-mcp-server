@@ -1,6 +1,6 @@
 # biorxiv-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 12:31:53
+Generated on: 2026-11-21 17:45:43
 
 ```text
 biorxiv-mcp-server/
@@ -170,6 +170,7 @@ biorxiv-mcp-server/
 │   │   │   └── biorxiv-fulltext-service.ts
 │   │   ├── europe-pmc/
 │   │   │   ├── europe-pmc-service.ts
+│   │   │   ├── query-syntax-hint.ts
 │   │   │   └── types.ts
 │   │   ├── shared.ts
 │   │   └── upstream-text-tables.ts
@@ -207,7 +208,8 @@ biorxiv-mcp-server/
 │   │   │   └── biorxiv-fulltext-service.test.ts
 │   │   ├── europe-pmc/
 │   │   │   ├── europe-pmc-service.empty-body.test.ts
-│   │   │   └── europe-pmc-service.test.ts
+│   │   │   ├── europe-pmc-service.test.ts
+│   │   │   └── query-syntax-hint.test.ts
 │   │   └── shared.test.ts
 │   └── tools/
 │       ├── biorxiv-get-fulltext.tool.test.ts

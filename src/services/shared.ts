@@ -55,8 +55,7 @@ export function isValidCalendarDate(dateStr: string): boolean {
  * The DOI prefixes bioRxiv and medRxiv issue preprint DOIs under — both servers
  * share both, so a prefix never names the server. Cold Spring Harbor
  * Laboratory Press also registers its journal articles under `10.1101/`
- * (`10.1101/gr.…`, `gad.…`, `lm.…`), so a DOI here is a preprint DOI or one of
- * those; any other DOI is a journal article's.
+ * (`10.1101/gr.…`, `gad.…`, `lm.…`). Prefixes alone cannot identify what a DOI names.
  */
 export const BIORXIV_DOI_PREFIXES = ['10.1101/', '10.64898/'] as const;
 
@@ -568,8 +567,20 @@ export function describeWait(seconds: number | undefined): string {
  */
 export function notFoundHint(servers: readonly string[], hint: string): string {
   return servers.length === 1
-    ? `Retry with server="both" — this call checked only ${servers[0]}. ${hint}`
+    ? `Retry with server="both" — this call checked only ${servers[0]}.${hint ? ` ${hint}` : ''}`
     : hint;
+}
+
+/** Recovery after an empty details lookup. A DOI prefix alone cannot establish journal affiliation. */
+export function detailsNotFoundHint(doi: string, servers: readonly string[], hint: string): string {
+  if (BIORXIV_DOI_PREFIXES.some((prefix) => doi.startsWith(prefix))) {
+    return notFoundHint(servers, hint);
+  }
+
+  const crosswalk = 'If this is a journal article DOI, try biorxiv_get_published_version.';
+  return servers.length === 1
+    ? `${crosswalk} If this is a preprint DOI, retry with server="both" — this call checked only ${servers[0]}.`
+    : crosswalk;
 }
 
 /**
